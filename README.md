@@ -1,8 +1,14 @@
+<div align="center">
+
+![Axiom Logo](assets/logo.svg)
+
 # Axiom 🚀
 
 **The first Wayland compositor combining niri's scrollable workspace innovation with Hyprland's visual effects system.**
 
 > *Where productivity meets beauty*
+
+</div>
 
 ## ✨ Vision
 
