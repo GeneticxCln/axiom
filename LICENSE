@@ -1,0 +1,32 @@
+GNU GENERAL PUBLIC LICENSE
+Version 3, 29 June 2007
+
+Axiom - Hybrid Wayland Compositor
+Copyright (C) 2024 Axiom Contributors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+Additional permissions under GNU GPL version 3 section 7:
+
+If you modify this Program, or any covered work, by linking or combining
+it with other code, this Additional Permission applies to the whole 
+combination.
+
+This program incorporates concepts from:
+- niri (https://github.com/YaLTeR/niri) - GPLv3
+- Hyprland (https://github.com/hyprwm/Hyprland) - BSD-3-Clause
+- smithay (https://github.com/Smithay/smithay) - MIT
+- wlroots (https://gitlab.freedesktop.org/wlroots/wlroots) - MIT
+
+All original Axiom code is licensed under GPLv3.

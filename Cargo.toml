@@ -1,0 +1,63 @@
+[package]
+name = "axiom"
+version = "0.1.0"
+edition = "2021"
+authors = ["Axiom Contributors"]
+description = "A hybrid Wayland compositor combining scrollable workspaces with beautiful visual effects"
+repository = "https://github.com/axiom-wm/axiom"
+license = "GPL-3.0"
+keywords = ["wayland", "compositor", "window-manager", "tiling", "effects"]
+categories = ["gui"]
+
+[dependencies]
+# Core Wayland/wlroots bindings
+wlroots-rs = { version = "0.16", optional = true }  # Will need proper wlroots bindings
+wayland-server = "0.31"
+wayland-protocols = { version = "0.31", features = ["server", "staging"] }
+
+# Graphics and rendering
+smithay = { version = "0.3", features = ["backend_drm", "backend_libinput", "backend_winit", "renderer_gl", "xwayland"] }
+glium = "0.34"
+cgmath = "0.18"
+
+# Configuration and serialization
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+clap = { version = "4.4", features = ["derive"] }
+
+# Async runtime and utilities  
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+log = "0.4"
+env_logger = "0.10"
+
+# Input handling
+xkbcommon = "0.7"
+input = { version = "0.8", features = ["libinput"] }
+
+# Optional features for different backends
+[features]
+default = ["smithay-backend"]
+smithay-backend = ["smithay"]
+wlroots-backend = ["wlroots-rs"]
+
+# Development dependencies
+[dev-dependencies]
+criterion = "0.5"
+
+# Build optimizations
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1  # Faster compilation during development
+
+# Workspace configuration for future modules
+[workspace]
+members = [
+    ".",
+    # Future: separate crates for effects, workspace management, etc.
+]

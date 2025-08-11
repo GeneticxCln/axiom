@@ -1,0 +1,70 @@
+# Axiom Configuration File
+# The hybrid Wayland compositor combining scrollable workspaces with visual effects
+
+[workspace]
+scroll_speed = 1.0
+infinite_scroll = true
+auto_scroll = true
+workspace_width = 1920
+gaps = 10
+smooth_scrolling = true
+
+[effects]
+enabled = true
+
+[effects.animations]
+enabled = true
+duration = 300
+curve = "ease-out"
+workspace_transition = 250
+window_animation = 200
+
+[effects.blur]
+enabled = true
+radius = 10
+intensity = 0.8
+window_backgrounds = true
+
+[effects.rounded_corners]
+enabled = true
+radius = 8
+antialiasing = 2
+
+[effects.shadows]
+enabled = true
+size = 20
+blur_radius = 15
+opacity = 0.6
+color = "#000000"
+
+[window]
+placement = "smart"
+focus_follows_mouse = false
+border_width = 2
+active_border_color = "#7C3AED"
+inactive_border_color = "#374151"
+
+[input]
+keyboard_repeat_delay = 600
+keyboard_repeat_rate = 25
+mouse_accel = 0.0
+touchpad_tap = true
+natural_scrolling = true
+
+[bindings]
+scroll_left = "Super_L+Left"
+scroll_right = "Super_L+Right"
+move_window_left = "Super_L+Shift+Left"
+move_window_right = "Super_L+Shift+Right"
+close_window = "Super_L+q"
+launch_terminal = "Super_L+Return"
+launch_launcher = "Super_L+d"
+toggle_effects = "Super_L+e"
+
+[xwayland]
+enabled = true
+
+[general]
+debug = false
+max_fps = 60
+vsync = true
