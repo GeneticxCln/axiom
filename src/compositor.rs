@@ -97,20 +97,8 @@ impl AxiomCompositor {
                     self.shutdown().await?;
                 }
                 
-                // Process compositor events
-                result = self.process_events() => {
-                    if let Err(e) = result {
-                        warn!("⚠️ Error processing events: {}", e);
-                        // Continue running unless it's a critical error
-                    }
-                }
-                
-                // Render frame
-                result = self.render_frame() => {
-                    if let Err(e) = result {
-                        warn!("⚠️ Error rendering frame: {}", e);
-                    }
-                }
+                // Combined event processing and rendering
+                _ = self.tick() => {}
             }
         }
         
@@ -189,5 +177,20 @@ impl AxiomCompositor {
     /// Check if compositor is running in windowed mode
     pub fn is_windowed(&self) -> bool {
         self.windowed
+    }
+    
+    /// Single tick of the compositor (event processing + rendering)
+    async fn tick(&mut self) -> Result<()> {
+        // Process events
+        if let Err(e) = self.process_events().await {
+            warn!("⚠️ Error processing events: {}", e);
+        }
+        
+        // Render frame
+        if let Err(e) = self.render_frame().await {
+            warn!("⚠️ Error rendering frame: {}", e);
+        }
+        
+        Ok(())
     }
 }

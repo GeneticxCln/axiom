@@ -10,16 +10,6 @@ keywords = ["wayland", "compositor", "window-manager", "tiling", "effects"]
 categories = ["gui"]
 
 [dependencies]
-# Core Wayland/wlroots bindings
-wlroots-rs = { version = "0.16", optional = true }  # Will need proper wlroots bindings
-wayland-server = "0.31"
-wayland-protocols = { version = "0.31", features = ["server", "staging"] }
-
-# Graphics and rendering
-smithay = { version = "0.3", features = ["backend_drm", "backend_libinput", "backend_winit", "renderer_gl", "xwayland"] }
-glium = "0.34"
-cgmath = "0.18"
-
 # Configuration and serialization
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
@@ -32,15 +22,19 @@ thiserror = "1.0"
 log = "0.4"
 env_logger = "0.10"
 
-# Input handling
-xkbcommon = "0.7"
-input = { version = "0.8", features = ["libinput"] }
+# TODO: Add Wayland/compositor dependencies when ready
+# wayland-server = "0.31"
+# wayland-protocols = { version = "0.31", features = ["server", "staging"] }
+# smithay = { version = "0.3", features = ["backend_drm", "backend_libinput", "backend_winit", "renderer_gl", "xwayland"] }
+# glium = "0.34"
+# cgmath = "0.18"
+# xkbcommon = "0.7"
 
-# Optional features for different backends
-[features]
-default = ["smithay-backend"]
-smithay-backend = ["smithay"]
-wlroots-backend = ["wlroots-rs"]
+# TODO: Add features when compositor dependencies are ready
+# [features]
+# default = ["smithay-backend"]
+# smithay-backend = ["smithay"]
+# wlroots-backend = ["wlroots-rs"]
 
 # Development dependencies
 [dev-dependencies]
