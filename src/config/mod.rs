@@ -155,6 +155,12 @@ pub struct WindowConfig {
     
     /// Inactive border color  
     pub inactive_border_color: String,
+    
+    /// Gap between windows (pixels)
+    pub gap: u32,
+    
+    /// Default layout algorithm ("horizontal", "vertical")
+    pub default_layout: String,
 }
 
 /// Input configuration
@@ -319,6 +325,8 @@ impl Default for WindowConfig {
             border_width: 2,
             active_border_color: "#7C3AED".to_string(),   // Purple
             inactive_border_color: "#374151".to_string(), // Gray
+            gap: 10,
+            default_layout: "horizontal".to_string(),
         }
     }
 }

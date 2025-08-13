@@ -3,21 +3,21 @@
 //! This module contains the main AxiomCompositor struct and event loop.
 //! It coordinates between all subsystems: workspaces, effects, input, etc.
 //!
-//! Note: This implementation is simplified and doesn't use Smithay directly
-//! in the current version due to API compatibility issues. Future versions
-//! will integrate more deeply with the Smithay compositor framework.
+//! This implementation uses Smithay for proper Wayland compositor functionality
+//! with window management, surface handling, and protocol support.
 
 use anyhow::{Result, Context};
-use log::{info, debug, warn};
+use log::{info, debug, warn, error};
 use tokio::signal;
 
 use crate::config::AxiomConfig;
 use crate::workspace::ScrollableWorkspaces;
 use crate::effects::EffectsEngine;
-use crate::window::WindowManager;
+use crate::window::{WindowManager, AxiomWindow};
 use crate::input::InputManager;
 use crate::xwayland::XWaylandManager;
 use crate::ipc::AxiomIPCServer;
+use crate::smithay_backend::AxiomSmithayBackend;
 
 /// Main compositor struct that orchestrates all subsystems
 pub struct AxiomCompositor {

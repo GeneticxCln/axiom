@@ -54,25 +54,34 @@ The Axiom compositor is designed to work seamlessly with your existing Lazy UI s
 - **Health Monitoring**: Responds to health checks and system status requests
 - **Event Reporting**: Sends user interaction events and state changes to Lazy UI
 
-## 🎯 Next Development Steps
+## 🔄 Phase 2: Current Development Status
 
-### 1. Smithay Integration (Short-term)
-- Upgrade to newer Smithay version for better API compatibility
-- Implement actual Wayland protocol handling
-- Add surface management and client communication
-- Implement basic window rendering pipeline
+### 🔄 Currently In Progress
+- **Smithay Integration**: Implementing proper Wayland compositor framework integration
+- **Window Management**: Enhanced AxiomWindow wrapper with properties and lifecycle management
+- **Protocol Support**: XDG Shell implementation for proper window handling
+- **Architecture Refactoring**: Moving from placeholder to real Wayland compositor functionality
 
-### 2. Core Compositor Features (Medium-term)
-- **Window Management**: Implement window creation, positioning, resizing, focusing
-- **Input Handling**: Add keyboard shortcuts, mouse interactions, gesture support
+### 🎯 Next Development Steps
+
+### 1. Smithay Integration (Current Phase)
+- ✅ Enhanced window management structures (AxiomWindow, WindowProperties)
+- 🔄 Smithay compositor implementation with proper protocol handlers
+- 🔄 XDG Shell integration for window lifecycle management
+- 🔴 Surface management and client communication
+- 🔴 Basic window rendering pipeline with Winit backend
+
+### 2. Core Compositor Features (Next)
+- **Input Handling**: Implement keyboard shortcuts, mouse interactions, gesture support
 - **Multi-monitor**: Support for multiple displays and output management
-- **Basic Rendering**: Implement surface composition and basic window rendering
+- **Layout Engine**: Connect window manager with workspace positioning
+- **Rendering Pipeline**: Proper surface composition and damage tracking
 
-### 3. Advanced Features (Long-term)
+### 3. Advanced Features (Future)
 - **Scrollable Workspaces**: Implement niri-style horizontal scrolling workspaces
 - **Visual Effects**: Add Hyprland-style animations, blur effects, shadows
 - **XWayland Support**: Full X11 application compatibility
-- **Advanced Layouts**: Tiling, floating, and custom window layouts
+- **Advanced Layouts**: Dynamic tiling algorithms and custom window arrangements
 
 ## 🏗️ Development Approach
 

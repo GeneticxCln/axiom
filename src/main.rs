@@ -19,6 +19,7 @@ use clap::Parser;
 use log::{info, error};
 
 mod compositor;
+mod smithay_backend;
 mod workspace;
 mod effects;
 mod window;

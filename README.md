@@ -1,11 +1,18 @@
-# Axiom - Hybrid Wayland Compositor
+# Axiom 🚀
 
-> **Where productivity meets beauty.** Axiom combines niri's revolutionary scrollable workspaces with Hyprland's stunning visual effects, all enhanced by AI-driven optimization.
+**The next-generation Wayland compositor combining niri's scrollable workspaces with Hyprland's visual effects, enhanced by AI optimization.**
+
+<div align="center">
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](#)
 [![Rust Version](https://img.shields.io/badge/rust-1.70%2B-orange)](#)
-[![License](https://img.shields.io/badge/license-MIT-blue)](#)
+[![License](https://img.shields.io/badge/license-GPLv3-blue)](#)
 [![AI Optimized](https://img.shields.io/badge/AI-optimized-purple)](#)
+[![Phase](https://img.shields.io/badge/phase-2%20in%20progress-orange)](#)
+
+**Where productivity meets beauty.**
+
+</div>
 
 ## ✨ Vision
 
@@ -34,21 +41,62 @@ Axiom bridges the gap between productivity-focused tiling window managers and vi
 
 ## 🏗️ Architecture
 
+### Core Technologies
 - **Language**: Rust (memory safety + performance)
-- **Foundation**: wlroots (proven stability + ecosystem)
-- **Graphics**: OpenGL/Vulkan for effects
-- **Compatibility**: Full XWayland support
+- **Async Runtime**: Tokio for high-performance I/O
+- **Graphics**: wgpu for modern GPU acceleration
+- **Wayland**: Smithay compositor framework
+- **Configuration**: TOML with serde serialization
+
+### Codebase Structure
+```
+axiom/
+├── src/
+│   ├── main.rs              # Entry point and CLI
+│   ├── compositor.rs        # Main event loop and orchestration
+│   ├── config/              # TOML configuration system
+│   ├── workspace/           # Scrollable workspace management
+│   ├── effects/             # Visual effects engine
+│   ├── window/              # Window lifecycle management
+│   ├── input/               # Input handling (keyboard/mouse/gestures)
+│   ├── xwayland/            # X11 compatibility layer
+│   └── ipc/                 # AI integration and IPC communication
+├── Cargo.toml              # Dependencies and metadata
+├── axiom.toml              # Default configuration
+├── test_ipc.py             # IPC testing script
+└── STATUS.md               # Detailed development status
+```
 
 ## 🚀 Development Status
 
 | Phase | Status | Description |
 |-------|--------|--------------|
 | **Phase 1** | ✅ **COMPLETE** | Basic compositor foundation, IPC, configuration |
-| **Phase 2** | 🔄 In Progress | Smithay integration, window management |
+|| **Phase 2** | 🔄 **IN PROGRESS** | Smithay integration, window management, Wayland protocols |
 | **Phase 3** | 🔴 Planned | Scrollable workspace implementation |
 | **Phase 4** | 🔴 Planned | Visual effects system & polish |
 
-**Current Status**: ✅ **Axiom builds and runs!** The foundation is solid and ready for feature development.
+**Current Status**: 🔄 **Phase 2 Development** - Implementing Smithay integration for proper Wayland protocol support and window management.
+
+### ✅ What's Working Now (Phase 1)
+
+- **🏗️ Complete Architecture**: Modular Rust codebase with clean separation of concerns
+- **⚙️ Configuration System**: TOML-based config with defaults and validation
+- **🔄 Event Loop**: Async Tokio-based main loop running at 60 FPS
+- **🤖 IPC Integration**: Unix socket communication with Lazy UI optimization system
+- **📊 Performance Monitoring**: Real-time CPU, memory, GPU usage reporting
+- **🛡️ Error Handling**: Comprehensive error management with graceful shutdown
+- **🔧 CLI Interface**: Full command-line interface with debug and windowed modes
+- **📝 Logging**: Structured, emoji-enhanced logging for development and debugging
+
+### 🔄 Currently Working On (Phase 2)
+
+- **🪟 Smithay Integration**: Implementing proper Wayland compositor functionality
+- **📜 Protocol Support**: XDG Shell, Surface management, Client communication
+- **🎨 Window Management**: Enhanced window lifecycle, positioning, and layout algorithms
+- **⌨️ Input Handling**: Keyboard shortcuts, mouse interactions, and gesture support
+- **🖥️ Multi-output Support**: Proper handling of multiple displays
+- **🖼️ Rendering Pipeline**: Basic window compositing and frame management
 
 ## 🛠️ Building & Running
 
@@ -56,7 +104,7 @@ Axiom bridges the gap between productivity-focused tiling window managers and vi
 
 ```bash
 # Clone and build
-git clone https://github.com/your-username/axiom.git
+git clone https://github.com/GeneticxCln/axiom.git
 cd axiom
 cargo build --release
 

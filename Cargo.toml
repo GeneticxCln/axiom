@@ -25,10 +25,12 @@ env_logger = "0.10"
 # Core Wayland compositor dependencies
 wayland-server = "0.31"
 wayland-protocols = { version = "0.31", features = ["server", "staging"] }
-smithay = { version = "0.3", features = ["backend_drm", "backend_libinput", "backend_winit", "renderer_gl", "xwayland"] }
+# Using a simpler approach with basic Smithay features for now
+smithay = { version = "0.3.0", features = ["backend_winit", "renderer_gl"] }
 glium = "0.34"
 cgmath = "0.18"
 xkbcommon = "0.7"
+libc = "0.2"
 
 # Graphics and rendering
 wgpu = "0.19"
