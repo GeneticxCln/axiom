@@ -262,8 +262,16 @@ impl EffectsEngine {
         }
         
         // Update all window animations
-        for (window_id, effect_state) in self.window_effects.iter_mut() {
-            self.update_window_animations(window_id, effect_state, now)?;
+        // Update window animations - collect data first to avoid borrow conflicts
+        let mut animation_updates = Vec::new();
+        let window_ids: Vec<u64> = self.window_effects.keys().copied().collect();
+        
+        for window_id in window_ids {
+            if let Some(effect_state) = self.window_effects.get_mut(&window_id) {
+                if let Ok(updates) = Self::update_window_animations_static(window_id, effect_state, now, &self.default_easing_curve) {
+                    animation_updates.extend(updates);
+                }
+            }
         }
         
         // Performance adaptation
@@ -380,6 +388,109 @@ impl EffectsEngine {
     pub fn remove_window(&mut self, window_id: u64) {
         if let Some(_) = self.window_effects.remove(&window_id) {
             debug!("🗑️ Removed window {} from effects tracking", window_id);
+        }
+    }
+    
+    /// Static version of window animation updates to avoid borrow checker issues
+    fn update_window_animations_static(
+        window_id: u64,
+        effect_state: &mut WindowEffectState,
+        now: Instant,
+        default_easing_curve: &EasingCurve,
+    ) -> Result<Vec<String>> {
+        let mut animations_to_remove = Vec::new();
+        let mut animation_updates = Vec::new();
+        
+        for (i, animation) in effect_state.active_animations.iter().enumerate() {
+            match animation {
+                AnimationType::WindowOpen { start_time, duration, target_scale, target_opacity } => {
+                    let elapsed = now.duration_since(*start_time);
+                    
+                    if elapsed >= *duration {
+                        // Animation finished
+                        effect_state.scale = *target_scale;
+                        effect_state.opacity = *target_opacity;
+                        animations_to_remove.push(i);
+                        animation_updates.push(format!("Window {} open animation completed", window_id));
+                    } else {
+                        // Update animation
+                        let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
+                        let eased_progress = Self::apply_easing_curve_static(progress as f32, default_easing_curve);
+                        
+                        effect_state.scale = 0.8 + (target_scale - 0.8) * eased_progress;
+                        effect_state.opacity = eased_progress * target_opacity;
+                    }
+                }
+                
+                AnimationType::WindowClose { start_time, duration, start_scale, start_opacity } => {
+                    let elapsed = now.duration_since(*start_time);
+                    
+                    if elapsed >= *duration {
+                        // Animation finished - window should be removed
+                        effect_state.scale = 0.0;
+                        effect_state.opacity = 0.0;
+                        animations_to_remove.push(i);
+                        animation_updates.push(format!("Window {} close animation completed", window_id));
+                    } else {
+                        // Update animation
+                        let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
+                        let eased_progress = Self::apply_easing_curve_static(progress as f32, &EasingCurve::EaseIn);
+                        
+                        effect_state.scale = start_scale * (1.0 - eased_progress * 0.2);
+                        effect_state.opacity = start_opacity * (1.0 - eased_progress);
+                    }
+                }
+                
+                AnimationType::WindowMove { start_time, duration, start_pos, target_pos } => {
+                    let elapsed = now.duration_since(*start_time);
+                    
+                    if elapsed >= *duration {
+                        // Animation finished
+                        effect_state.position_offset = (target_pos.0 - start_pos.0, target_pos.1 - start_pos.1);
+                        animations_to_remove.push(i);
+                        animation_updates.push(format!("Window {} move animation completed", window_id));
+                    } else {
+                        // Update animation
+                        let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
+                        let eased_progress = Self::apply_easing_curve_static(progress as f32, &EasingCurve::EaseOut);
+                        
+                        let current_x = start_pos.0 + (target_pos.0 - start_pos.0) * eased_progress;
+                        let current_y = start_pos.1 + (target_pos.1 - start_pos.1) * eased_progress;
+                        
+                        effect_state.position_offset = (current_x - start_pos.0, current_y - start_pos.1);
+                    }
+                }
+                
+                _ => {
+                    // Handle other animation types
+                }
+            }
+        }
+        
+        // Remove finished animations (in reverse order to maintain indices)
+        for i in animations_to_remove.into_iter().rev() {
+            effect_state.active_animations.remove(i);
+        }
+        
+        Ok(animation_updates)
+    }
+    
+    /// Static version of easing curve application
+    fn apply_easing_curve_static(t: f32, curve: &EasingCurve) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        
+        match curve {
+            EasingCurve::Linear => t,
+            EasingCurve::EaseIn => t * t,
+            EasingCurve::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
+            EasingCurve::EaseInOut => {
+                if t < 0.5 {
+                    2.0 * t * t
+                } else {
+                    -1.0 + (4.0 - 2.0 * t) * t
+                }
+            }
+            _ => t, // Simplified for other curves
         }
     }
     

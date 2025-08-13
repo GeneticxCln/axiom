@@ -196,7 +196,6 @@ impl BlurRenderer {
                 module: vertical_shader,
                 entry_point: "vs_main",
                 buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(FragmentState {
                 module: vertical_shader,
@@ -206,13 +205,11 @@ impl BlurRenderer {
                     blend: Some(BlendState::ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
                 })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: PrimitiveState::default(),
             depth_stencil: None,
             multisample: MultisampleState::default(),
             multiview: None,
-            cache: None,
         }));
         
         debug!("✅ Blur pipelines created successfully");

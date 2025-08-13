@@ -13,7 +13,7 @@ use wgpu::{
     RenderPipelineDescriptor, FragmentState, VertexState, PrimitiveState,
     MultisampleState, ColorTargetState, BlendState, ColorWrites,
 };
-use cgmath::{Vector2, Vector3, Vector4};
+use cgmath::{Vector2, Vector3, Vector4, InnerSpace};
 use log::{info, debug};
 use anyhow::Result;
 use std::sync::Arc;
@@ -172,7 +172,6 @@ impl ShadowRenderer {
                 module: shadow_shader,
                 entry_point: "vs_main",
                 buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(FragmentState {
                 module: shadow_shader,
@@ -182,13 +181,11 @@ impl ShadowRenderer {
                     blend: Some(BlendState::ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
                 })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: PrimitiveState::default(),
             depth_stencil: None,
             multisample: MultisampleState::default(),
             multiview: None,
-            cache: None,
         }));
         
         debug!("✅ Shadow pipelines created successfully");
@@ -280,26 +277,8 @@ impl ShadowRenderer {
     ) -> Result<()> {
         let start_time = std::time::Instant::now();
         
-        // Begin render pass for the entire batch
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Shadow Batch Pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: output_texture,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
-        
-        render_pass.set_pipeline(self.drop_shadow_pipeline.as_ref().unwrap());
-        
-        // Render each shadow in the batch
-        for (position, size, shadow_params) in shadow_data {
+        // Process each shadow individually to avoid bind group lifetime issues
+        for (_position, size, shadow_params) in shadow_data {
             if !shadow_params.enabled {
                 continue;
             }
@@ -336,11 +315,28 @@ impl ShadowRenderer {
                 ],
             });
             
-            render_pass.set_bind_group(0, &bind_group, &[]);
-            render_pass.draw(0..6, 0..1);
+            // Individual render pass for each shadow
+            {
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Shadow Batch Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: output_texture,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                
+                render_pass.set_pipeline(self.drop_shadow_pipeline.as_ref().unwrap());
+                render_pass.set_bind_group(0, &bind_group, &[]);
+                render_pass.draw(0..6, 0..1);
+            }
         }
-        
-        drop(render_pass); // End render pass
         
         self.last_render_time = start_time.elapsed();
         
