@@ -24,18 +24,35 @@ env_logger = "0.10"
 
 # Core Wayland compositor dependencies
 wayland-server = "0.31"
-wayland-protocols = { version = "0.31", features = ["server", "staging"] }
-# Smithay compositor framework with available features
-smithay = { version = "0.3.0", features = [
-    "backend_winit", 
+wayland-protocols = { version = "0.31", features = ["server", "staging", "unstable"] }
+wayland-backend = "0.3"
+wayland-scanner = "0.31"
+
+# Smithay compositor framework with full features
+smithay = { version = "0.3.0", default-features = false, features = [
+    "backend_winit",
+    "backend_drm",
+    "backend_libinput", 
+    "backend_session",
+    "backend_udev",
     "renderer_gl",
-    "wayland_frontend"
+    "wayland_frontend",
+    "xwayland"
 ] }
+smithay-client-toolkit = "0.18"
+
+# Graphics and input
 glium = "0.34"
 cgmath = "0.18"
 xkbcommon = "0.7"
 libc = "0.2"
 calloop = "0.12"
+input = "0.9"
+drm = "0.11"
+gbm = "0.14"
+gl = "0.14"
+
+# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -51,6 +68,7 @@ dbus = "0.9"  # Alternative IPC method
 # Utilities
 rand = "0.8"  # For input simulation in Phase 3
 bytemuck = { version = "1.14", features = ["derive"] }  # For GPU buffer data
+parking_lot = "0.12"  # For RwLock synchronization
 
 # TODO: Add features when compositor dependencies are ready
 # [features]

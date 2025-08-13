@@ -4,18 +4,50 @@
 //! with Winit backend and OpenGL rendering.
 
 use anyhow::{Result, Context};
-use log::{info, debug, warn, error};
+use log::{info, debug, warn};
 use std::{
     collections::HashMap,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-// Phase 3: Simplified for compatibility with Smithay 0.3.0
-// Full integration will be added as Smithay API stabilizes
 
-/// Phase 3: Real Smithay integration with proper Wayland protocols
-/// This implements actual compositor functionality with surface management
+// Smithay imports for real Wayland compositor functionality
+use smithay::{
+    backend::winit::{self, WinitGraphicsBackend, WinitInputBackend, WinitEvent},
+    desktop::{Space, Window, WindowSurfaceType},
+    output::{Output, PhysicalProperties, Subpixel, Mode as OutputMode},
+    reexports::{
+        calloop::EventLoop,
+        wayland_server::{Display, DisplayHandle, Client},
+        winit::{
+            dpi::LogicalSize,
+            event_loop::EventLoop as WinitEventLoop,
+            window::WindowBuilder,
+        },
+    },
+    wayland::{
+        compositor::{CompositorState, CompositorClientState, CompositorHandler},
+        data_device::{
+            DataDeviceState, ClientDndGrabHandler, ServerDndGrabHandler, DataDeviceHandler,
+        },
+        output::OutputManagerState,
+        seat::{SeatState, SeatHandler, CursorImageStatus, Seat},
+        shell::xdg::{
+            XdgShellState, XdgShellHandler, XdgToplevelSurface, ToplevelSurface,
+            XdgSurfaceUserData, PopupSurface,
+            decoration::{
+                XdgDecorationState, XdgDecorationHandler, XdgToplevelDecoration,
+            },
+        },
+        shm::{ShmState, ShmHandler},
+    },
+    utils::{Rectangle, Transform as OutputTransform, Size, Point},
+    delegate_compositor, delegate_shm, delegate_seat, delegate_data_device, 
+    delegate_output, delegate_xdg_shell,
+};
+use wayland_server::protocol::{wl_surface::WlSurface, wl_seat::WlSeat};
 
-/// Main Smithay backend structure for Phase 3
+/// Real compositor state with Smithay integration
 pub struct AxiomSmithayBackend {
     /// Configuration
     config: crate::config::AxiomConfig,
@@ -23,11 +55,20 @@ pub struct AxiomSmithayBackend {
     /// Whether running in windowed mode
     windowed: bool,
     
-    /// Windows managed by the backend
-    windows: HashMap<u64, BackendWindow>,
+    /// Wayland display
+    display: Option<Display>,
     
-    /// Next window ID
-    next_window_id: u64,
+    /// Smithay event loop  
+    event_loop: Option<EventLoop<'static, AxiomState>>,
+    
+    /// Winit event loop for windowed mode
+    winit_event_loop: Option<WinitEventLoop<()>>,
+    
+    /// Graphics backend
+    graphics_backend: Option<WinitGraphicsBackend>,
+    
+    /// Input backend
+    input_backend: Option<WinitInputBackend>,
     
     /// Whether the backend is initialized
     initialized: bool,
@@ -35,73 +76,43 @@ pub struct AxiomSmithayBackend {
     /// Last frame time for FPS tracking
     last_frame: Instant,
     
-    /// Phase 3: Smithay readiness flags (compatibility mode)
-    event_loop_ready: bool,
-    backend_ready: bool,
-    renderer_ready: bool,
-    space_initialized: bool,
+    /// Window counter for unique IDs
+    window_counter: u64,
 }
 
-/// State for the compositor event loop
-#[derive(Default)]
+/// Compositor state for event handling
 pub struct AxiomState {
     pub running: bool,
+    pub backend: Arc<Mutex<AxiomSmithayBackend>>,
 }
 
 impl AxiomSmithayBackend {
     /// Create a new Smithay backend
     pub fn new(config: crate::config::AxiomConfig, windowed: bool) -> Result<Self> {
-        info!("🏗️ Phase 3: Initializing real Smithay backend with protocol support...");
+        info!("🏗️ Initializing real Smithay backend with protocol support...");
         
         Ok(Self {
             config,
             windowed,
-            windows: HashMap::new(),
-            next_window_id: 1,
+            display: None,
+            event_loop: None,
+            winit_event_loop: None,
+            graphics_backend: None,
+            input_backend: None,
             initialized: false,
             last_frame: Instant::now(),
-            event_loop_ready: false,
-            backend_ready: false,
-            renderer_ready: false,
-            space_initialized: false,
+            window_counter: 1,
         })
     }
     
-    /// Create a new window
+    /// Create a new window (placeholder - will be handled by Wayland protocols)
     pub fn create_window(&mut self, title: String) -> u64 {
-        let id = self.next_window_id;
-        self.next_window_id += 1;
+        let id = self.window_counter;
+        self.window_counter += 1;
         
-        let window = BackendWindow::new(id, title);
-        self.windows.insert(id, window);
-        
-        info!("🪟 Created window {} ({})", id, self.windows[&id].title);
+        info!("🪟 Window creation requested: '{}' (ID: {})", title, id);
+        // Real implementation will handle this through XDG shell protocol
         id
-    }
-    
-    /// Get a window by ID
-    pub fn get_window(&self, id: u64) -> Option<&BackendWindow> {
-        self.windows.get(&id)
-    }
-    
-    /// Get a mutable window by ID
-    pub fn get_window_mut(&mut self, id: u64) -> Option<&mut BackendWindow> {
-        self.windows.get_mut(&id)
-    }
-    
-    /// Remove a window
-    pub fn remove_window(&mut self, id: u64) -> Option<BackendWindow> {
-        if let Some(window) = self.windows.remove(&id) {
-            info!("🗑️ Removed window {} ({})", id, window.title);
-            Some(window)
-        } else {
-            None
-        }
-    }
-    
-    /// Get all windows
-    pub fn windows(&self) -> &HashMap<u64, BackendWindow> {
-        &self.windows
     }
     
     /// Initialize the backend
@@ -121,28 +132,93 @@ impl AxiomSmithayBackend {
         Ok(())
     }
     
-    /// Initialize windowed backend for development - Phase 3 implementation
+    /// Initialize windowed backend with real Smithay components
     async fn init_windowed_backend(&mut self) -> Result<()> {
-        debug!("🪟 Phase 3: Setting up real windowed backend with Smithay...");
+        debug!("🪟 Setting up real Smithay windowed backend...");
         
-        // Phase 3: Create real event loop (simplified for compatibility)
+        // 1. Create Wayland display
+        debug!("🔄 Creating Wayland display...");
+        let mut display = Display::new().context("Failed to create Wayland display")?;
+        let display_handle = display.handle();
+        
+        // 2. Initialize Smithay states
+        debug!("🔧 Initializing compositor state...");
+        let compositor_state = CompositorState::new::<AxiomState>(&display_handle);
+        
+        debug!("🐚 Initializing XDG shell state...");
+        let xdg_shell_state = XdgShellState::new::<AxiomState>(&display_handle);
+        
+        debug!("🧺 Initializing SHM state...");
+        let shm_state = ShmState::new::<AxiomState>(&display_handle, Vec::new());
+        
+        debug!("📺 Initializing output manager...");
+        let output_manager_state = OutputManagerState::new_with_xdg_output::<AxiomState>(&display_handle);
+        
+        debug!("🖱️ Initializing seat state...");
+        let mut seat_state = SeatState::new();
+        let seat_name = "axiom-seat";
+        let seat = seat_state.new_wl_seat(&display_handle, seat_name);
+        
+        debug!("📋 Initializing data device state...");
+        let data_device_state = DataDeviceState::new::<AxiomState>(&display_handle);
+        
+        // 3. Create Calloop event loop
         debug!("🔄 Creating Calloop event loop...");
-        // For now, we simulate the event loop setup
-        // Real implementation would use: EventLoop::<AxiomState>::try_new()
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let event_loop = EventLoop::<AxiomState>::try_new()
+            .context("Failed to create event loop")?;
         
-        debug!("🖼️ Initializing Winit backend...");
-        // Real implementation would create WinitEventLoop and WinitGraphicsBackend
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // 4. Setup Winit backend
+        debug!("🖼️ Setting up Winit window and backend...");
+        let winit_event_loop = WinitEventLoop::new();
         
-        debug!("🎨 Setting up OpenGL renderer...");
-        // Real implementation would create GlesRenderer
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let window = WindowBuilder::new()
+            .with_title("Axiom Wayland Compositor")
+            .with_inner_size(LogicalSize::new(1920, 1080))
+            .build(&winit_event_loop)
+            .context("Failed to create window")?;
         
-        debug!("🌌 Initializing desktop Space...");
-        // Space is already initialized in new()
+        let backend = winit::init(window).context("Failed to initialize Winit backend")?;
         
-        info!("✅ Phase 3: Real Smithay windowed backend initialized!");
+        // 5. Create output for the window
+        debug!("🖥️ Creating output...");
+        let output = Output::new(
+            "winit".to_string(),
+            PhysicalProperties {
+                size: (1920, 1080).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Axiom".to_string(),
+                model: "Virtual".to_string(),
+            },
+        );
+        
+        // Set output mode
+        output.change_current_state(
+            Some(smithay::output::Mode {
+                size: (1920, 1080).into(),
+                refresh: 60_000,
+            }),
+            Some(OutputTransform::Flipped180),
+            None,
+            Some((0, 0).into()),
+        );
+        
+        // Add output to space
+        self.space.map_output(&output, (0, 0));
+        
+        // Store all the initialized components
+        self.display_handle = Some(display_handle);
+        self.event_loop = Some(event_loop);
+        self.winit_event_loop = Some(winit_event_loop);
+        self.backend = Some(backend);
+        self.output = Some(output);
+        self.compositor_state = Some(compositor_state);
+        self.xdg_shell_state = Some(xdg_shell_state);
+        self.seat_state = Some(seat_state);
+        self.data_device_state = Some(data_device_state);
+        self.shm_state = Some(shm_state);
+        self.output_manager_state = Some(output_manager_state);
+        
+        info!("✅ Real Smithay windowed backend initialized successfully!");
         Ok(())
     }
     

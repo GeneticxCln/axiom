@@ -7,17 +7,18 @@
 //! with window management, surface handling, and protocol support.
 
 use anyhow::{Result, Context};
-use log::{info, debug, warn, error};
+use log::{info, debug, warn};
 use tokio::signal;
 
 use crate::config::AxiomConfig;
+use crate::decoration::DecorationManager;
 use crate::workspace::ScrollableWorkspaces;
 use crate::effects::EffectsEngine;
-use crate::window::{WindowManager, AxiomWindow};
+use crate::window::WindowManager;
 use crate::input::InputManager;
 use crate::xwayland::XWaylandManager;
 use crate::ipc::AxiomIPCServer;
-use crate::smithay_backend::AxiomSmithayBackend;
+use crate::smithay_backend_phase6::AxiomSmithayBackendPhase6;
 
 /// Main compositor struct that orchestrates all subsystems
 pub struct AxiomCompositor {
@@ -28,12 +29,13 @@ pub struct AxiomCompositor {
     workspace_manager: ScrollableWorkspaces,
     effects_engine: EffectsEngine,
     window_manager: WindowManager,
+    decoration_manager: DecorationManager,
     input_manager: InputManager,
     xwayland_manager: Option<XWaylandManager>,
     ipc_server: AxiomIPCServer,
     
     // Smithay backend for Wayland compositor functionality
-    smithay_backend: AxiomSmithayBackend,
+    smithay_backend: AxiomSmithayBackendPhase6,
     
     // Event loop state
     running: bool,
@@ -54,6 +56,9 @@ impl AxiomCompositor {
         debug!("🪟 Initializing window manager...");
         let window_manager = WindowManager::new(&config.window)?;
         
+        debug!("🎨 Initializing decoration manager...");
+        let decoration_manager = DecorationManager::new(&config.window);
+        
         debug!("⌨️ Initializing input manager...");
         let input_manager = InputManager::new(&config.input, &config.bindings)?;
         
@@ -73,7 +78,28 @@ impl AxiomCompositor {
         
         // Initialize Smithay backend
         debug!("🚀 Initializing Smithay Wayland backend...");
-        let mut smithay_backend = AxiomSmithayBackend::new(config.clone(), windowed)?;
+        
+        // For now, create a simple Smithay backend that doesn't need shared managers
+        // In a real implementation, the backend would own the managers or use proper sharing
+        use std::sync::Arc;
+        use parking_lot::RwLock;
+        
+        // Create dummy managers for the backend (they'll be empty)
+        let dummy_window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)?));
+        let dummy_workspace_manager = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)?));
+        let dummy_effects_engine = Arc::new(RwLock::new(EffectsEngine::new(&config.effects)?));
+        let dummy_decoration_manager = Arc::new(RwLock::new(DecorationManager::new(&config.window)));
+        let dummy_input_manager = Arc::new(RwLock::new(InputManager::new(&config.input, &config.bindings)?));
+        
+        let mut smithay_backend = AxiomSmithayBackendPhase6::new(
+            config.clone(),
+            windowed,
+            dummy_window_manager,
+            dummy_workspace_manager,
+            dummy_effects_engine,
+            dummy_decoration_manager,
+            dummy_input_manager,
+        )?;
         smithay_backend.initialize().await.context("Failed to initialize Smithay backend")?;
         
         info!("✅ All subsystems initialized successfully");
@@ -84,6 +110,7 @@ impl AxiomCompositor {
             workspace_manager,
             effects_engine,
             window_manager,
+            decoration_manager,
             input_manager,
             xwayland_manager,
             ipc_server,

@@ -4,7 +4,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use crate::config::WindowConfig;
-use crate::smithay_backend::BackendWindow;
+use crate::smithay_backend_simple::BackendWindow;
 
 /// Rectangle for window positioning and sizing
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +64,7 @@ impl Default for WindowProperties {
     }
 }
 
+#[derive(Debug)]
 pub struct WindowManager {
     config: WindowConfig,
     

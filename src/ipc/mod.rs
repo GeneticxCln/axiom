@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use log::{info, debug, warn, error};
 
 /// Messages sent from Axiom to Lazy UI (performance metrics, events)
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum AxiomMessage {
     /// System performance metrics

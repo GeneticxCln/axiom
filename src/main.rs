@@ -19,7 +19,12 @@ use clap::Parser;
 use log::{info, error};
 
 mod compositor;
-mod smithay_backend;
+mod decoration;
+mod smithay_backend_simple;
+mod smithay_backend_real;  // Real Smithay implementation
+// mod smithay_backend_production;  // Phase 6: Production Smithay backend (disabled for now)
+mod smithay_backend_minimal;  // Phase 6.1: Minimal working backend
+mod smithay_backend_phase6;  // Phase 6.1: WORKING Smithay backend
 mod workspace;
 mod effects;
 mod window;
@@ -29,6 +34,8 @@ mod xwayland;
 mod ipc;
 mod demo_workspace;
 mod demo_phase4_effects;
+mod demo_phase6_minimal;
+mod demo_phase6_working;
 
 use compositor::AxiomCompositor;
 use config::AxiomConfig;

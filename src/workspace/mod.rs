@@ -81,6 +81,7 @@ pub enum ScrollState {
 }
 
 /// Scrollable workspace manager
+#[derive(Debug)]
 pub struct ScrollableWorkspaces {
     config: WorkspaceConfig,
     
