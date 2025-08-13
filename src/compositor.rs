@@ -2,8 +2,12 @@
 //!
 //! This module contains the main AxiomCompositor struct and event loop.
 //! It coordinates between all subsystems: workspaces, effects, input, etc.
+//!
+//! Note: This implementation is simplified and doesn't use Smithay directly
+//! in the current version due to API compatibility issues. Future versions
+//! will integrate more deeply with the Smithay compositor framework.
 
-use anyhow::Result;
+use anyhow::{Result, Context};
 use log::{info, debug, warn};
 use tokio::signal;
 
@@ -13,18 +17,20 @@ use crate::effects::EffectsEngine;
 use crate::window::WindowManager;
 use crate::input::InputManager;
 use crate::xwayland::XWaylandManager;
+use crate::ipc::AxiomIPCServer;
 
 /// Main compositor struct that orchestrates all subsystems
 pub struct AxiomCompositor {
     config: AxiomConfig,
     windowed: bool,
     
-    // Core subsystems
+    // Core subsystems  
     workspace_manager: ScrollableWorkspaces,
     effects_engine: EffectsEngine,
     window_manager: WindowManager,
     input_manager: InputManager,
     xwayland_manager: Option<XWaylandManager>,
+    ipc_server: AxiomIPCServer,
     
     // Event loop state
     running: bool,
@@ -33,21 +39,18 @@ pub struct AxiomCompositor {
 impl AxiomCompositor {
     /// Create a new Axiom compositor instance
     pub async fn new(config: AxiomConfig, windowed: bool) -> Result<Self> {
-        info!("🏗️ Initializing Axiom compositor subsystems...");
+        info!("🏗️ Initializing Axiom compositor...");
         
-        // Initialize workspace management (niri-inspired)
+        // Initialize our custom subsystems
         debug!("📱 Initializing scrollable workspaces...");
         let workspace_manager = ScrollableWorkspaces::new(&config.workspace)?;
         
-        // Initialize effects engine (hyprland-inspired) 
         debug!("✨ Initializing effects engine...");
         let effects_engine = EffectsEngine::new(&config.effects)?;
         
-        // Initialize window management
         debug!("🪟 Initializing window manager...");
         let window_manager = WindowManager::new(&config.window)?;
         
-        // Initialize input handling
         debug!("⌨️ Initializing input manager...");
         let input_manager = InputManager::new(&config.input, &config.bindings)?;
         
@@ -60,6 +63,11 @@ impl AxiomCompositor {
             None
         };
         
+        // Initialize IPC server for Lazy UI integration
+        debug!("🔗 Initializing IPC server...");
+        let mut ipc_server = AxiomIPCServer::new();
+        ipc_server.start().await.context("Failed to start IPC server")?;
+        
         info!("✅ All subsystems initialized successfully");
         
         Ok(Self {
@@ -70,6 +78,7 @@ impl AxiomCompositor {
             window_manager,
             input_manager,
             xwayland_manager,
+            ipc_server,
             running: false,
         })
     }
@@ -194,3 +203,6 @@ impl AxiomCompositor {
         Ok(())
     }
 }
+
+// TODO: Future versions will integrate deeply with Smithay for full Wayland compositor functionality
+// For now, we focus on getting the basic architecture working and communicating with Lazy UI

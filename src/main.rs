@@ -25,6 +25,7 @@ mod window;
 mod input;
 mod config;
 mod xwayland;
+mod ipc;
 
 use compositor::AxiomCompositor;
 use config::AxiomConfig;

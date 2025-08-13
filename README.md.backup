@@ -1,11 +1,14 @@
-# Axiom - Hybrid Wayland Compositor
+<div align="center">
 
-> **Where productivity meets beauty.** Axiom combines niri's revolutionary scrollable workspaces with Hyprland's stunning visual effects, all enhanced by AI-driven optimization.
+![Axiom Logo](assets/logo.svg)
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](#)
-[![Rust Version](https://img.shields.io/badge/rust-1.70%2B-orange)](#)
-[![License](https://img.shields.io/badge/license-MIT-blue)](#)
-[![AI Optimized](https://img.shields.io/badge/AI-optimized-purple)](#)
+# Axiom 🚀
+
+**The first Wayland compositor combining niri's scrollable workspace innovation with Hyprland's visual effects system.**
+
+> *Where productivity meets beauty*
+
+</div>
 
 ## ✨ Vision
 
@@ -30,7 +33,6 @@ Axiom bridges the gap between productivity-focused tiling window managers and vi
 - **Animated workspace scrolling** - Smooth visual transitions while scrolling
 - **Context-aware effects** - Smart performance scaling during intensive operations
 - **Unified configuration** - Single config for both tiling and effects
-- **AI-driven optimization** - Intelligent performance tuning via Lazy UI integration
 
 ## 🏗️ Architecture
 
@@ -42,42 +44,24 @@ Axiom bridges the gap between productivity-focused tiling window managers and vi
 ## 🚀 Development Status
 
 | Phase | Status | Description |
-|-------|--------|--------------|
-| **Phase 1** | ✅ **COMPLETE** | Basic compositor foundation, IPC, configuration |
-| **Phase 2** | 🔄 In Progress | Smithay integration, window management |
-| **Phase 3** | 🔴 Planned | Scrollable workspace implementation |
-| **Phase 4** | 🔴 Planned | Visual effects system & polish |
+|-------|--------|-------------|
+| **Phase 1** | 🟡 Planning | Basic compositor foundation |
+| **Phase 2** | 🔴 Planned | Scrollable workspace implementation |
+| **Phase 3** | 🔴 Planned | Visual effects system |
+| **Phase 4** | 🔴 Planned | Advanced features & polish |
 
-**Current Status**: ✅ **Axiom builds and runs!** The foundation is solid and ready for feature development.
+**Target**: v1.0 release in 12 months
 
-## 🛠️ Building & Running
+## 🛠️ Building
 
-### Quick Start
+*Coming soon - currently in planning phase*
 
 ```bash
-# Clone and build
-git clone https://github.com/your-username/axiom.git
-cd axiom
+# Dependencies (Arch Linux)
+sudo pacman -S rustup wlroots-git libxkbcommon wayland wayland-protocols
+
+# Build (future)
 cargo build --release
-
-# Run in development mode
-./target/debug/axiom --debug --windowed
-
-# Run in production
-sudo ./target/release/axiom
-```
-
-### Dependencies
-
-```bash
-# Ubuntu/Debian
-sudo apt install libwayland-dev pkg-config build-essential
-
-# Arch Linux 
-sudo pacman -S rust wayland wayland-protocols pkg-config
-
-# Fedora
-sudo dnf install rust cargo wayland-devel wayland-protocols-devel
 ```
 
 ## ⚙️ Configuration
@@ -103,30 +87,6 @@ shadow_size = 20
 [bindings]
 scroll_left = "Super_L+Left"
 scroll_right = "Super_L+Right"
-```
-
-## 🤖 AI Integration
-
-Axiom seamlessly integrates with the **Lazy UI** optimization system:
-
-### Features
-- **Real-time performance monitoring** - CPU, memory, GPU usage tracking
-- **Intelligent configuration optimization** - AI-driven parameter tuning
-- **Adaptive effects scaling** - Automatic performance adjustments
-- **Usage pattern learning** - Optimization based on your workflow
-
-### IPC Communication
-- **Unix socket**: `/tmp/axiom-lazy-ui.sock`
-- **JSON protocol**: Structured message exchange
-- **Async messaging**: Non-blocking optimization updates
-
-### Testing IPC
-```bash
-# Start Axiom in one terminal
-./target/debug/axiom --debug --windowed
-
-# Test IPC communication in another terminal
-python3 test_ipc.py
 ```
 
 ## 🤝 Contributing

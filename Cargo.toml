@@ -22,13 +22,22 @@ thiserror = "1.0"
 log = "0.4"
 env_logger = "0.10"
 
-# TODO: Add Wayland/compositor dependencies when ready
-# wayland-server = "0.31"
-# wayland-protocols = { version = "0.31", features = ["server", "staging"] }
-# smithay = { version = "0.3", features = ["backend_drm", "backend_libinput", "backend_winit", "renderer_gl", "xwayland"] }
-# glium = "0.34"
-# cgmath = "0.18"
-# xkbcommon = "0.7"
+# Core Wayland compositor dependencies
+wayland-server = "0.31"
+wayland-protocols = { version = "0.31", features = ["server", "staging"] }
+smithay = { version = "0.3", features = ["backend_drm", "backend_libinput", "backend_winit", "renderer_gl", "xwayland"] }
+glium = "0.34"
+cgmath = "0.18"
+xkbcommon = "0.7"
+
+# Graphics and rendering
+wgpu = "0.19"
+winit = "0.29"
+
+# IPC for Lazy UI integration
+serde_json = "1.0"
+interprocess = "1.2"  # For Unix socket communication
+dbus = "0.9"  # Alternative IPC method
 
 # TODO: Add features when compositor dependencies are ready
 # [features]
