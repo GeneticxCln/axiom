@@ -48,6 +48,9 @@ serde_json = "1.0"
 interprocess = "1.2"  # For Unix socket communication
 dbus = "0.9"  # Alternative IPC method
 
+# Utilities
+rand = "0.8"  # For input simulation in Phase 3
+
 # TODO: Add features when compositor dependencies are ready
 # [features]
 # default = ["smithay-backend"]

@@ -208,6 +208,9 @@ pub struct BindingsConfig {
     
     /// Toggle effects
     pub toggle_effects: String,
+    
+    /// Quit compositor
+    pub quit: String,
 }
 
 /// XWayland configuration
@@ -354,6 +357,7 @@ impl Default for BindingsConfig {
             launch_terminal: "Super_L+Return".to_string(),
             launch_launcher: "Super_L+d".to_string(),
             toggle_effects: "Super_L+e".to_string(),
+            quit: "Super_L+Shift+q".to_string(),
         }
     }
 }

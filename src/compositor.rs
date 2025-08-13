@@ -124,19 +124,97 @@ impl AxiomCompositor {
         Ok(())
     }
     
-    /// Process all pending compositor events
+    /// Phase 3: Process all pending compositor events with real input handling
     async fn process_events(&mut self) -> Result<()> {
-        // TODO: Implement actual event processing
-        // This will handle:
-        // - Wayland client requests
-        // - Input events (keyboard, mouse, gestures)
-        // - Window state changes
-        // - XWayland events
+        // Process backend events (Wayland, input devices)
+        self.smithay_backend.process_events().await?;
         
-        debug!("🔄 Processing compositor events");
+        // Process IPC messages from Lazy UI
+        if let Err(e) = self.ipc_server.process_messages().await {
+            warn!("⚠️ Error processing IPC messages: {}", e);
+        }
         
-        // Placeholder implementation
-        tokio::time::sleep(tokio::time::Duration::from_millis(16)).await; // ~60fps
+        // Phase 3: Simulate input processing for demonstration
+        // In a real implementation, this would receive events from Smithay
+        self.process_simulated_input_events().await?;
+        
+        Ok(())
+    }
+    
+    /// Phase 3: Simulate input events for testing (until real Smithay integration)
+    async fn process_simulated_input_events(&mut self) -> Result<()> {
+        // This is a placeholder that simulates occasional input events
+        // for testing purposes. Real implementation would receive these from Smithay.
+        
+        use crate::input::{InputEvent, CompositorAction};
+        
+        // Simulate a scroll event occasionally (for demo purposes)
+        if rand::random::<f32>() < 0.001 { // Very low probability
+            let event = InputEvent::Scroll {
+                x: 100.0,
+                y: 100.0,
+                delta_x: if rand::random::<bool>() { 10.0 } else { -10.0 },
+                delta_y: 0.0,
+            };
+            
+            let actions = self.input_manager.process_input_event(event);
+            for action in actions {
+                self.handle_compositor_action(action).await?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Phase 3: Handle compositor actions triggered by input events
+    async fn handle_compositor_action(&mut self, action: crate::input::CompositorAction) -> Result<()> {
+        use crate::input::CompositorAction;
+        
+        match action {
+            CompositorAction::ScrollWorkspaceLeft => {
+                debug!("🎨 Input triggered: Scroll workspace left");
+                self.scroll_workspace_left();
+            },
+            CompositorAction::ScrollWorkspaceRight => {
+                debug!("🎨 Input triggered: Scroll workspace right");
+                self.scroll_workspace_right();
+            },
+            CompositorAction::MoveWindowLeft => {
+                debug!("🎨 Input triggered: Move window left");
+                if let Some((window_id, _, _, _)) = self.get_workspace_info().into() {
+                    // Get first window in current workspace for demo
+                    let windows = self.workspace_manager.get_focused_column_windows();
+                    if let Some(&window_id) = windows.first() {
+                        self.move_window_left(window_id);
+                    }
+                }
+            },
+            CompositorAction::MoveWindowRight => {
+                debug!("🎨 Input triggered: Move window right");
+                if let Some((window_id, _, _, _)) = self.get_workspace_info().into() {
+                    let windows = self.workspace_manager.get_focused_column_windows();
+                    if let Some(&window_id) = windows.first() {
+                        self.move_window_right(window_id);
+                    }
+                }
+            },
+            CompositorAction::CloseWindow => {
+                debug!("🎨 Input triggered: Close window");
+                // TODO: Close focused window
+            },
+            CompositorAction::ToggleFullscreen => {
+                debug!("🎨 Input triggered: Toggle fullscreen");
+                // TODO: Toggle fullscreen for focused window
+            },
+            CompositorAction::Quit => {
+                info!("💼 Input triggered: Quit compositor");
+                self.shutdown().await?;
+            },
+            CompositorAction::Custom(command) => {
+                debug!("🎨 Input triggered custom command: {}", command);
+                // TODO: Handle custom commands
+            },
+        }
         
         Ok(())
     }

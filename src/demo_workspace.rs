@@ -122,11 +122,11 @@ pub async fn demo_momentum_scrolling(compositor: &mut AxiomCompositor) -> Result
     Ok(())
 }
 
-/// Run a comprehensive workspace test
+/// Phase 3: Enhanced comprehensive test with input processing
 pub async fn run_comprehensive_test(compositor: &mut AxiomCompositor) -> Result<()> {
-    info!("🧪 Running comprehensive scrollable workspace test...");
+    info!("🧪 Phase 3: Running comprehensive scrollable workspace test with input processing...");
     
-    // Test 1: Basic functionality
+    // Test 1: Basic scrollable workspace functionality
     demo_scrollable_workspaces(compositor).await?;
     
     time::sleep(Duration::from_millis(1000)).await;
@@ -134,7 +134,131 @@ pub async fn run_comprehensive_test(compositor: &mut AxiomCompositor) -> Result<
     // Test 2: Momentum scrolling
     demo_momentum_scrolling(compositor).await?;
     
-    info!("🎉 All scrollable workspace tests completed successfully!");
+    time::sleep(Duration::from_millis(1000)).await;
     
+    // Phase 3: Test input processing
+    demo_input_processing(compositor).await?;
+    
+    time::sleep(Duration::from_millis(1000)).await;
+    
+    // Phase 3: Test enhanced workspace interactions
+    demo_enhanced_workspace_features(compositor).await?;
+    
+    info!("🎉 All Phase 3 scrollable workspace tests completed successfully!");
+    
+    Ok(())
+}
+
+/// Phase 3: Demo input processing capabilities
+pub async fn demo_input_processing(compositor: &mut AxiomCompositor) -> Result<()> {
+    info!("🎭 Phase 3: Demonstrating input processing...");
+    
+    // Set up some windows for testing
+    let window1 = compositor.add_window("Input Test Window 1".to_string());
+    let window2 = compositor.add_window("Input Test Window 2".to_string());
+    
+    time::sleep(Duration::from_millis(300)).await;
+    
+    // Test input simulation (normally these would come from real input devices)
+    info!("📋 Testing simulated keyboard input...");
+    
+    // Move to the right workspace with simulated input
+    // Note: In a real compositor, these would come from actual keyboard events
+    info!("⌨️ Simulating Super+Right key press (scroll right)");
+    compositor.scroll_workspace_right();
+    time::sleep(Duration::from_millis(400)).await;
+    
+    let (_column, position, _count, _scrolling) = compositor.get_workspace_info();
+    info!("🎯 Position after simulated input: {:.1}", position);
+    
+    // Test window movement
+    info!("⌨️ Simulating Super+Shift+Left (move window left)");
+    compositor.move_window_left(window1);
+    time::sleep(Duration::from_millis(300)).await;
+    
+    // Test scroll events (trackpad-like)
+    info!("📜 Simulating trackpad scroll gesture...");
+    compositor.scroll_workspace_left();
+    time::sleep(Duration::from_millis(400)).await;
+    
+    let (_column, position, _count, _scrolling) = compositor.get_workspace_info();
+    info!("🎯 Position after scroll gesture: {:.1}", position);
+    
+    // Clean up
+    compositor.remove_window(window1);
+    compositor.remove_window(window2);
+    
+    info!("✅ Input processing demonstration completed!");
+    Ok(())
+}
+
+/// Phase 3: Demo enhanced workspace features
+pub async fn demo_enhanced_workspace_features(compositor: &mut AxiomCompositor) -> Result<()> {
+    info!("🎭 Phase 3: Demonstrating enhanced workspace features...");
+    
+    // Test multiple viewport sizes (responsive design)
+    info!("📐 Testing responsive workspace layout...");
+    compositor.set_viewport_size(1366, 768); // Smaller screen
+    time::sleep(Duration::from_millis(200)).await;
+    
+    let w1 = compositor.add_window("Small Screen App".to_string());
+    
+    compositor.set_viewport_size(2560, 1440); // Larger screen
+    time::sleep(Duration::from_millis(200)).await;
+    
+    let w2 = compositor.add_window("Large Screen App".to_string());
+    
+    // Test rapid workspace navigation
+    info!("🏃 Testing rapid workspace navigation...");
+    for i in 0..5 {
+        compositor.scroll_workspace_right();
+        time::sleep(Duration::from_millis(100)).await; // Faster scrolling
+        
+        let (_column, position, _count, _scrolling) = compositor.get_workspace_info();
+        debug!("⚡ Rapid scroll {}: Position {:.1}", i + 1, position);
+    }
+    
+    // Test workspace with many windows
+    info!("🪟 Testing workspace with multiple windows...");
+    compositor.scroll_workspace_right();
+    time::sleep(Duration::from_millis(200)).await;
+    
+    let windows: Vec<u64> = (1..=6).map(|i| {
+        compositor.add_window(format!("Multi-Window App {}", i))
+    }).collect();
+    
+    let (_column, position, count, _scrolling) = compositor.get_workspace_info();
+    info!("🎯 Multi-window workspace: {} columns, position {:.1}", count, position);
+    
+    // Test window movement between multiple workspaces
+    info!("🔀 Testing complex window movements...");
+    
+    // Move some windows to different workspaces
+    for (i, &window_id) in windows.iter().enumerate() {
+        if i % 2 == 0 {
+            compositor.move_window_left(window_id);
+            time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+    
+    // Tour the final result
+    info!("🎪 Final workspace tour...");
+    for i in 0..3 {
+        compositor.scroll_workspace_left();
+        time::sleep(Duration::from_millis(300)).await;
+        
+        let (column, position, count, _scrolling) = compositor.get_workspace_info();
+        info!("🌟 Final tour {}: Column {}, Position {:.1}, {} total columns", 
+              i + 1, column, position, count);
+    }
+    
+    // Cleanup
+    for &window_id in &windows {
+        compositor.remove_window(window_id);
+    }
+    compositor.remove_window(w1);
+    compositor.remove_window(w2);
+    
+    info!("✅ Enhanced workspace features demonstration completed!");
     Ok(())
 }

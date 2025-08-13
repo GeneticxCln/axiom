@@ -319,6 +319,32 @@ impl AxiomIPCServer {
         Ok(())
     }
     
+    /// Phase 3: Process pending IPC messages
+    pub async fn process_messages(&mut self) -> Result<()> {
+        // Process any pending messages from Lazy UI
+        // In a real implementation, this would handle incoming connections
+        // and process optimization commands from the receiver
+        
+        if let Some(receiver) = &mut self.command_receiver {
+            while let Ok(message) = receiver.try_recv() {
+                debug!("📨 Processing Lazy UI message: {:?}", message);
+                // Process the message (optimization commands, config changes, etc.)
+                match message {
+                    LazyUIMessage::OptimizeConfig { changes, reason } => {
+                        info!("🎯 Processing optimization: {} ({})", changes.len(), reason);
+                    }
+                    _ => {
+                        debug!("📑 Other message type processed");
+                    }
+                }
+            }
+        }
+        
+        // Small delay to prevent busy loop
+        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+        Ok(())
+    }
+    
     /// Send user event to Lazy UI
     pub async fn send_user_event(&self, event_type: String, details: serde_json::Value) -> Result<()> {
         if let Some(sender) = &self.message_sender {
