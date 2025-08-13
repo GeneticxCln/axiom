@@ -1,14 +1,14 @@
 //! IPC (Inter-Process Communication) module for Axiom-Lazy UI integration
 //!
-//! This module provides communication between the Axiom compositor (Rust) and 
+//! This module provides communication between the Axiom compositor (Rust) and
 //! Lazy UI optimization system (Python) using Unix sockets and JSON messages.
 
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tokio::net::{UnixListener, UnixStream};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use log::{info, debug, warn, error};
+use tokio::net::{UnixListener, UnixStream};
 
 /// Messages sent from Axiom to Lazy UI (performance metrics, events)
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -24,14 +24,14 @@ pub enum AxiomMessage {
         active_windows: u32,
         current_workspace: i32,
     },
-    
+
     /// User interaction events
     UserEvent {
         timestamp: u64,
         event_type: String,
         details: serde_json::Value,
     },
-    
+
     /// Compositor state changes
     StateChange {
         timestamp: u64,
@@ -39,13 +39,13 @@ pub enum AxiomMessage {
         old_state: String,
         new_state: String,
     },
-    
+
     /// Configuration query response
     ConfigResponse {
         key: String,
         value: serde_json::Value,
     },
-    
+
     /// Compositor startup notification
     StartupComplete {
         version: String,
@@ -62,34 +62,32 @@ pub enum LazyUIMessage {
         changes: std::collections::HashMap<String, serde_json::Value>,
         reason: String,
     },
-    
+
     /// Request configuration value
-    GetConfig {
-        key: String,
-    },
-    
+    GetConfig { key: String },
+
     /// Set configuration value
     SetConfig {
         key: String,
         value: serde_json::Value,
     },
-    
+
     /// Workspace management commands
     WorkspaceCommand {
         action: String,
         parameters: serde_json::Value,
     },
-    
+
     /// Effects control
     EffectsControl {
         enabled: Option<bool>,
         blur_radius: Option<f32>,
         animation_speed: Option<f32>,
     },
-    
+
     /// System health check request
     HealthCheck,
-    
+
     /// Request performance report
     GetPerformanceReport,
 }
@@ -102,11 +100,17 @@ pub struct AxiomIPCServer {
     command_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<LazyUIMessage>>,
 }
 
+impl Default for AxiomIPCServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AxiomIPCServer {
     /// Create a new IPC server
     pub fn new() -> Self {
         let socket_path = PathBuf::from("/tmp/axiom-lazy-ui.sock");
-        
+
         Self {
             socket_path,
             listener: None,
@@ -114,27 +118,28 @@ impl AxiomIPCServer {
             command_receiver: None,
         }
     }
-    
+
     /// Start the IPC server
     pub async fn start(&mut self) -> Result<()> {
         // Remove existing socket file
         if self.socket_path.exists() {
-            std::fs::remove_file(&self.socket_path)
-                .with_context(|| format!("Failed to remove existing socket: {:?}", self.socket_path))?;
+            std::fs::remove_file(&self.socket_path).with_context(|| {
+                format!("Failed to remove existing socket: {:?}", self.socket_path)
+            })?;
         }
-        
+
         // Create Unix socket listener
         let listener = UnixListener::bind(&self.socket_path)
             .with_context(|| format!("Failed to bind Unix socket: {:?}", self.socket_path))?;
-        
+
         info!("🔗 Axiom IPC server listening on: {:?}", self.socket_path);
-        
+
         // Start accepting connections in a separate task
         tokio::spawn(Self::accept_connections_static(listener));
-        
+
         Ok(())
     }
-    
+
     /// Accept incoming connections from Lazy UI (static version)
     async fn accept_connections_static(listener: UnixListener) -> Result<()> {
         loop {
@@ -149,20 +154,22 @@ impl AxiomIPCServer {
             }
         }
     }
-    
+
     /// Accept incoming connections from Lazy UI (kept for compatibility)
     async fn accept_connections(&mut self) -> Result<()> {
-        let listener = self.listener.take()
+        let listener = self
+            .listener
+            .take()
             .ok_or_else(|| anyhow::anyhow!("IPC server not started"))?;
-        
+
         Self::accept_connections_static(listener).await
     }
-    
+
     /// Handle a single client connection
     async fn handle_client(stream: UnixStream) -> Result<()> {
         let (reader, mut writer) = stream.into_split();
         let mut lines = BufReader::new(reader).lines();
-        
+
         // Send startup notification
         let startup_msg = AxiomMessage::StartupComplete {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -173,17 +180,17 @@ impl AxiomIPCServer {
                 "ai_optimization".to_string(),
             ],
         };
-        
+
         Self::send_message(&mut writer, &startup_msg).await?;
-        
+
         // Process incoming messages
         while let Some(line) = lines.next_line().await? {
             if line.trim().is_empty() {
                 continue;
             }
-            
+
             debug!("📨 Received IPC message: {}", line);
-            
+
             match serde_json::from_str::<LazyUIMessage>(&line) {
                 Ok(message) => {
                     if let Err(e) = Self::process_lazy_ui_message(message, &mut writer).await {
@@ -195,11 +202,11 @@ impl AxiomIPCServer {
                 }
             }
         }
-        
+
         info!("📪 Lazy UI disconnected from Axiom IPC");
         Ok(())
     }
-    
+
     /// Process a message from Lazy UI
     async fn process_lazy_ui_message(
         message: LazyUIMessage,
@@ -207,88 +214,104 @@ impl AxiomIPCServer {
     ) -> Result<()> {
         match message {
             LazyUIMessage::OptimizeConfig { changes, reason } => {
-                info!("🎯 Applying AI optimization: {} changes ({})", changes.len(), reason);
-                
+                info!(
+                    "🎯 Applying AI optimization: {} changes ({})",
+                    changes.len(),
+                    reason
+                );
+
                 for (key, value) in changes {
                     debug!("  📝 Setting {}: {:?}", key, value);
                     // TODO: Actually apply configuration changes to Axiom
                 }
             }
-            
+
             LazyUIMessage::GetConfig { key } => {
                 debug!("📋 Config query: {}", key);
-                
+
                 // TODO: Get actual configuration value from Axiom
                 let response = AxiomMessage::ConfigResponse {
                     key: key.clone(),
                     value: serde_json::Value::String("default_value".to_string()),
                 };
-                
+
                 Self::send_message(writer, &response).await?;
             }
-            
+
             LazyUIMessage::SetConfig { key, value } => {
                 info!("⚙️ Setting config: {} = {:?}", key, value);
                 // TODO: Actually set configuration in Axiom
             }
-            
+
             LazyUIMessage::WorkspaceCommand { action, parameters } => {
-                info!("🖥️ Workspace command: {} with params: {:?}", action, parameters);
+                info!(
+                    "🖥️ Workspace command: {} with params: {:?}",
+                    action, parameters
+                );
                 // TODO: Execute workspace command
             }
-            
-            LazyUIMessage::EffectsControl { enabled, blur_radius, animation_speed } => {
-                info!("✨ Effects control - enabled: {:?}, blur: {:?}, animation: {:?}", 
-                      enabled, blur_radius, animation_speed);
+
+            LazyUIMessage::EffectsControl {
+                enabled,
+                blur_radius,
+                animation_speed,
+            } => {
+                info!(
+                    "✨ Effects control - enabled: {:?}, blur: {:?}, animation: {:?}",
+                    enabled, blur_radius, animation_speed
+                );
                 // TODO: Apply effects changes
             }
-            
+
             LazyUIMessage::HealthCheck => {
                 debug!("🏥 Health check request");
-                
+
                 // Send performance metrics as health response
                 let metrics = AxiomMessage::PerformanceMetrics {
                     timestamp: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)?
                         .as_secs(),
-                    cpu_usage: 15.5,  // TODO: Get real metrics
+                    cpu_usage: 15.5, // TODO: Get real metrics
                     memory_usage: 32.1,
                     gpu_usage: 8.3,
                     frame_time: 16.67,
                     active_windows: 3,
                     current_workspace: 0,
                 };
-                
+
                 Self::send_message(writer, &metrics).await?;
             }
-            
+
             LazyUIMessage::GetPerformanceReport => {
                 debug!("📊 Performance report request");
                 // TODO: Generate comprehensive performance report
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Send a message to Lazy UI
     async fn send_message(
         writer: &mut tokio::net::unix::OwnedWriteHalf,
         message: &AxiomMessage,
     ) -> Result<()> {
-        let json = serde_json::to_string(message)
-            .with_context(|| "Failed to serialize message")?;
-        
-        writer.write_all(json.as_bytes()).await
+        let json = serde_json::to_string(message).with_context(|| "Failed to serialize message")?;
+
+        writer
+            .write_all(json.as_bytes())
+            .await
             .with_context(|| "Failed to write message")?;
-        writer.write_all(b"\n").await
+        writer
+            .write_all(b"\n")
+            .await
             .with_context(|| "Failed to write newline")?;
-        
+
         debug!("📤 Sent IPC message: {}", json);
-        
+
         Ok(())
     }
-    
+
     /// Send performance metrics to Lazy UI
     pub async fn send_performance_metrics(
         &self,
@@ -311,20 +334,21 @@ impl AxiomIPCServer {
                 active_windows,
                 current_workspace,
             };
-            
-            sender.send(metrics)
+
+            sender
+                .send(metrics)
                 .map_err(|_| anyhow::anyhow!("Failed to send performance metrics"))?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Phase 3: Process pending IPC messages
     pub async fn process_messages(&mut self) -> Result<()> {
         // Process any pending messages from Lazy UI
         // In a real implementation, this would handle incoming connections
         // and process optimization commands from the receiver
-        
+
         if let Some(receiver) = &mut self.command_receiver {
             while let Ok(message) = receiver.try_recv() {
                 debug!("📨 Processing Lazy UI message: {:?}", message);
@@ -339,14 +363,18 @@ impl AxiomIPCServer {
                 }
             }
         }
-        
+
         // Small delay to prevent busy loop
         tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         Ok(())
     }
-    
+
     /// Send user event to Lazy UI
-    pub async fn send_user_event(&self, event_type: String, details: serde_json::Value) -> Result<()> {
+    pub async fn send_user_event(
+        &self,
+        event_type: String,
+        details: serde_json::Value,
+    ) -> Result<()> {
         if let Some(sender) = &self.message_sender {
             let event = AxiomMessage::UserEvent {
                 timestamp: std::time::SystemTime::now()
@@ -355,14 +383,15 @@ impl AxiomIPCServer {
                 event_type,
                 details,
             };
-            
-            sender.send(event)
+
+            sender
+                .send(event)
                 .map_err(|_| anyhow::anyhow!("Failed to send user event"))?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Get the socket path
     pub fn socket_path(&self) -> &PathBuf {
         &self.socket_path
@@ -383,7 +412,7 @@ impl Drop for AxiomIPCServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_message_serialization() {
         let message = AxiomMessage::PerformanceMetrics {
@@ -395,20 +424,21 @@ mod tests {
             active_windows: 5,
             current_workspace: 2,
         };
-        
+
         let json = serde_json::to_string(&message).unwrap();
         println!("Serialized message: {}", json);
-        
+
         // Test that we can deserialize it back
         let _deserialized: AxiomMessage = serde_json::from_str(&json).unwrap();
     }
-    
+
     #[test]
     fn test_lazy_ui_message_deserialization() {
-        let json = r#"{"type":"OptimizeConfig","changes":{"blur_radius":5.0},"reason":"performance"}"#;
-        
+        let json =
+            r#"{"type":"OptimizeConfig","changes":{"blur_radius":5.0},"reason":"performance"}"#;
+
         let message: LazyUIMessage = serde_json::from_str(json).unwrap();
-        
+
         match message {
             LazyUIMessage::OptimizeConfig { changes, reason } => {
                 assert_eq!(reason, "performance");

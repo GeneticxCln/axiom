@@ -6,17 +6,16 @@
 //! - Dynamic lighting effects
 //! - Performance-optimized shadow maps
 
-use wgpu::{
-    Device, Queue, Buffer, Texture, TextureView, RenderPipeline, BindGroup,
-    CommandEncoder, TextureFormat, TextureUsages, BufferUsages,
-    BufferDescriptor, BindGroupDescriptor, BindGroupEntry,
-    RenderPipelineDescriptor, FragmentState, VertexState, PrimitiveState,
-    MultisampleState, ColorTargetState, BlendState, ColorWrites,
-};
-use cgmath::{Vector2, Vector3, Vector4, InnerSpace};
-use log::{info, debug};
 use anyhow::Result;
+use cgmath::{InnerSpace, Vector2, Vector3, Vector4};
+use log::{debug, info};
 use std::sync::Arc;
+use wgpu::{
+    BindGroupDescriptor, BindGroupEntry, BlendState, Buffer, BufferDescriptor,
+    BufferUsages, ColorTargetState, ColorWrites, CommandEncoder, Device, FragmentState,
+    MultisampleState, PrimitiveState, Queue, RenderPipeline, RenderPipelineDescriptor, Texture,
+    TextureFormat, TextureUsages, TextureView, VertexState,
+};
 
 use super::shaders::{ShaderManager, ShaderType};
 use super::ShadowParams;
@@ -61,22 +60,22 @@ pub struct ShadowRenderer {
     device: Arc<Device>,
     queue: Arc<Queue>,
     shader_manager: Arc<ShaderManager>,
-    
+
     // Render pipelines for shadow effects
     drop_shadow_pipeline: Option<RenderPipeline>,
     inner_shadow_pipeline: Option<RenderPipeline>,
-    
+
     // Uniform buffers
     shadow_params_buffer: Buffer,
-    
+
     // Shadow map textures for complex shadows
     shadow_map_texture: Option<Texture>,
     shadow_map_view: Option<TextureView>,
-    
+
     // Current shadow settings
     current_quality: ShadowQuality,
     global_shadow_params: ShadowParams,
-    
+
     // Performance tracking
     last_render_time: std::time::Duration,
 }
@@ -102,7 +101,7 @@ impl ShadowRenderer {
         quality: ShadowQuality,
     ) -> Result<Self> {
         info!("🌟 Initializing GPU Shadow Renderer...");
-        
+
         // Create uniform buffer for shadow parameters
         let shadow_params_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("Shadow Parameters Buffer"),
@@ -110,7 +109,7 @@ impl ShadowRenderer {
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        
+
         let mut renderer = Self {
             device,
             queue,
@@ -124,74 +123,82 @@ impl ShadowRenderer {
             global_shadow_params: initial_params,
             last_render_time: std::time::Duration::from_millis(0),
         };
-        
+
         // Initialize render pipelines
         renderer.create_shadow_pipelines()?;
-        
+
         info!("✅ Shadow Renderer initialized with {:?} quality", quality);
         Ok(renderer)
     }
-    
+
     /// Create render pipelines for shadow effects
     fn create_shadow_pipelines(&mut self) -> Result<()> {
         debug!("🔧 Creating shadow render pipelines...");
-        
+
         // Get compiled shaders
-        let shadow_shader = self.shader_manager.get_shader(&ShaderType::DropShadow)
+        let shadow_shader = self
+            .shader_manager
+            .get_shader(&ShaderType::DropShadow)
             .ok_or_else(|| anyhow::anyhow!("Drop shadow shader not found"))?;
-        
+
         // Create bind group layout for shadow uniforms
-        let bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Shadow Bind Group Layout"),
-            entries: &[
-                // Shadow uniforms
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-        
-        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Shadow Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        
+        let bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Shadow Bind Group Layout"),
+                    entries: &[
+                        // Shadow uniforms
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Shadow Pipeline Layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
         // Drop shadow pipeline
-        self.drop_shadow_pipeline = Some(self.device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("Drop Shadow Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: VertexState {
-                module: shadow_shader,
-                entry_point: "vs_main",
-                buffers: &[],
+        self.drop_shadow_pipeline = Some(self.device.create_render_pipeline(
+            &RenderPipelineDescriptor {
+                label: Some("Drop Shadow Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: VertexState {
+                    module: shadow_shader,
+                    entry_point: "vs_main",
+                    buffers: &[],
+                },
+                fragment: Some(FragmentState {
+                    module: shadow_shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(ColorTargetState {
+                        format: TextureFormat::Bgra8UnormSrgb,
+                        blend: Some(BlendState::ALPHA_BLENDING),
+                        write_mask: ColorWrites::ALL,
+                    })],
+                }),
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                multiview: None,
             },
-            fragment: Some(FragmentState {
-                module: shadow_shader,
-                entry_point: "fs_main",
-                targets: &[Some(ColorTargetState {
-                    format: TextureFormat::Bgra8UnormSrgb,
-                    blend: Some(BlendState::ALPHA_BLENDING),
-                    write_mask: ColorWrites::ALL,
-                })],
-            }),
-            primitive: PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: MultisampleState::default(),
-            multiview: None,
-        }));
-        
+        ));
+
         debug!("✅ Shadow pipelines created successfully");
         Ok(())
     }
-    
+
     /// Render drop shadow for a window
     pub fn render_drop_shadow(
         &mut self,
@@ -204,9 +211,9 @@ impl ShadowRenderer {
         if !shadow_params.enabled {
             return Ok(());
         }
-        
+
         let start_time = std::time::Instant::now();
-        
+
         // Calculate shadow parameters based on quality
         let (blur_radius, sample_count) = match self.current_quality {
             ShadowQuality::Low => (shadow_params.blur_radius * 0.5, 4),
@@ -214,7 +221,7 @@ impl ShadowRenderer {
             ShadowQuality::High => (shadow_params.blur_radius * 1.2, 16),
             ShadowQuality::Ultra => (shadow_params.blur_radius * 1.5, 32),
         };
-        
+
         // Update uniform buffer with shadow parameters
         let uniforms = ShadowUniforms {
             shadow_offset: [shadow_params.offset.0, shadow_params.offset.1],
@@ -223,23 +230,29 @@ impl ShadowRenderer {
             shadow_color: shadow_params.color,
             window_size: [window_size.x, window_size.y],
             light_position: [0.0, -200.0, 100.0], // Default light position
-            shadow_type: 0, // Drop shadow
+            shadow_type: 0,                       // Drop shadow
         };
-        
-        self.queue.write_buffer(&self.shadow_params_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-        
+
+        self.queue.write_buffer(
+            &self.shadow_params_buffer,
+            0,
+            bytemuck::cast_slice(&[uniforms]),
+        );
+
         // Create bind group for this render
         let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Drop Shadow Bind Group"),
-            layout: &self.drop_shadow_pipeline.as_ref().unwrap().get_bind_group_layout(0),
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: self.shadow_params_buffer.as_entire_binding(),
-                },
-            ],
+            layout: &self
+                .drop_shadow_pipeline
+                .as_ref()
+                .unwrap()
+                .get_bind_group_layout(0),
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: self.shadow_params_buffer.as_entire_binding(),
+            }],
         });
-        
+
         // Render pass for shadow
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Drop Shadow Pass"),
@@ -255,19 +268,23 @@ impl ShadowRenderer {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        
+
         render_pass.set_pipeline(self.drop_shadow_pipeline.as_ref().unwrap());
         render_pass.set_bind_group(0, &bind_group, &[]);
         render_pass.draw(0..6, 0..1); // Two triangles for quad
-        
+
         self.last_render_time = start_time.elapsed();
-        
-        debug!("🌟 Rendered drop shadow: blur={:.1}, opacity={:.1}, time={:.2}ms",
-               blur_radius, shadow_params.opacity, self.last_render_time.as_secs_f64() * 1000.0);
-        
+
+        debug!(
+            "🌟 Rendered drop shadow: blur={:.1}, opacity={:.1}, time={:.2}ms",
+            blur_radius,
+            shadow_params.opacity,
+            self.last_render_time.as_secs_f64() * 1000.0
+        );
+
         Ok(())
     }
-    
+
     /// Render multiple shadows efficiently in a batch
     pub fn render_shadow_batch(
         &mut self,
@@ -276,13 +293,13 @@ impl ShadowRenderer {
         shadow_data: &[(Vector2<f32>, Vector2<f32>, ShadowParams)], // (position, size, params)
     ) -> Result<()> {
         let start_time = std::time::Instant::now();
-        
+
         // Process each shadow individually to avoid bind group lifetime issues
         for (_position, size, shadow_params) in shadow_data {
             if !shadow_params.enabled {
                 continue;
             }
-            
+
             // Update uniforms for this shadow
             let blur_radius = match self.current_quality {
                 ShadowQuality::Low => shadow_params.blur_radius * 0.5,
@@ -290,7 +307,7 @@ impl ShadowRenderer {
                 ShadowQuality::High => shadow_params.blur_radius * 1.2,
                 ShadowQuality::Ultra => shadow_params.blur_radius * 1.5,
             };
-            
+
             let uniforms = ShadowUniforms {
                 shadow_offset: [shadow_params.offset.0, shadow_params.offset.1],
                 shadow_blur: blur_radius,
@@ -300,21 +317,27 @@ impl ShadowRenderer {
                 light_position: [0.0, -200.0, 100.0],
                 shadow_type: 0,
             };
-            
-            self.queue.write_buffer(&self.shadow_params_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-            
+
+            self.queue.write_buffer(
+                &self.shadow_params_buffer,
+                0,
+                bytemuck::cast_slice(&[uniforms]),
+            );
+
             // Create bind group for this shadow
             let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
                 label: Some("Batch Shadow Bind Group"),
-                layout: &self.drop_shadow_pipeline.as_ref().unwrap().get_bind_group_layout(0),
-                entries: &[
-                    BindGroupEntry {
-                        binding: 0,
-                        resource: self.shadow_params_buffer.as_entire_binding(),
-                    },
-                ],
+                layout: &self
+                    .drop_shadow_pipeline
+                    .as_ref()
+                    .unwrap()
+                    .get_bind_group_layout(0),
+                entries: &[BindGroupEntry {
+                    binding: 0,
+                    resource: self.shadow_params_buffer.as_entire_binding(),
+                }],
             });
-            
+
             // Individual render pass for each shadow
             {
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -331,21 +354,24 @@ impl ShadowRenderer {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
-                
+
                 render_pass.set_pipeline(self.drop_shadow_pipeline.as_ref().unwrap());
                 render_pass.set_bind_group(0, &bind_group, &[]);
                 render_pass.draw(0..6, 0..1);
             }
         }
-        
+
         self.last_render_time = start_time.elapsed();
-        
-        debug!("🌟 Rendered {} shadows in batch, time={:.2}ms",
-               shadow_data.len(), self.last_render_time.as_secs_f64() * 1000.0);
-        
+
+        debug!(
+            "🌟 Rendered {} shadows in batch, time={:.2}ms",
+            shadow_data.len(),
+            self.last_render_time.as_secs_f64() * 1000.0
+        );
+
         Ok(())
     }
-    
+
     /// Render dynamic shadow based on light position
     pub fn render_dynamic_shadow(
         &mut self,
@@ -359,26 +385,29 @@ impl ShadowRenderer {
         if !shadow_params.enabled {
             return Ok(());
         }
-        
+
         // Calculate shadow offset based on light position
         let light_direction = Vector2::new(
             light_position.x - window_position.x,
             light_position.y - window_position.y,
         );
-        
+
         // Normalize and scale for shadow offset
         let shadow_distance = 20.0 * (100.0 / light_position.z.max(50.0));
         let shadow_offset = if light_direction.magnitude() > 0.0 {
             let normalized = light_direction / light_direction.magnitude();
-            Vector2::new(-normalized.x * shadow_distance, -normalized.y * shadow_distance)
+            Vector2::new(
+                -normalized.x * shadow_distance,
+                -normalized.y * shadow_distance,
+            )
         } else {
             Vector2::new(0.0, shadow_distance) // Default downward shadow
         };
-        
+
         // Calculate blur based on distance from light
         let distance_factor = (light_position.z / 200.0).min(2.0);
         let dynamic_blur = shadow_params.blur_radius * distance_factor;
-        
+
         // Update uniforms for dynamic shadow
         let uniforms = ShadowUniforms {
             shadow_offset: [shadow_offset.x, shadow_offset.y],
@@ -389,21 +418,27 @@ impl ShadowRenderer {
             light_position: [light_position.x, light_position.y, light_position.z],
             shadow_type: 2, // Dynamic shadow
         };
-        
-        self.queue.write_buffer(&self.shadow_params_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-        
+
+        self.queue.write_buffer(
+            &self.shadow_params_buffer,
+            0,
+            bytemuck::cast_slice(&[uniforms]),
+        );
+
         // Create bind group
         let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Dynamic Shadow Bind Group"),
-            layout: &self.drop_shadow_pipeline.as_ref().unwrap().get_bind_group_layout(0),
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: self.shadow_params_buffer.as_entire_binding(),
-                },
-            ],
+            layout: &self
+                .drop_shadow_pipeline
+                .as_ref()
+                .unwrap()
+                .get_bind_group_layout(0),
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: self.shadow_params_buffer.as_entire_binding(),
+            }],
         });
-        
+
         // Render pass
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Dynamic Shadow Pass"),
@@ -419,45 +454,52 @@ impl ShadowRenderer {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        
+
         render_pass.set_pipeline(self.drop_shadow_pipeline.as_ref().unwrap());
         render_pass.set_bind_group(0, &bind_group, &[]);
         render_pass.draw(0..6, 0..1);
-        
-        debug!("🌟 Rendered dynamic shadow: offset=({:.1}, {:.1}), blur={:.1}",
-               shadow_offset.x, shadow_offset.y, dynamic_blur);
-        
+
+        debug!(
+            "🌟 Rendered dynamic shadow: offset=({:.1}, {:.1}), blur={:.1}",
+            shadow_offset.x, shadow_offset.y, dynamic_blur
+        );
+
         Ok(())
     }
-    
+
     /// Update shadow quality level
     pub fn set_shadow_quality(&mut self, quality: ShadowQuality) {
         if std::mem::discriminant(&self.current_quality) != std::mem::discriminant(&quality) {
-            info!("🎛️ Updated shadow quality: {:?} -> {:?}", self.current_quality, quality);
+            info!(
+                "🎛️ Updated shadow quality: {:?} -> {:?}",
+                self.current_quality, quality
+            );
             self.current_quality = quality;
         }
     }
-    
+
     /// Update global shadow parameters
     pub fn update_global_shadow_params(&mut self, params: ShadowParams) {
         self.global_shadow_params = params;
         debug!("🔄 Updated global shadow parameters");
     }
-    
+
     /// Get performance statistics
     pub fn get_performance_stats(&self) -> (std::time::Duration, ShadowQuality) {
         (self.last_render_time, self.current_quality)
     }
-    
+
     /// Create a shadow map texture for advanced shadow techniques
     fn ensure_shadow_map(&mut self, size: Vector2<u32>) -> Result<()> {
-        let needs_creation = self.shadow_map_texture.as_ref()
+        let needs_creation = self
+            .shadow_map_texture
+            .as_ref()
             .map(|texture| texture.width() != size.x || texture.height() != size.y)
             .unwrap_or(true);
-        
+
         if needs_creation && matches!(self.current_quality, ShadowQuality::Ultra) {
             debug!("🗺️ Creating shadow map texture: {}x{}", size.x, size.y);
-            
+
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Shadow Map Texture"),
                 size: wgpu::Extent3d {
@@ -472,18 +514,22 @@ impl ShadowRenderer {
                 usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
-            
+
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            
+
             self.shadow_map_texture = Some(texture);
             self.shadow_map_view = Some(view);
         }
-        
+
         Ok(())
     }
-    
+
     /// Optimize shadow parameters based on performance
-    pub fn optimize_for_performance(&mut self, frame_time: std::time::Duration, target_time: std::time::Duration) {
+    pub fn optimize_for_performance(
+        &mut self,
+        frame_time: std::time::Duration,
+        target_time: std::time::Duration,
+    ) {
         if frame_time > target_time * 2 {
             // Performance is poor, reduce quality
             match self.current_quality {
@@ -494,8 +540,10 @@ impl ShadowRenderer {
                     // Already at lowest quality, reduce shadow opacity
                     if self.global_shadow_params.opacity > 0.3 {
                         self.global_shadow_params.opacity *= 0.9;
-                        debug!("⚡ Reduced shadow opacity to {:.2} for performance", 
-                               self.global_shadow_params.opacity);
+                        debug!(
+                            "⚡ Reduced shadow opacity to {:.2} for performance",
+                            self.global_shadow_params.opacity
+                        );
                     }
                 }
             }
@@ -508,7 +556,8 @@ impl ShadowRenderer {
                 ShadowQuality::Ultra => {
                     // Already at highest quality, restore full opacity if needed
                     if self.global_shadow_params.opacity < 1.0 {
-                        self.global_shadow_params.opacity = (self.global_shadow_params.opacity * 1.1).min(1.0);
+                        self.global_shadow_params.opacity =
+                            (self.global_shadow_params.opacity * 1.1).min(1.0);
                     }
                 }
             }

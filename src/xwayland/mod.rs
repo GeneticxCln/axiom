@@ -1,8 +1,8 @@
 //! XWayland integration for X11 app compatibility
 //! Provides seamless integration of X11 applications in Wayland
 
-use anyhow::Result;
 use crate::config::XWaylandConfig;
+use anyhow::Result;
 
 pub struct XWaylandManager {
     config: XWaylandConfig,
@@ -14,7 +14,7 @@ impl XWaylandManager {
             config: config.clone(),
         })
     }
-    
+
     pub async fn shutdown(&mut self) -> Result<()> {
         Ok(())
     }

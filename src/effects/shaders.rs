@@ -6,9 +6,9 @@
 //! - Rounded corners with anti-aliasing
 //! - Window animations and transformations
 
-use wgpu::{Device, ShaderModule, ShaderModuleDescriptor, ShaderSource};
-use log::{info, debug};
 use anyhow::Result;
+use log::{debug, info};
+use wgpu::{ShaderModule, ShaderModuleDescriptor, ShaderSource};
 
 /// Shader types supported by the effects engine
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -43,50 +43,53 @@ impl ShaderManager {
             compiled_shaders: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Compile all effects shaders
     pub fn compile_all_shaders(&mut self) -> Result<()> {
         info!("⚡ Compiling Phase 4 visual effects shaders...");
-        
+
         // Compile window rendering shaders
         self.compile_shader(ShaderType::WindowVertex)?;
         self.compile_shader(ShaderType::WindowFragment)?;
-        
+
         // Compile blur effect shaders
         self.compile_shader(ShaderType::BlurHorizontal)?;
         self.compile_shader(ShaderType::BlurVertical)?;
-        
+
         // Compile shadow and corner shaders
         self.compile_shader(ShaderType::DropShadow)?;
         self.compile_shader(ShaderType::RoundedCorners)?;
-        
+
         // Compile animation shader
         self.compile_shader(ShaderType::AnimationTransform)?;
-        
-        info!("✅ Successfully compiled {} shaders", self.compiled_shaders.len());
+
+        info!(
+            "✅ Successfully compiled {} shaders",
+            self.compiled_shaders.len()
+        );
         Ok(())
     }
-    
+
     /// Get a compiled shader by type
     pub fn get_shader(&self, shader_type: &ShaderType) -> Option<&ShaderModule> {
         self.compiled_shaders.get(shader_type)
     }
-    
+
     /// Compile a specific shader
     fn compile_shader(&mut self, shader_type: ShaderType) -> Result<()> {
         let source = self.get_shader_source(&shader_type);
-        
+
         let shader = self.device.create_shader_module(ShaderModuleDescriptor {
             label: Some(&format!("{:?} Shader", shader_type)),
             source: ShaderSource::Wgsl(source.into()),
         });
-        
+
         self.compiled_shaders.insert(shader_type.clone(), shader);
         debug!("✨ Compiled shader: {:?}", shader_type);
-        
+
         Ok(())
     }
-    
+
     /// Get shader source code for a specific shader type
     fn get_shader_source(&self, shader_type: &ShaderType) -> &'static str {
         match shader_type {

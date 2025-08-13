@@ -9,6 +9,26 @@ license = "GPL-3.0"
 keywords = ["wayland", "compositor", "window-manager", "tiling", "effects"]
 categories = ["gui"]
 
+[[bin]]
+name = "axiom"
+path = "src/main.rs"
+
+[[bin]]
+name = "test_real_backend"
+path = "src/test_real_backend.rs"
+
+[[bin]]
+name = "test_basic"
+path = "src/test_basic.rs"
+
+[[bin]]
+name = "test_socket"
+path = "src/test_socket.rs"
+
+[[bin]]
+name = "test_real"
+path = "src/test_real.rs"
+
 [dependencies]
 # Configuration and serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -79,6 +99,9 @@ parking_lot = "0.12"  # For RwLock synchronization
 # Development dependencies
 [dev-dependencies]
 criterion = "0.5"
+
+[build-dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 
 # Build optimizations
 [profile.release]

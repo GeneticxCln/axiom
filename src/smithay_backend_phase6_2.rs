@@ -16,17 +16,14 @@
 //! - Working integration with Smithay 0.3.0
 
 use anyhow::{Context, Result};
-use log::{debug, info, warn};
+use log::{debug, info};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 // Smithay imports - compatible with 0.3.0
-use smithay::{
-    reexports::calloop::EventLoop,
-    reexports::wayland_server::Display,
-};
+use smithay::{reexports::calloop::EventLoop, reexports::wayland_server::Display};
 
 // Axiom imports - all existing systems
 use crate::config::AxiomConfig;
@@ -52,7 +49,7 @@ pub struct AxiomSmithayBackendPhase6_2 {
     decoration_manager: Arc<RwLock<DecorationManager>>,
     input_manager: Arc<RwLock<InputManager>>,
 
-    // Smithay Infrastructure  
+    // Smithay Infrastructure
     socket_name: Option<String>,
 
     // Simulated protocol state
@@ -106,8 +103,8 @@ impl AxiomSmithayBackendPhase6_2 {
 
         // Create event loop for demonstration
         info!("🔄 Creating compositor event loop...");
-        let _event_loop: EventLoop<()> = EventLoop::try_new()
-            .context("Failed to create event loop")?;
+        let _event_loop: EventLoop<()> =
+            EventLoop::try_new().context("Failed to create event loop")?;
 
         // Create display for demonstration
         info!("🔌 Creating real Wayland display with protocol support...");
@@ -131,7 +128,10 @@ impl AxiomSmithayBackendPhase6_2 {
         self.initialize_protocol_simulation().await?;
 
         info!("✅ Phase 6.2: Backend initialized successfully");
-        info!("  🚀 Clients can connect via WAYLAND_DISPLAY={}", socket_name);
+        info!(
+            "  🚀 Clients can connect via WAYLAND_DISPLAY={}",
+            socket_name
+        );
         info!("  📋 Enhanced simulation: wl_compositor, wl_shm, xdg_shell");
         info!("  📋 Ready for advanced client/surface management!");
 
@@ -142,13 +142,14 @@ impl AxiomSmithayBackendPhase6_2 {
     async fn initialize_protocol_simulation(&mut self) -> Result<()> {
         info!("🔧 Initializing enhanced protocol simulation");
         info!("  📝 wl_compositor: Advanced surface creation simulation");
-        info!("  🖥️ xdg_shell: Enhanced window lifecycle simulation"); 
+        info!("  🖥️ xdg_shell: Enhanced window lifecycle simulation");
         info!("  💾 wl_shm: Improved buffer handling simulation");
         info!("  ⌨️ wl_seat: Advanced input handling simulation");
         info!("  📋 wl_data_device: Enhanced clipboard simulation");
 
         // Pre-create some simulated client connections for demonstration
-        self.simulate_client_connection("system-status".to_string()).await?;
+        self.simulate_client_connection("system-status".to_string())
+            .await?;
         info!("  🔗 Created system status simulation client");
 
         Ok(())
@@ -157,7 +158,7 @@ impl AxiomSmithayBackendPhase6_2 {
     /// Simulate new client connection with enhanced features
     pub async fn simulate_client_connection(&mut self, client_name: String) -> Result<u64> {
         info!("🔗 Simulating enhanced client connection: {}", client_name);
-        
+
         // Create corresponding Axiom window
         let axiom_window_id = {
             let mut window_manager = self.window_manager.write();
@@ -165,29 +166,40 @@ impl AxiomSmithayBackendPhase6_2 {
         };
 
         // Map client to Axiom window
-        self.client_connections.insert(client_name.clone(), axiom_window_id);
-        self.simulated_surfaces.insert(axiom_window_id, format!("{}_enhanced_surface", client_name));
-        
+        self.client_connections
+            .insert(client_name.clone(), axiom_window_id);
+        self.simulated_surfaces
+            .insert(axiom_window_id, format!("{}_enhanced_surface", client_name));
+
         // Add to workspace with enhanced integration
         {
             let mut workspace_manager = self.workspace_manager.write();
             workspace_manager.add_window(axiom_window_id);
-            info!("📱 Added enhanced simulated window {} to scrollable workspace", axiom_window_id);
+            info!(
+                "📱 Added enhanced simulated window {} to scrollable workspace",
+                axiom_window_id
+            );
         }
-        
+
         // Simulate protocol-specific initialization
         self.simulate_surface_creation(&client_name).await?;
         self.simulate_xdg_shell_setup(&client_name).await?;
-        
-        info!("🔗 Mapped enhanced client {} to Axiom window {}", client_name, axiom_window_id);
+
+        info!(
+            "🔗 Mapped enhanced client {} to Axiom window {}",
+            client_name, axiom_window_id
+        );
         info!("✅ Enhanced Wayland window fully integrated with Axiom systems!");
-        
+
         Ok(axiom_window_id)
     }
 
     /// Simulate surface creation with enhanced protocol handling
     async fn simulate_surface_creation(&mut self, client_name: &str) -> Result<()> {
-        info!("📝 Simulating enhanced surface creation for: {}", client_name);
+        info!(
+            "📝 Simulating enhanced surface creation for: {}",
+            client_name
+        );
         info!("  🔧 wl_compositor.create_surface()");
         info!("  🔧 Surface configured with enhanced properties");
         info!("  🔧 Buffer attachment simulation ready");
@@ -196,7 +208,10 @@ impl AxiomSmithayBackendPhase6_2 {
 
     /// Simulate XDG shell setup with enhanced features
     async fn simulate_xdg_shell_setup(&mut self, client_name: &str) -> Result<()> {
-        info!("🖥️ Simulating enhanced XDG shell setup for: {}", client_name);
+        info!(
+            "🖥️ Simulating enhanced XDG shell setup for: {}",
+            client_name
+        );
         info!("  🔧 xdg_wm_base.get_xdg_surface()");
         info!("  🔧 xdg_surface.get_toplevel()");
         info!("  🔧 Enhanced window properties configured");
@@ -207,34 +222,43 @@ impl AxiomSmithayBackendPhase6_2 {
     /// Simulate client disconnection with enhanced cleanup
     pub async fn simulate_client_disconnection(&mut self, client_name: &str) -> Result<()> {
         if let Some(window_id) = self.client_connections.remove(client_name) {
-            info!("🔌 Simulating enhanced client disconnection: {}", client_name);
-            
+            info!(
+                "🔌 Simulating enhanced client disconnection: {}",
+                client_name
+            );
+
             // Enhanced protocol cleanup simulation
             self.simulate_protocol_cleanup(client_name).await?;
-            
+
             // Remove from workspace
             {
                 let mut workspace_manager = self.workspace_manager.write();
                 workspace_manager.remove_window(window_id);
             }
-            
+
             // Remove from window manager
             {
                 let mut window_manager = self.window_manager.write();
                 window_manager.remove_window(window_id);
             }
-            
+
             // Remove surface simulation
             self.simulated_surfaces.remove(&window_id);
-            
-            info!("✅ Enhanced window {} fully removed from all Axiom systems", window_id);
+
+            info!(
+                "✅ Enhanced window {} fully removed from all Axiom systems",
+                window_id
+            );
         }
         Ok(())
     }
 
     /// Simulate enhanced protocol cleanup
     async fn simulate_protocol_cleanup(&mut self, client_name: &str) -> Result<()> {
-        info!("🧹 Simulating enhanced protocol cleanup for: {}", client_name);
+        info!(
+            "🧹 Simulating enhanced protocol cleanup for: {}",
+            client_name
+        );
         info!("  🔧 XDG toplevel destroyed");
         info!("  🔧 Surface destroyed");
         info!("  🔧 Buffer cleanup");
@@ -244,34 +268,37 @@ impl AxiomSmithayBackendPhase6_2 {
 
     /// Simulate enhanced input event processing
     pub async fn simulate_input_event(&mut self, event_type: &str, details: &str) -> Result<()> {
-        info!("⌨️ Simulating enhanced input event: {} - {}", event_type, details);
-        
+        info!(
+            "⌨️ Simulating enhanced input event: {} - {}",
+            event_type, details
+        );
+
         // Process through Axiom's input manager
         let _input_manager = self.input_manager.write();
-        
+
         match event_type {
             "keyboard" => {
                 info!("⌨️ Processing enhanced keyboard event through Axiom input system");
                 info!("  🔧 Key binding resolution");
                 info!("  🔧 Workspace navigation triggers");
                 info!("  🔧 Window management shortcuts");
-            },
+            }
             "pointer" => {
                 info!("🖱️ Processing enhanced pointer event through Axiom input system");
                 info!("  🔧 Window focus management");
                 info!("  🔧 Resize/move operations");
                 info!("  🔧 Visual feedback triggers");
-            },
+            }
             "scroll" => {
                 info!("🖱️ Processing enhanced scroll event - triggering workspace navigation!");
-                let mut workspace_manager = self.workspace_manager.write();
+                let workspace_manager = self.workspace_manager.write();
                 if details.contains("horizontal") {
                     info!("🌊 Enhanced horizontal scroll triggering workspace navigation");
                     info!("  🔧 Smooth scrolling animation");
                     info!("  🔧 Momentum-based scrolling");
                     info!("  🔧 Multi-workspace preview");
                 }
-            },
+            }
             _ => {
                 debug!("❓ Unknown enhanced input event type: {}", event_type);
             }
@@ -283,41 +310,57 @@ impl AxiomSmithayBackendPhase6_2 {
     pub async fn render_frame(&mut self) -> Result<()> {
         self.frame_count += 1;
 
-        let simulated_clients: Vec<_> = self.client_connections.iter()
+        let simulated_clients: Vec<_> = self
+            .client_connections
+            .iter()
             .map(|(name, id)| (name.clone(), *id))
             .collect();
-        
-        debug!("🎨 Rendering frame {} with {} enhanced Wayland windows", 
-               self.frame_count, simulated_clients.len());
+
+        debug!(
+            "🎨 Rendering frame {} with {} enhanced Wayland windows",
+            self.frame_count,
+            simulated_clients.len()
+        );
 
         // Enhanced rendering simulation
         if self.frame_count % 60 == 0 {
-            info!("🎭 Enhanced rendering simulation (frame {})", self.frame_count);
+            info!(
+                "🎭 Enhanced rendering simulation (frame {})",
+                self.frame_count
+            );
             info!("  🔧 Surface composition");
-            info!("  🔧 Buffer management");  
+            info!("  🔧 Buffer management");
             info!("  🔧 Damage tracking");
             info!("  🔧 Advanced visual effects");
         }
 
         // Update workspace manager with enhanced position tracking
         {
-            let mut workspace_manager = self.workspace_manager.write();
+            let workspace_manager = self.workspace_manager.write();
             for (client_name, window_id) in &simulated_clients {
-                debug!("📐 Enhanced window {} ({}) with advanced positioning", 
-                       window_id, client_name);
+                debug!(
+                    "📐 Enhanced window {} ({}) with advanced positioning",
+                    window_id, client_name
+                );
             }
         }
 
         // Update effects engine with enhanced integration
         {
             let mut effects_engine = self.effects_engine.write();
-            effects_engine.update().context("Failed to update effects")?;
-            
+            effects_engine
+                .update()
+                .context("Failed to update effects")?;
+
             let (frame_time, quality, active_effects) = effects_engine.get_performance_stats();
             if frame_time.as_millis() > 16 {
-                debug!("⚡ Enhanced frame {}: {:.1}ms, quality: {:.1}%, effects: {}", 
-                       self.frame_count, frame_time.as_secs_f64() * 1000.0, 
-                       quality * 100.0, active_effects);
+                debug!(
+                    "⚡ Enhanced frame {}: {:.1}ms, quality: {:.1}%, effects: {}",
+                    self.frame_count,
+                    frame_time.as_secs_f64() * 1000.0,
+                    quality * 100.0,
+                    active_effects
+                );
             }
         }
 
@@ -327,8 +370,12 @@ impl AxiomSmithayBackendPhase6_2 {
     /// Start the Phase 6.2 enhanced compositor
     pub async fn start(&mut self) -> Result<()> {
         info!("🎬 Starting Phase 6.2 enhanced Wayland compositor");
-        info!("  🔌 Clients can connect via: WAYLAND_DISPLAY={}", 
-               self.socket_name.as_ref().unwrap_or(&"wayland-0".to_string()));
+        info!(
+            "  🔌 Clients can connect via: WAYLAND_DISPLAY={}",
+            self.socket_name
+                .as_ref()
+                .unwrap_or(&"wayland-0".to_string())
+        );
         info!("  📋 Enhanced features: advanced surface management, input handling");
 
         info!("✅ Phase 6.2: Enhanced Wayland compositor ready!");
@@ -342,7 +389,7 @@ impl AxiomSmithayBackendPhase6_2 {
     /// Process enhanced Wayland events and client requests
     pub async fn process_events(&mut self) -> Result<()> {
         debug!("🔄 Processing enhanced Wayland events and client requests");
-        
+
         // Enhanced event processing simulation
         if self.frame_count % 120 == 0 {
             info!("🔄 Enhanced event processing cycle");
@@ -350,7 +397,7 @@ impl AxiomSmithayBackendPhase6_2 {
             info!("  🔧 Protocol state updates");
             info!("  🔧 Advanced event queue management");
         }
-        
+
         Ok(())
     }
 
@@ -376,7 +423,8 @@ impl AxiomSmithayBackendPhase6_2 {
 
     /// Get simulated client status
     pub fn get_simulated_clients(&self) -> Vec<(String, u64)> {
-        self.client_connections.iter()
+        self.client_connections
+            .iter()
             .map(|(name, id)| (name.clone(), *id))
             .collect()
     }
@@ -385,7 +433,7 @@ impl AxiomSmithayBackendPhase6_2 {
     pub fn report_status(&self) {
         info!("📊 Phase 6.2: Enhanced Protocol Handler Status");
         info!("============================================");
-        
+
         if let Some(ref socket_name) = self.socket_name {
             info!("🔌 Wayland Socket: {} (active)", socket_name);
         } else {
@@ -394,7 +442,7 @@ impl AxiomSmithayBackendPhase6_2 {
 
         info!("📋 Enhanced Protocol Support:");
         info!("  ✅ wl_compositor - Advanced surface management");
-        info!("  ✅ wl_shm - Enhanced shared memory buffers"); 
+        info!("  ✅ wl_shm - Enhanced shared memory buffers");
         info!("  ✅ xdg_shell - Advanced window management");
         info!("  ✅ wl_seat - Enhanced input handling");
         info!("  ✅ wl_data_device - Advanced clipboard/DnD");
@@ -407,8 +455,14 @@ impl AxiomSmithayBackendPhase6_2 {
 
         info!("📈 Enhanced Performance:");
         info!("  🖼️  Frames rendered: {}", self.frame_count);
-        info!("  ⏱️  Uptime: {:.1}s", self.last_frame.elapsed().as_secs_f64());
-        info!("  🔗 Active simulated clients: {}", self.client_connections.len());
+        info!(
+            "  ⏱️  Uptime: {:.1}s",
+            self.last_frame.elapsed().as_secs_f64()
+        );
+        info!(
+            "  🔗 Active simulated clients: {}",
+            self.client_connections.len()
+        );
 
         let workspace_info = {
             let workspace_manager = self.workspace_manager.read();
@@ -421,8 +475,14 @@ impl AxiomSmithayBackendPhase6_2 {
         };
 
         info!("🌊 Enhanced Workspace State:");
-        info!("  📱 Current column: {} (position: {:.1})", workspace_info.0, workspace_info.1);
-        info!("  📊 Active columns: {}, scrolling: {}", workspace_info.2, workspace_info.3);
+        info!(
+            "  📱 Current column: {} (position: {:.1})",
+            workspace_info.0, workspace_info.1
+        );
+        info!(
+            "  📊 Active columns: {}, scrolling: {}",
+            workspace_info.2, workspace_info.3
+        );
 
         info!("============================================");
     }
@@ -430,38 +490,58 @@ impl AxiomSmithayBackendPhase6_2 {
     /// Demonstrate enhanced protocol simulation
     pub async fn demonstrate_protocol_simulation(&mut self) -> Result<()> {
         info!("🎭 Phase 6.2: Demonstrating enhanced protocol simulation");
-        
+
         // Simulate various enhanced client connections
-        let weston_id = self.simulate_client_connection("weston-terminal-enhanced".to_string()).await?;
-        let firefox_id = self.simulate_client_connection("firefox-enhanced".to_string()).await?;
-        let vscode_id = self.simulate_client_connection("vscode-enhanced".to_string()).await?;
-        
-        info!("🔗 Simulated 3 enhanced client connections: {}, {}, {}", weston_id, firefox_id, vscode_id);
-        
+        let weston_id = self
+            .simulate_client_connection("weston-terminal-enhanced".to_string())
+            .await?;
+        let firefox_id = self
+            .simulate_client_connection("firefox-enhanced".to_string())
+            .await?;
+        let vscode_id = self
+            .simulate_client_connection("vscode-enhanced".to_string())
+            .await?;
+
+        info!(
+            "🔗 Simulated 3 enhanced client connections: {}, {}, {}",
+            weston_id, firefox_id, vscode_id
+        );
+
         // Simulate various enhanced input events
-        self.simulate_input_event("keyboard", "Super+Enter (enhanced new terminal)").await?;
-        self.simulate_input_event("pointer", "Enhanced click on window title bar").await?;
-        self.simulate_input_event("scroll", "Enhanced horizontal scroll (workspace navigation)").await?;
-        
+        self.simulate_input_event("keyboard", "Super+Enter (enhanced new terminal)")
+            .await?;
+        self.simulate_input_event("pointer", "Enhanced click on window title bar")
+            .await?;
+        self.simulate_input_event(
+            "scroll",
+            "Enhanced horizontal scroll (workspace navigation)",
+        )
+        .await?;
+
         // Report current enhanced clients
         let clients = self.get_simulated_clients();
         info!("📋 Active enhanced simulated clients: {:?}", clients);
-        
+
         Ok(())
     }
-    
+
     /// Demonstrate enhanced protocol cleanup
     pub async fn demonstrate_client_cleanup(&mut self) -> Result<()> {
         info!("🧹 Phase 6.2: Demonstrating enhanced client cleanup");
-        
+
         // Simulate enhanced client disconnections
-        self.simulate_client_disconnection("firefox-enhanced").await?;
-        self.simulate_client_disconnection("weston-terminal-enhanced").await?;
-        
+        self.simulate_client_disconnection("firefox-enhanced")
+            .await?;
+        self.simulate_client_disconnection("weston-terminal-enhanced")
+            .await?;
+
         // Report remaining enhanced clients
         let remaining_clients = self.get_simulated_clients();
-        info!("📋 Remaining enhanced simulated clients: {:?}", remaining_clients);
-        
+        info!(
+            "📋 Remaining enhanced simulated clients: {:?}",
+            remaining_clients
+        );
+
         Ok(())
     }
 }
