@@ -45,8 +45,7 @@ pub struct WindowDecoration {
 }
 
 /// Titlebar button states
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TitlebarButtons {
     pub close: ButtonState,
     pub minimize: ButtonState,
@@ -128,7 +127,6 @@ pub struct DecorationManager {
     /// Default decoration preferences
     default_mode: DecorationMode,
 }
-
 
 impl Default for ButtonState {
     fn default() -> Self {

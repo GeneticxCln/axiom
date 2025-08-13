@@ -29,6 +29,10 @@ path = "src/test_socket.rs"
 name = "test_real"
 path = "src/test_real.rs"
 
+[[bin]]
+name = "run_real_backend"
+path = "src/bin/run_real_backend.rs"
+
 [dependencies]
 # Configuration and serialization
 serde = { version = "1.0", features = ["derive"] }

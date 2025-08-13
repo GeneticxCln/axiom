@@ -84,11 +84,13 @@ async fn demo_animation_showcase(compositor: &mut AxiomCompositor) -> Result<()>
     info!("🏀 Testing bounce animations...");
     for &window_id in &window_ids[0..2] {
         // Simulate bounce effect with multiple move animations
-        let positions = [(100.0, 200.0),
+        let positions = [
+            (100.0, 200.0),
             (100.0, 150.0),
             (100.0, 180.0),
             (100.0, 160.0),
-            (100.0, 170.0)];
+            (100.0, 170.0),
+        ];
 
         for (j, &pos) in positions.iter().enumerate() {
             let prev_pos = if j == 0 {

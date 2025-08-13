@@ -74,6 +74,10 @@ pub mod window;
 pub mod workspace;
 pub mod xwayland;
 
+// Real backend modules
+pub mod axiom_real_compositor;
+pub mod backend_real;
+
 // Backend modules
 pub mod smithay_backend_phase6;
 pub mod smithay_backend_simple;

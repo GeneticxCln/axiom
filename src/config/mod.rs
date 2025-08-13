@@ -10,8 +10,7 @@ use std::fs;
 use std::path::Path;
 
 /// Main configuration struct containing all Axiom settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AxiomConfig {
     /// Workspace configuration (scrollable behavior)
     pub workspace: WorkspaceConfig,
@@ -236,7 +235,6 @@ pub struct GeneralConfig {
     /// Enable VSync
     pub vsync: bool,
 }
-
 
 impl Default for WorkspaceConfig {
     fn default() -> Self {

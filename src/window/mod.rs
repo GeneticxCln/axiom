@@ -69,6 +69,17 @@ impl Default for WindowProperties {
     }
 }
 
+impl AxiomWindow {
+    /// Create a new AxiomWindow
+    pub fn new(id: u64, title: String) -> Self {
+        Self {
+            window: BackendWindow::new(id, title),
+            workspace_position: 0.0,
+            properties: WindowProperties::default(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct WindowManager {
     config: WindowConfig,

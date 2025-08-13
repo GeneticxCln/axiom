@@ -310,10 +310,7 @@ impl EffectsEngine {
             return;
         }
 
-        let effect_state = self
-            .window_effects
-            .entry(window_id)
-            .or_default();
+        let effect_state = self.window_effects.entry(window_id).or_default();
 
         // Start with small scale and transparent
         effect_state.scale = 0.8;
@@ -337,10 +334,7 @@ impl EffectsEngine {
             return;
         }
 
-        let effect_state = self
-            .window_effects
-            .entry(window_id)
-            .or_default();
+        let effect_state = self.window_effects.entry(window_id).or_default();
 
         let animation = AnimationType::WindowClose {
             start_time: Instant::now(),
@@ -360,10 +354,7 @@ impl EffectsEngine {
             return;
         }
 
-        let effect_state = self
-            .window_effects
-            .entry(window_id)
-            .or_default();
+        let effect_state = self.window_effects.entry(window_id).or_default();
 
         let animation = AnimationType::WindowMove {
             start_time: Instant::now(),

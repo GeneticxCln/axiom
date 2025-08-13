@@ -9,7 +9,6 @@ use log::info;
 use std::time::Duration;
 use tokio::time;
 
-
 /// Run Phase 6.1 minimal Smithay integration demo
 pub async fn run_phase6_minimal_demo() -> Result<()> {
     info!("🚀 Phase 6.1: Minimal Smithay Integration Demo");
