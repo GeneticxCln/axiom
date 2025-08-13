@@ -28,6 +28,7 @@ mod config;
 mod xwayland;
 mod ipc;
 mod demo_workspace;
+mod demo_phase4_effects;
 
 use compositor::AxiomCompositor;
 use config::AxiomConfig;
@@ -53,9 +54,13 @@ struct Cli {
     #[arg(long)]
     no_effects: bool,
     
-    /// Run scrollable workspace demo
+    /// Run scrollable workspace demo (Phase 3)
     #[arg(long)]
     demo: bool,
+    
+    /// Run visual effects demo (Phase 4)
+    #[arg(long)]
+    effects_demo: bool,
 }
 
 #[tokio::main]
@@ -99,11 +104,22 @@ async fn main() -> Result<()> {
     
     info!("✨ Axiom is ready! Where productivity meets beauty.");
     
-    // Run demo if requested
+    // Run demos if requested
     if cli.demo {
         info!("🎭 Running Phase 3 scrollable workspace demo...");
         demo_workspace::run_comprehensive_test(&mut compositor).await?;
-        info!("🎆 Demo completed! Continuing with normal compositor operation...");
+        info!("🎆 Phase 3 demo completed!");
+    }
+    
+    if cli.effects_demo {
+        info!("🎨 Running Phase 4 visual effects demo...");
+        demo_phase4_effects::display_effects_capabilities(&compositor);
+        demo_phase4_effects::run_phase4_effects_demo(&mut compositor).await?;
+        info!("🎆 Phase 4 effects demo completed!");
+    }
+    
+    if cli.demo || cli.effects_demo {
+        info!("🎆 All demos completed! Continuing with normal compositor operation...");
     }
     
     // Main event loop

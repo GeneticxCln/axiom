@@ -219,34 +219,75 @@ impl AxiomCompositor {
         Ok(())
     }
     
-    /// Render a single frame
+    /// Phase 4: Enhanced frame rendering with visual effects
     async fn render_frame(&mut self) -> Result<()> {
         // 1. Update workspace positions/animations
         self.workspace_manager.update_animations()?;
         
-        // 2. Calculate workspace layouts for all visible windows
+        // 2. Update visual effects (animations, blur, shadows)
+        self.effects_engine.update()?;
+        
+        // 3. Calculate workspace layouts for all visible windows
         let workspace_layouts = self.workspace_manager.calculate_workspace_layouts();
         
-        // 3. Update window positions based on workspace layout
+        // 4. Update window positions and apply effects
         for (window_id, layout_rect) in workspace_layouts {
             if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                // Check if window position changed (for move animations)
+                let old_pos = window.window.position;
+                let new_pos = (layout_rect.x, layout_rect.y);
+                
+                if old_pos != new_pos {
+                    // Trigger move animation
+                    self.effects_engine.animate_window_move(
+                        window_id,
+                        (old_pos.0 as f32, old_pos.1 as f32),
+                        (new_pos.0 as f32, new_pos.1 as f32)
+                    );
+                }
+                
                 // Update the backend window position and size
                 window.window.set_position(layout_rect.x, layout_rect.y);
                 window.window.set_size(layout_rect.width, layout_rect.height);
+                
+                // Apply visual effects if window has them
+                if let Some(effect_state) = self.effects_engine.get_window_effects(window_id) {
+                    // Apply scale, opacity, and position offsets
+                    // In a real implementation, this would modify the rendering pipeline
+                    debug!("✨ Window {} effects: scale={:.2}, opacity={:.2}, corner_radius={:.1}", 
+                           window_id, effect_state.scale, effect_state.opacity, effect_state.corner_radius);
+                }
             }
         }
         
-        // 4. Update effects
-        self.effects_engine.update()?;
+        // 5. Apply global effects (workspace transitions, blur backgrounds)
+        self.apply_global_effects();
         
-        // 5. Render all windows
-        // TODO: Implement actual rendering with backend
+        // 6. Performance monitoring for effects
+        let (frame_time, effects_quality, active_effects) = self.effects_engine.get_performance_stats();
+        if frame_time.as_millis() > 20 { // More than ~50 FPS
+            debug!("⚡ Frame time: {:.1}ms, effects quality: {:.1}, active effects: {}", 
+                   frame_time.as_secs_f64() * 1000.0, effects_quality, active_effects);
+        }
         
-        debug!("🎨 Frame rendered - position: {:.1}, column: {}", 
+        debug!("🎨 Frame rendered - position: {:.1}, column: {}, effects: {}", 
                self.workspace_manager.current_position(),
-               self.workspace_manager.focused_column_index());
+               self.workspace_manager.focused_column_index(),
+               active_effects);
         
         Ok(())
+    }
+    
+    /// Apply global visual effects like workspace transitions and background blur
+    fn apply_global_effects(&mut self) {
+        // Apply workspace transition effects
+        if self.workspace_manager.is_scrolling() {
+            let current_pos = self.workspace_manager.current_position();
+            let progress = self.workspace_manager.scroll_progress();
+            
+            // In a real implementation, this would apply visual effects to the entire compositor
+            debug!("🌊 Workspace transition: position={:.1}, progress={:.2}", current_pos, progress);
+        }
     }
     
     /// Gracefully shutdown the compositor
@@ -366,6 +407,16 @@ impl AxiomCompositor {
     pub fn set_viewport_size(&mut self, width: u32, height: u32) {
         self.workspace_manager.set_viewport_size(width as f64, height as f64);
         info!("📐 Updated viewport size to {}x{}", width, height);
+    }
+    
+    /// Get reference to effects engine (for demo purposes)
+    pub fn effects_engine(&self) -> &crate::effects::EffectsEngine {
+        &self.effects_engine
+    }
+    
+    /// Get mutable reference to effects engine (for demo purposes)
+    pub fn effects_engine_mut(&mut self) -> &mut crate::effects::EffectsEngine {
+        &mut self.effects_engine
     }
 }
 

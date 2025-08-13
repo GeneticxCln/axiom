@@ -50,6 +50,7 @@ dbus = "0.9"  # Alternative IPC method
 
 # Utilities
 rand = "0.8"  # For input simulation in Phase 3
+bytemuck = { version = "1.14", features = ["derive"] }  # For GPU buffer data
 
 # TODO: Add features when compositor dependencies are ready
 # [features]
