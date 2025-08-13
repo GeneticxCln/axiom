@@ -32,6 +32,9 @@ pub struct AxiomCompositor {
     xwayland_manager: Option<XWaylandManager>,
     ipc_server: AxiomIPCServer,
     
+    // Smithay backend for Wayland compositor functionality
+    smithay_backend: AxiomSmithayBackend,
+    
     // Event loop state
     running: bool,
 }
@@ -68,6 +71,11 @@ impl AxiomCompositor {
         let mut ipc_server = AxiomIPCServer::new();
         ipc_server.start().await.context("Failed to start IPC server")?;
         
+        // Initialize Smithay backend
+        debug!("🚀 Initializing Smithay Wayland backend...");
+        let mut smithay_backend = AxiomSmithayBackend::new(config.clone(), windowed)?;
+        smithay_backend.initialize().await.context("Failed to initialize Smithay backend")?;
+        
         info!("✅ All subsystems initialized successfully");
         
         Ok(Self {
@@ -79,6 +87,7 @@ impl AxiomCompositor {
             input_manager,
             xwayland_manager,
             ipc_server,
+            smithay_backend,
             running: false,
         })
     }
@@ -134,23 +143,30 @@ impl AxiomCompositor {
     
     /// Render a single frame
     async fn render_frame(&mut self) -> Result<()> {
-        // TODO: Implement actual rendering pipeline
-        // This will:
         // 1. Update workspace positions/animations
-        // 2. Apply visual effects (blur, shadows, etc.)
-        // 3. Render all windows to screen
-        // 4. Handle multi-monitor output
-        
-        debug!("🎨 Rendering frame");
-        
-        // Update workspace animations
         self.workspace_manager.update_animations()?;
         
-        // Update effects
+        // 2. Calculate workspace layouts for all visible windows
+        let workspace_layouts = self.workspace_manager.calculate_workspace_layouts();
+        
+        // 3. Update window positions based on workspace layout
+        for (window_id, layout_rect) in workspace_layouts {
+            if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                // Update the backend window position and size
+                window.window.set_position(layout_rect.x, layout_rect.y);
+                window.window.set_size(layout_rect.width, layout_rect.height);
+            }
+        }
+        
+        // 4. Update effects
         self.effects_engine.update()?;
         
-        // Render everything
-        // TODO: Actual rendering implementation
+        // 5. Render all windows
+        // TODO: Implement actual rendering with backend
+        
+        debug!("🎨 Frame rendered - position: {:.1}, column: {}", 
+               self.workspace_manager.current_position(),
+               self.workspace_manager.focused_column_index());
         
         Ok(())
     }
@@ -167,8 +183,12 @@ impl AxiomCompositor {
             xwayland.shutdown().await?;
         }
         
+        // Clean up Smithay backend
+        debug!("🚀 Shutting down Smithay backend...");
+        self.smithay_backend.shutdown().await?;
+        
         // Clean up other subsystems
-        debug!("🧹 Cleaning up compositor subsystems...");
+        debug!("🧩 Cleaning up compositor subsystems...");
         self.input_manager.shutdown()?;
         self.effects_engine.shutdown()?;
         self.workspace_manager.shutdown()?;
@@ -201,6 +221,73 @@ impl AxiomCompositor {
         }
         
         Ok(())
+    }
+    
+    // === Public Workspace Interaction Methods ===
+    
+    /// Scroll workspace left (for input handling)
+    pub fn scroll_workspace_left(&mut self) {
+        info!("⬅️ Scrolling workspace left");
+        self.workspace_manager.scroll_left();
+    }
+    
+    /// Scroll workspace right (for input handling)
+    pub fn scroll_workspace_right(&mut self) {
+        info!("➡️ Scrolling workspace right");
+        self.workspace_manager.scroll_right();
+    }
+    
+    /// Add a new window to the current workspace
+    pub fn add_window(&mut self, title: String) -> u64 {
+        // Create window in window manager
+        let window_id = self.window_manager.add_window(title.clone());
+        
+        // Add to current workspace column
+        self.workspace_manager.add_window(window_id);
+        
+        info!("🪟 Added window '{}' (ID: {}) to current workspace", title, window_id);
+        window_id
+    }
+    
+    /// Remove a window from the compositor
+    pub fn remove_window(&mut self, window_id: u64) {
+        // Remove from workspace
+        if let Some(column) = self.workspace_manager.remove_window(window_id) {
+            info!("🗑️ Removed window {} from workspace column {}", window_id, column);
+        }
+        
+        // Remove from window manager
+        self.window_manager.remove_window(window_id);
+    }
+    
+    /// Move window to left workspace
+    pub fn move_window_left(&mut self, window_id: u64) {
+        if self.workspace_manager.move_window_left(window_id) {
+            info!("⬅️ Moved window {} to left workspace", window_id);
+        }
+    }
+    
+    /// Move window to right workspace
+    pub fn move_window_right(&mut self, window_id: u64) {
+        if self.workspace_manager.move_window_right(window_id) {
+            info!("➡️ Moved window {} to right workspace", window_id);
+        }
+    }
+    
+    /// Get current workspace information
+    pub fn get_workspace_info(&self) -> (i32, f64, usize, bool) {
+        (
+            self.workspace_manager.focused_column_index(),
+            self.workspace_manager.current_position(),
+            self.workspace_manager.active_column_count(),
+            self.workspace_manager.is_scrolling(),
+        )
+    }
+    
+    /// Set the viewport size (called when display size changes)
+    pub fn set_viewport_size(&mut self, width: u32, height: u32) {
+        self.workspace_manager.set_viewport_size(width as f64, height as f64);
+        info!("📐 Updated viewport size to {}x{}", width, height);
     }
 }
 

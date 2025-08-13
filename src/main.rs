@@ -27,6 +27,7 @@ mod input;
 mod config;
 mod xwayland;
 mod ipc;
+mod demo_workspace;
 
 use compositor::AxiomCompositor;
 use config::AxiomConfig;
@@ -51,6 +52,10 @@ struct Cli {
     /// Disable visual effects (performance mode)
     #[arg(long)]
     no_effects: bool,
+    
+    /// Run scrollable workspace demo
+    #[arg(long)]
+    demo: bool,
 }
 
 #[tokio::main]
@@ -90,9 +95,16 @@ async fn main() -> Result<()> {
     // Initialize and run compositor
     info!("🏗️  Initializing Axiom compositor...");
     
-    let compositor = AxiomCompositor::new(config, cli.windowed).await?;
+    let mut compositor = AxiomCompositor::new(config, cli.windowed).await?;
     
     info!("✨ Axiom is ready! Where productivity meets beauty.");
+    
+    // Run demo if requested
+    if cli.demo {
+        info!("🎭 Running Phase 3 scrollable workspace demo...");
+        demo_workspace::run_comprehensive_test(&mut compositor).await?;
+        info!("🎆 Demo completed! Continuing with normal compositor operation...");
+    }
     
     // Main event loop
     compositor.run().await?;
