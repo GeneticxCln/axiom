@@ -25,6 +25,7 @@ mod smithay_backend_real;  // Real Smithay implementation
 // mod smithay_backend_production;  // Phase 6: Production Smithay backend (disabled for now)
 mod smithay_backend_minimal;  // Phase 6.1: Minimal working backend
 mod smithay_backend_phase6;  // Phase 6.1: WORKING Smithay backend
+mod smithay_backend_phase6_2;  // Phase 6.2: Full protocol implementation
 mod workspace;
 mod effects;
 mod window;
@@ -68,6 +69,10 @@ struct Cli {
     /// Run visual effects demo (Phase 4)
     #[arg(long)]
     effects_demo: bool,
+    
+    /// Run Phase 6.2 Smithay backend demo with protocol simulation
+    #[arg(long)]
+    phase6_2_demo: bool,
 }
 
 #[tokio::main]
@@ -107,7 +112,7 @@ async fn main() -> Result<()> {
     // Initialize and run compositor
     info!("🏗️  Initializing Axiom compositor...");
     
-    let mut compositor = AxiomCompositor::new(config, cli.windowed).await?;
+    let mut compositor = AxiomCompositor::new(config.clone(), cli.windowed).await?;
     
     info!("✨ Axiom is ready! Where productivity meets beauty.");
     
@@ -125,7 +130,14 @@ async fn main() -> Result<()> {
         info!("🎆 Phase 4 effects demo completed!");
     }
     
-    if cli.demo || cli.effects_demo {
+    if cli.phase6_2_demo {
+        info!("🌊 Running Phase 6.2 Smithay backend demo with protocol simulation...");
+        run_phase6_2_demo(config.clone(), cli.windowed).await?;
+        info!("🎆 Phase 6.2 demo completed!");
+        return Ok(()); // Exit after demo
+    }
+    
+    if cli.demo || cli.effects_demo || cli.phase6_2_demo {
         info!("🎆 All demos completed! Continuing with normal compositor operation...");
     }
     
@@ -133,6 +145,58 @@ async fn main() -> Result<()> {
     compositor.run().await?;
     
     info!("👋 Axiom compositor shutting down");
+    Ok(())
+}
+
+/// Run Phase 6.2 Smithay backend demo with protocol simulation
+async fn run_phase6_2_demo(config: AxiomConfig, windowed: bool) -> Result<()> {
+    use crate::smithay_backend_phase6_2::AxiomSmithayBackendPhase6_2;
+    use crate::workspace::ScrollableWorkspaces;
+    use crate::window::WindowManager;
+    use crate::effects::EffectsEngine;
+    use crate::decoration::DecorationManager;
+    use crate::input::InputManager;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+    
+    info!("🌊 Initializing Phase 6.2 Enhanced Protocol Simulation Backend...");
+    info!("🔧 Creating required manager components...");
+    
+    // Create all required manager components
+    let workspace_manager = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)?));
+    let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)?));
+    let effects_engine = Arc::new(RwLock::new(EffectsEngine::new(&config.effects)?));
+    let decoration_manager = Arc::new(RwLock::new(DecorationManager::new(&config.window)));
+    let input_manager = Arc::new(RwLock::new(InputManager::new(&config.input, &config.bindings)?));
+    
+    let mut backend = AxiomSmithayBackendPhase6_2::new(
+        config,
+        windowed,
+        workspace_manager,
+        window_manager,
+        effects_engine,
+        decoration_manager,
+        input_manager,
+    )?;
+    
+    backend.initialize().await?;
+    
+    info!("✨ Phase 6.2 backend initialized successfully!");
+    info!("🔌 Socket: {:?}", backend.socket_name());
+    
+    // Run the comprehensive demonstration
+    backend.demonstrate_protocol_simulation().await?;
+    
+    // Clean up demonstration
+    backend.demonstrate_client_cleanup().await?;
+    
+    info!("📊 Final status report:");
+    backend.report_status();
+    
+    // Shutdown cleanly
+    backend.shutdown().await?;
+    
+    info!("🎯 Phase 6.2 demo completed successfully!");
     Ok(())
 }
 
