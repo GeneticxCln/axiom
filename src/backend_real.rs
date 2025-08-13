@@ -55,7 +55,6 @@ pub struct Surface {
 
 /// Real window that can be displayed
 pub struct Window {
-    pub surface: wl_surface::WlSurface,
     pub xdg_surface: xdg_surface::XdgSurface,
     pub xdg_toplevel: Option<xdg_toplevel::XdgToplevel>,
     pub title: String,
@@ -325,7 +324,7 @@ impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
         request: wl_surface::Request,
         _data: &(),
         _dhandle: &DisplayHandle,
-        _data_init: &mut DataInit<'_, Self>,
+        data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
             wl_surface::Request::Attach { buffer, x, y } => {
@@ -360,9 +359,11 @@ impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
                 debug!("Surface damage at ({}, {}) size {}x{}", x, y, width, height);
             }
             wl_surface::Request::Frame { callback } => {
-                // Frame callbacks are handled separately
-                // For now, just store it (in a real compositor you'd send done() after rendering)
-                debug!("Frame callback requested");
+                // Initialize the callback and immediately send done for now
+                // In a real compositor, this would be sent after the frame is rendered
+                let cb = data_init.init(callback, ());
+                cb.done(0); // 0 is the timestamp, normally would be actual frame time
+                debug!("Frame callback requested and completed");
             }
             wl_surface::Request::Destroy => {
                 state.surfaces.retain(|s| &s.wl_surface != resource);
@@ -534,7 +535,7 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for CompositorState {
 
 impl Dispatch<xdg_surface::XdgSurface, ()> for CompositorState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         resource: &xdg_surface::XdgSurface,
         request: xdg_surface::Request,
@@ -547,15 +548,28 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for CompositorState {
                 let toplevel = data_init.init(id, ());
                 info!("🎉 REAL WINDOW CREATED! XDG Toplevel ready!");
 
-                // Send configure event
-                resource.configure(0);
+                // Create a window entry
+                state.windows.push(Window {
+                    xdg_surface: resource.clone(),
+                    xdg_toplevel: Some(toplevel.clone()),
+                    title: String::new(),
+                    app_id: String::new(),
+                    x: 100,
+                    y: 100,
+                    width: 800,
+                    height: 600,
+                });
+
+                // Send initial configure with suggested size
+                toplevel.configure(800, 600, vec![]);
+                resource.configure(1);
             }
             xdg_surface::Request::GetPopup { id, .. } => {
                 data_init.init(id, ());
-                resource.configure(0);
+                resource.configure(1);
             }
             xdg_surface::Request::AckConfigure { serial } => {
-                debug!("Configure acknowledged: {}", serial);
+                info!("✅ Configure acknowledged: serial={}", serial);
             }
             _ => {}
         }
@@ -708,7 +722,11 @@ impl GlobalDispatch<wl_output::WlOutput, ()> for CompositorState {
         );
 
         output.scale(1);
-        output.name(state.output_info.name.clone());
+
+        // Note: name() is only available in version 4+
+        // For now, we'll skip it to maintain compatibility
+        // output.name(state.output_info.name.clone());
+
         output.done();
     }
 }
