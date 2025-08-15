@@ -81,6 +81,7 @@ pub enum ScrollState {
 }
 
 /// Scrollable workspace manager
+#[derive(Debug)]
 pub struct ScrollableWorkspaces {
     config: WorkspaceConfig,
 
@@ -137,6 +138,13 @@ impl ScrollableWorkspaces {
         Ok(workspace_manager)
     }
 
+    /// Update the viewport size (called when window/display size changes)
+    pub fn set_viewport_size(&mut self, width: f64, height: f64) {
+        self.viewport_width = width;
+        self.viewport_height = height;
+        debug!("📐 Viewport size updated to {}x{}", width, height);
+    }
+
     /// Ensure a column exists at the given index
     pub fn ensure_column(&mut self, index: i32) -> &mut WorkspaceColumn {
         if !self.columns.contains_key(&index) {
@@ -151,8 +159,8 @@ impl ScrollableWorkspaces {
         self.columns.get_mut(&index).unwrap()
     }
 
-    /// Get the current focused column (with Option)
-    pub fn get_focused_column_opt(&self) -> Option<&WorkspaceColumn> {
+    /// Get the current focused column
+    pub fn get_focused_column(&self) -> Option<&WorkspaceColumn> {
         self.columns.get(&self.focused_column)
     }
 
@@ -479,50 +487,6 @@ impl ScrollableWorkspaces {
             }
             _ => 0.0,
         }
-    }
-
-    /// Update method for testing
-    pub fn update(&mut self) -> Result<()> {
-        self.update_animations()
-    }
-
-    /// Set viewport size for layout calculations
-    pub fn set_viewport_size(&mut self, width: f64, height: f64) {
-        self.viewport_width = width;
-        self.viewport_height = height;
-        debug!(
-            "📐 Workspace viewport updated to {:.0}x{:.0}",
-            width, height
-        );
-    }
-
-    /// Check if window exists in any column
-    pub fn window_exists(&self, window_id: u64) -> bool {
-        self.columns
-            .values()
-            .any(|column| column.windows.contains(&window_id))
-    }
-
-    /// Check if infinite scroll is enabled
-    pub fn is_infinite_scroll_enabled(&self) -> bool {
-        self.config.infinite_scroll
-    }
-
-    /// Get focused column (non-optional version for tests)
-    pub fn get_focused_column(&self) -> &WorkspaceColumn {
-        self.columns
-            .get(&self.focused_column)
-            .unwrap_or_else(|| panic!("Focused column {} does not exist", self.focused_column))
-    }
-
-    /// Remove window and return the column index it was in
-    pub fn remove_window(&mut self, window_id: u64) -> Option<i32> {
-        self.remove_window_internal(window_id)
-    }
-
-    /// Remove window and return success status
-    pub fn remove_window_bool(&mut self, window_id: u64) -> bool {
-        self.remove_window_internal(window_id).is_some()
     }
 
     pub fn shutdown(&mut self) -> Result<()> {

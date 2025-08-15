@@ -19,9 +19,6 @@ mod blur;
 mod shaders;
 mod shadow;
 
-// Re-export animation types for use in effects engine
-pub use animations::AnimationStats;
-
 /// Different types of animations
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnimationType {
@@ -313,10 +310,7 @@ impl EffectsEngine {
             return;
         }
 
-        let effect_state = self
-            .window_effects
-            .entry(window_id)
-            .or_insert_with(WindowEffectState::default);
+        let effect_state = self.window_effects.entry(window_id).or_default();
 
         // Start with small scale and transparent
         effect_state.scale = 0.8;
@@ -340,10 +334,7 @@ impl EffectsEngine {
             return;
         }
 
-        let effect_state = self
-            .window_effects
-            .entry(window_id)
-            .or_insert_with(WindowEffectState::default);
+        let effect_state = self.window_effects.entry(window_id).or_default();
 
         let animation = AnimationType::WindowClose {
             start_time: Instant::now(),
@@ -363,10 +354,7 @@ impl EffectsEngine {
             return;
         }
 
-        let effect_state = self
-            .window_effects
-            .entry(window_id)
-            .or_insert_with(WindowEffectState::default);
+        let effect_state = self.window_effects.entry(window_id).or_default();
 
         let animation = AnimationType::WindowMove {
             start_time: Instant::now(),
@@ -417,24 +405,9 @@ impl EffectsEngine {
         self.window_effects.get(&window_id)
     }
 
-    /// Set blur radius for a specific window
-    pub fn set_window_blur(&mut self, window_id: u64, blur_radius: f32) {
-        let effect_state = self
-            .window_effects
-            .entry(window_id)
-            .or_insert_with(WindowEffectState::default);
-
-        effect_state.blur_radius = blur_radius.max(0.0); // Ensure non-negative
-
-        debug!(
-            "🌊 Set window {} blur radius to {:.1}",
-            window_id, effect_state.blur_radius
-        );
-    }
-
     /// Remove window from effects tracking
     pub fn remove_window(&mut self, window_id: u64) {
-        if let Some(_) = self.window_effects.remove(&window_id) {
+        if self.window_effects.remove(&window_id).is_some() {
             debug!("🗑️ Removed window {} from effects tracking", window_id);
         }
     }
@@ -562,6 +535,167 @@ impl EffectsEngine {
                 }
             }
             _ => t, // Simplified for other curves
+        }
+    }
+
+    /// Update animations for a specific window
+    fn update_window_animations(
+        &mut self,
+        window_id: &u64,
+        effect_state: &mut WindowEffectState,
+        now: Instant,
+    ) -> Result<()> {
+        let mut animations_to_remove = Vec::new();
+
+        for (i, animation) in effect_state.active_animations.iter().enumerate() {
+            match animation {
+                AnimationType::WindowOpen {
+                    start_time,
+                    duration,
+                    target_scale,
+                    target_opacity,
+                } => {
+                    let elapsed = now.duration_since(*start_time);
+
+                    if elapsed >= *duration {
+                        // Animation finished
+                        effect_state.scale = *target_scale;
+                        effect_state.opacity = *target_opacity;
+                        animations_to_remove.push(i);
+                        debug!(
+                            "✅ Window open animation completed for window {}",
+                            window_id
+                        );
+                    } else {
+                        // Update animation
+                        let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
+                        let eased_progress =
+                            self.apply_easing_curve(progress as f32, &self.default_easing_curve);
+
+                        effect_state.scale = 0.8 + (target_scale - 0.8) * eased_progress;
+                        effect_state.opacity = eased_progress * target_opacity;
+                    }
+                }
+
+                AnimationType::WindowClose {
+                    start_time,
+                    duration,
+                    start_scale,
+                    start_opacity,
+                } => {
+                    let elapsed = now.duration_since(*start_time);
+
+                    if elapsed >= *duration {
+                        // Animation finished - window should be removed
+                        effect_state.scale = 0.0;
+                        effect_state.opacity = 0.0;
+                        animations_to_remove.push(i);
+                        debug!(
+                            "✅ Window close animation completed for window {}",
+                            window_id
+                        );
+                    } else {
+                        // Update animation
+                        let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
+                        let eased_progress =
+                            self.apply_easing_curve(progress as f32, &EasingCurve::EaseIn);
+
+                        effect_state.scale = start_scale * (1.0 - eased_progress * 0.2);
+                        effect_state.opacity = start_opacity * (1.0 - eased_progress);
+                    }
+                }
+
+                AnimationType::WindowMove {
+                    start_time,
+                    duration,
+                    start_pos,
+                    target_pos,
+                } => {
+                    let elapsed = now.duration_since(*start_time);
+
+                    if elapsed >= *duration {
+                        // Animation finished
+                        effect_state.position_offset =
+                            (target_pos.0 - start_pos.0, target_pos.1 - start_pos.1);
+                        animations_to_remove.push(i);
+                        debug!(
+                            "✅ Window move animation completed for window {}",
+                            window_id
+                        );
+                    } else {
+                        // Update animation
+                        let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
+                        let eased_progress =
+                            self.apply_easing_curve(progress as f32, &EasingCurve::EaseOut);
+
+                        let current_x = start_pos.0 + (target_pos.0 - start_pos.0) * eased_progress;
+                        let current_y = start_pos.1 + (target_pos.1 - start_pos.1) * eased_progress;
+
+                        effect_state.position_offset =
+                            (current_x - start_pos.0, current_y - start_pos.1);
+                    }
+                }
+
+                _ => {
+                    // Handle other animation types
+                }
+            }
+        }
+
+        // Remove finished animations (in reverse order to maintain indices)
+        for i in animations_to_remove.into_iter().rev() {
+            effect_state.active_animations.remove(i);
+        }
+
+        Ok(())
+    }
+
+    /// Apply easing curve to animation progress
+    fn apply_easing_curve(&self, t: f32, curve: &EasingCurve) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+
+        match curve {
+            EasingCurve::Linear => t,
+            EasingCurve::EaseIn => t * t,
+            EasingCurve::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
+            EasingCurve::EaseInOut => {
+                if t < 0.5 {
+                    2.0 * t * t
+                } else {
+                    -1.0 + (4.0 - 2.0 * t) * t
+                }
+            }
+            EasingCurve::BounceOut => {
+                if t < 1.0 / 2.75 {
+                    7.5625 * t * t
+                } else if t < 2.0 / 2.75 {
+                    let t = t - 1.5 / 2.75;
+                    7.5625 * t * t + 0.75
+                } else if t < 2.5 / 2.75 {
+                    let t = t - 2.25 / 2.75;
+                    7.5625 * t * t + 0.9375
+                } else {
+                    let t = t - 2.625 / 2.75;
+                    7.5625 * t * t + 0.984375
+                }
+            }
+            EasingCurve::ElasticOut => {
+                if t == 0.0 {
+                    0.0
+                } else if t == 1.0 {
+                    1.0
+                } else {
+                    let p = 0.3;
+                    let s = p / 4.0;
+                    (2.0_f32).powf(-10.0 * t) * ((t - s) * (2.0 * std::f32::consts::PI) / p).sin()
+                        + 1.0
+                }
+            }
+            EasingCurve::BackOut => {
+                let s = 1.70158;
+                let t = t - 1.0;
+                t * t * ((s + 1.0) * t + s) + 1.0
+            }
         }
     }
 

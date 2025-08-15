@@ -84,7 +84,7 @@ async fn demo_animation_showcase(compositor: &mut AxiomCompositor) -> Result<()>
     info!("🏀 Testing bounce animations...");
     for &window_id in &window_ids[0..2] {
         // Simulate bounce effect with multiple move animations
-        let positions = vec![
+        let positions = [
             (100.0, 200.0),
             (100.0, 150.0),
             (100.0, 180.0),
@@ -358,8 +358,8 @@ async fn demo_advanced_features(compositor: &mut AxiomCompositor) -> Result<()> 
             .animate_window_open(window_id);
 
         // Add some movement for visual flair
-        let _from = (i as f32 * 150.0, 50.0);
-        let _to = (i as f32 * 150.0, 300.0);
+        let from = (i as f32 * 150.0, 50.0);
+        let to = (i as f32 * 150.0, 300.0);
 
         tokio::spawn(async move {
             sleep(Duration::from_millis(300)).await;

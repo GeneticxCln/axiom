@@ -78,6 +78,7 @@ pub enum CompositorAction {
 }
 
 /// Phase 3: Enhanced input manager with real processing
+#[derive(Debug)]
 pub struct InputManager {
     input_config: InputConfig,
     bindings_config: BindingsConfig,
