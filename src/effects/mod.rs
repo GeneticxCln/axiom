@@ -4,11 +4,11 @@
 //! rounded corners, and other eye candy that makes Axiom beautiful.
 
 use crate::config::EffectsConfig;
+use crate::effects::animations::AnimationStats;
 use anyhow::Result;
 use log::{debug, info};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use crate::effects::animations::AnimationStats;
 
 // GPU rendering and shader support
 use std::sync::Arc;

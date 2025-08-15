@@ -123,21 +123,21 @@ impl XWaylandManager {
     pub async fn stop_server(&mut self) -> Result<()> {
         if let Some(mut process) = self.xwayland_process.take() {
             info!("🛑 Stopping XWayland server");
-            
+
             // Try graceful shutdown first
             if let Err(e) = process.kill().await {
                 log::warn!("Failed to kill XWayland process: {}", e);
             }
-            
+
             // Wait for process to exit
             let _ = process.wait().await;
-            
+
             self.server_state = XWaylandServerState::Stopped;
             self.display_number = None;
-            
+
             info!("✅ XWayland server stopped");
         }
-        
+
         Ok(())
     }
 }

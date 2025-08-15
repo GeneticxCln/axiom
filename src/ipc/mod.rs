@@ -6,12 +6,12 @@
 use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
+use std::alloc::System;
 use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::alloc::System;
 
 /// Messages sent from Axiom to Lazy UI (performance metrics, events)
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -158,8 +158,11 @@ impl AxiomIPCServer {
         Ok(())
     }
 
-/// Accept incoming connections from Lazy UI (static version)
-async fn accept_connections_static(listener: UnixListener, tx: broadcast::Sender<AxiomMessage>) -> Result<()> {
+    /// Accept incoming connections from Lazy UI (static version)
+    async fn accept_connections_static(
+        listener: UnixListener,
+        tx: broadcast::Sender<AxiomMessage>,
+    ) -> Result<()> {
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
@@ -181,8 +184,11 @@ async fn accept_connections_static(listener: UnixListener, tx: broadcast::Sender
         Ok(())
     }
 
-/// Handle a single client connection
-async fn handle_client(stream: UnixStream, mut rx: broadcast::Receiver<AxiomMessage>) -> Result<()> {
+    /// Handle a single client connection
+    async fn handle_client(
+        stream: UnixStream,
+        mut rx: broadcast::Receiver<AxiomMessage>,
+    ) -> Result<()> {
         let (reader, mut writer) = stream.into_split();
         let mut lines = BufReader::new(reader).lines();
 
@@ -302,9 +308,7 @@ async fn handle_client(stream: UnixStream, mut rx: broadcast::Receiver<AxiomMess
 
                 // Send performance metrics as health response
                 let metrics = AxiomMessage::PerformanceMetrics {
-                    timestamp: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)?
-                        .as_secs(),
+                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
                     cpu_usage: 15.5, // TODO: Get real metrics
                     memory_usage: 32.1,
                     gpu_usage: 8.3,
@@ -433,7 +437,7 @@ async fn handle_client(stream: UnixStream, mut rx: broadcast::Receiver<AxiomMess
     }
 
     /// Broadcast PerformanceMetrics to all connected clients
-pub fn broadcast_performance_metrics(
+    pub fn broadcast_performance_metrics(
         &self,
         cpu_usage: f32,
         memory_usage: f32,
