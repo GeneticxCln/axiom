@@ -3,6 +3,10 @@
 
 use crate::config::XWaylandConfig;
 use anyhow::Result;
+use log::info;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+use tokio::process::Child as TokioChild;
 
 /// XWayland manager for X11 application support
 pub struct XWaylandManager {
@@ -112,6 +116,28 @@ impl XWaylandManager {
         );
 
         info!("✅ XWayland manager shutdown complete");
+        Ok(())
+    }
+
+    /// Stop the XWayland server
+    pub async fn stop_server(&mut self) -> Result<()> {
+        if let Some(mut process) = self.xwayland_process.take() {
+            info!("🛑 Stopping XWayland server");
+            
+            // Try graceful shutdown first
+            if let Err(e) = process.kill().await {
+                log::warn!("Failed to kill XWayland process: {}", e);
+            }
+            
+            // Wait for process to exit
+            let _ = process.wait().await;
+            
+            self.server_state = XWaylandServerState::Stopped;
+            self.display_number = None;
+            
+            info!("✅ XWayland server stopped");
+        }
+        
         Ok(())
     }
 }

@@ -348,7 +348,9 @@ impl Default for BindingsConfig {
             move_window_left: "Super+Shift+Left".to_string(),
             move_window_right: "Super+Shift+Right".to_string(),
             close_window: "Super+q".to_string(),
-            toggle_fullscreen: "Super+f".to_string(),
+            launch_terminal: "Super+Enter".to_string(),
+            launch_launcher: "Super+Space".to_string(),
+            toggle_effects: "Super+e".to_string(),
             quit: "Super+Shift+q".to_string(),
         }
     }
@@ -358,12 +360,7 @@ impl Default for XWaylandConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            lazy_loading: true,
-            scale_factor: 1.0,
-            xwayland_path: "/usr/bin/Xwayland".to_string(),
-            auto_restart: true,
-            extra_args: vec!["-extension".to_string(), "MIT-SHM".to_string()],
-            max_windows: 50,
+            display: None,
         }
     }
 }
@@ -371,13 +368,9 @@ impl Default for XWaylandConfig {
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
-            compositor_name: "axiom".to_string(),
-            socket_name: "axiom".to_string(),
-            log_level: "info".to_string(),
-            enable_debug_output: false,
-            max_clients: 100,
-            config_path: "~/.config/axiom/config.toml".to_string(),
-            startup_apps: vec![],
+            debug: false,
+            max_fps: 0,
+            vsync: true,
         }
     }
 }

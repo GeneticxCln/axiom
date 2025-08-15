@@ -237,6 +237,11 @@ impl ScrollableWorkspaces {
         self.add_window_to_column(window_id, focused_column);
     }
 
+    /// Remove a window from all columns (public interface)
+    pub fn remove_window(&mut self, window_id: u64) -> Option<i32> {
+        self.remove_window_internal(window_id)
+    }
+
     /// Remove a window from all columns
     fn remove_window_internal(&mut self, window_id: u64) -> Option<i32> {
         for (column_index, column) in self.columns.iter_mut() {
@@ -277,9 +282,14 @@ impl ScrollableWorkspaces {
 
     /// Get all windows in the currently focused column
     pub fn get_focused_column_windows(&self) -> Vec<u64> {
-        self.get_focused_column_opt()
+        self.get_focused_column()
             .map(|column| column.windows.clone())
             .unwrap_or_default()
+    }
+
+    /// Get the currently focused column (optional version)
+    pub fn get_focused_column_opt(&self) -> Option<&WorkspaceColumn> {
+        self.get_focused_column()
     }
 
     /// Get all visible columns based on current viewport

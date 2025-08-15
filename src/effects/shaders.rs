@@ -8,6 +8,7 @@
 
 use anyhow::Result;
 use log::{debug, info};
+use std::sync::Arc;
 use wgpu::{ShaderModule, ShaderModuleDescriptor, ShaderSource};
 
 /// Shader types supported by the effects engine

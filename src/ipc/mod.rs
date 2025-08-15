@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{broadcast, mpsc};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::alloc::System;
 
 /// Messages sent from Axiom to Lazy UI (performance metrics, events)
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -143,19 +146,23 @@ impl AxiomIPCServer {
         let listener = UnixListener::bind(&self.socket_path)
             .with_context(|| format!("Failed to bind Unix socket: {:?}", self.socket_path))?;
 
+        // Create broadcast channel for outgoing messages
+        let (tx, _rx) = broadcast::channel::<AxiomMessage>(1024);
+        self.broadcast_tx = Some(tx.clone());
+
         info!("🔗 Axiom IPC server listening on: {:?}", self.socket_path);
 
         // Start accepting connections in a separate task
-        tokio::spawn(Self::accept_connections_static(listener));
+        tokio::spawn(Self::accept_connections_static(listener, tx));
 
         Ok(())
     }
 
-    /// Accept incoming connections from Lazy UI (static version)
+/// Accept incoming connections from Lazy UI (static version)
 async fn accept_connections_static(listener: UnixListener, tx: broadcast::Sender<AxiomMessage>) -> Result<()> {
         loop {
             match listener.accept().await {
-Ok((stream, _)) => {
+                Ok((stream, _)) => {
                     info!("🤝 Lazy UI connected to Axiom IPC");
                     let rx = tx.subscribe();
                     tokio::spawn(Self::handle_client(stream, rx));
@@ -169,17 +176,14 @@ Ok((stream, _)) => {
 
     /// Accept incoming connections from Lazy UI (kept for compatibility)
     async fn accept_connections(&mut self) -> Result<()> {
-        let listener = self
-            .listener
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("IPC server not started"))?;
-
-        Self::accept_connections_static(listener).await
+        // Deprecated path: connection acceptance is spawned in start() with a broadcast channel.
+        // Keeping this method to satisfy older call sites; return Ok(()) without doing anything.
+        Ok(())
     }
 
-    /// Handle a single client connection
+/// Handle a single client connection
 async fn handle_client(stream: UnixStream, mut rx: broadcast::Receiver<AxiomMessage>) -> Result<()> {
-let (reader, writer) = stream.into_split();
+        let (reader, mut writer) = stream.into_split();
         let mut lines = BufReader::new(reader).lines();
 
         // Send startup notification
@@ -195,26 +199,32 @@ let (reader, writer) = stream.into_split();
 
         Self::send_message(&mut writer, &startup_msg).await?;
 
-        // Process incoming messages
-        while let Some(line) = lines.next_line().await? {
-            if line.trim().is_empty() {
-                continue;
-            }
+        // Process incoming messages and outgoing broadcasts concurrently
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    let line = match line? {
+                        Some(l) => l,
+                        None => break, // client disconnected
+                    };
+                    if line.trim().is_empty() { continue; }
 
-            debug!("📨 Received IPC message: {}", line);
-
-            match serde_json::from_str::<LazyUIMessage>(&line) {
-                Ok(message) => {
-                    if let Err(e) = Self::process_lazy_ui_message(message, &mut writer).await {
-                        warn!("⚠️ Error processing message: {}", e);
+                    debug!("📨 Received IPC message: {}", line);
+                    match serde_json::from_str::<LazyUIMessage>(&line) {
+                        Ok(message) => {
+                            if let Err(e) = Self::process_lazy_ui_message(message, &mut writer).await {
+                                warn!("⚠️ Error processing message: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("⚠️ Invalid JSON from IPC client: {}", e);
+                        }
                     }
-                }
-                // Outgoing broadcast message to client
+                },
                 msg = rx.recv() => {
                     match msg {
                         Ok(message) => {
-                            let mut w = writer.lock().await;
-                            if let Err(e) = Self::send_message(&mut w, &message).await {
+                            if let Err(e) = Self::send_message(&mut writer, &message).await {
                                 warn!("⚠️ Failed to send broadcast message: {}", e);
                             }
                         }
@@ -469,6 +479,77 @@ pub fn broadcast_performance_metrics(
             current_workspace,
         );
         self.last_metrics_sent = Instant::now();
+    }
+
+    /// Sample system CPU usage (%) and memory used (MB) by reading /proc
+    /// This is a synchronous sampler intended for periodic telemetry; it avoids extra deps.
+    fn sample_system_metrics(&self) -> (f32, f32) {
+        // CPU usage: sample /proc/stat twice and compute deltas
+        fn read_cpu_times() -> Option<(u64, u64)> {
+            let contents = std::fs::read_to_string("/proc/stat").ok()?;
+            let mut lines = contents.lines();
+            if let Some(first) = lines.next() {
+                if first.starts_with("cpu ") {
+                    let parts: Vec<&str> = first.split_whitespace().collect();
+                    // cpu user nice system idle iowait irq softirq steal guest guest_nice
+                    if parts.len() >= 5 {
+                        let user: u64 = parts.get(1)?.parse().ok()?;
+                        let nice: u64 = parts.get(2)?.parse().ok()?;
+                        let system: u64 = parts.get(3)?.parse().ok()?;
+                        let idle: u64 = parts.get(4)?.parse().ok()?;
+                        let iowait: u64 = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let irq: u64 = parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let softirq: u64 = parts.get(7).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let steal: u64 = parts.get(8).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let idle_all = idle + iowait;
+                        let non_idle = user + nice + system + irq + softirq + steal;
+                        let total = idle_all + non_idle;
+                        return Some((idle_all, total));
+                    }
+                }
+            }
+            None
+        }
+
+        let (cpu_percent, mem_used_mb) = (|| {
+            let a = read_cpu_times();
+            // short sleep to compute delta; kept small to limit blocking
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let b = read_cpu_times();
+            let cpu = match (a, b) {
+                (Some((idle_a, total_a)), Some((idle_b, total_b))) => {
+                    let idle_delta = idle_b.saturating_sub(idle_a) as f64;
+                    let total_delta = total_b.saturating_sub(total_a) as f64;
+                    if total_delta > 0.0 {
+                        ((1.0 - idle_delta / total_delta) * 100.0) as f32
+                    } else {
+                        0.0
+                    }
+                }
+                _ => 0.0,
+            };
+
+            // Memory usage from /proc/meminfo
+            let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+            let mut mem_total_kb: u64 = 0;
+            let mut mem_available_kb: u64 = 0;
+            for line in meminfo.lines() {
+                if line.starts_with("MemTotal:") {
+                    if let Some(val) = line.split_whitespace().nth(1) {
+                        mem_total_kb = val.parse().unwrap_or(0);
+                    }
+                } else if line.starts_with("MemAvailable:") {
+                    if let Some(val) = line.split_whitespace().nth(1) {
+                        mem_available_kb = val.parse().unwrap_or(0);
+                    }
+                }
+            }
+            let used_kb = mem_total_kb.saturating_sub(mem_available_kb) as f32;
+            let used_mb = used_kb / 1024.0;
+            (cpu, used_mb)
+        })();
+
+        (cpu_percent, mem_used_mb)
     }
 }
 

@@ -16,22 +16,27 @@ path = "src/main.rs"
 [[bin]]
 name = "test_real_backend"
 path = "src/test_real_backend.rs"
+required-features = ["real-compositor"]
 
 [[bin]]
 name = "test_basic"
 path = "src/test_basic.rs"
+required-features = ["demo"]
 
 [[bin]]
 name = "test_socket"
 path = "src/test_socket.rs"
+required-features = ["demo"]
 
 [[bin]]
 name = "test_real"
 path = "src/test_real.rs"
+required-features = ["real-compositor"]
 
 [[bin]]
 name = "run_real_backend"
 path = "src/bin/run_real_backend.rs"
+required-features = ["real-compositor"]
 
 [dependencies]
 # Configuration and serialization
@@ -106,16 +111,11 @@ parking_lot = "0.12"  # For RwLock synchronization
 name = "axiom"
 path = "src/lib.rs"
 
-# Binary configuration
-[[bin]]
-name = "axiom"
-path = "src/main.rs"
 
 # Features
 [features]
 default = []
 demo = []
-memory-profiling = ["tikv-jemallocator"]
 real-compositor = []
 
 # Development dependencies for testing
