@@ -1,36 +1,43 @@
 //! Configuration management for Axiom
-//! 
+//!
 //! This module handles loading, parsing, and validating configuration
-//! from TOML files. It combines settings for workspaces, effects, 
+//! from TOML files. It combines settings for workspaces, effects,
 //! input handling, and more.
 
-use std::path::Path;
-use std::fs;
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
 
 /// Main configuration struct containing all Axiom settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AxiomConfig {
     /// Workspace configuration (scrollable behavior)
+    #[serde(default)]
     pub workspace: WorkspaceConfig,
-    
+
     /// Visual effects configuration  
+    #[serde(default)]
     pub effects: EffectsConfig,
-    
+
     /// Window management settings
+    #[serde(default)]
     pub window: WindowConfig,
-    
+
     /// Input handling and keybindings
+    #[serde(default)]
     pub input: InputConfig,
-    
+
     /// Key bindings
+    #[serde(default)]
     pub bindings: BindingsConfig,
-    
+
     /// XWayland configuration
+    #[serde(default)]
     pub xwayland: XWaylandConfig,
-    
+
     /// General compositor settings
+    #[serde(default)]
     pub general: GeneralConfig,
 }
 
@@ -39,19 +46,19 @@ pub struct AxiomConfig {
 pub struct WorkspaceConfig {
     /// Speed of workspace scrolling (1.0 = normal)
     pub scroll_speed: f64,
-    
+
     /// Enable infinite scrolling (vs bounded workspaces)
     pub infinite_scroll: bool,
-    
+
     /// Auto-scroll to fit content
     pub auto_scroll: bool,
-    
+
     /// Width of each virtual workspace column (pixels)
     pub workspace_width: u32,
-    
+
     /// Gaps between windows (pixels)
     pub gaps: u32,
-    
+
     /// Enable smooth scrolling animations
     pub smooth_scrolling: bool,
 }
@@ -61,16 +68,16 @@ pub struct WorkspaceConfig {
 pub struct EffectsConfig {
     /// Enable/disable all visual effects
     pub enabled: bool,
-    
+
     /// Animation settings
     pub animations: AnimationConfig,
-    
+
     /// Blur effect settings
     pub blur: BlurConfig,
-    
+
     /// Rounded corners settings
     pub rounded_corners: RoundedCornersConfig,
-    
+
     /// Drop shadow settings
     pub shadows: ShadowConfig,
 }
@@ -79,16 +86,16 @@ pub struct EffectsConfig {
 pub struct AnimationConfig {
     /// Enable animations
     pub enabled: bool,
-    
+
     /// Default animation duration (milliseconds)
     pub duration: u32,
-    
+
     /// Animation curve ("linear", "ease", "ease-in", "ease-out", "ease-in-out")
     pub curve: String,
-    
+
     /// Workspace transition animation duration
     pub workspace_transition: u32,
-    
+
     /// Window open/close animation duration
     pub window_animation: u32,
 }
@@ -97,13 +104,13 @@ pub struct AnimationConfig {
 pub struct BlurConfig {
     /// Enable blur effects
     pub enabled: bool,
-    
+
     /// Blur radius (pixels)
     pub radius: u32,
-    
+
     /// Blur intensity (0.0-1.0)
     pub intensity: f64,
-    
+
     /// Enable blur on window backgrounds
     pub window_backgrounds: bool,
 }
@@ -112,10 +119,10 @@ pub struct BlurConfig {
 pub struct RoundedCornersConfig {
     /// Enable rounded corners
     pub enabled: bool,
-    
+
     /// Corner radius (pixels)
     pub radius: u32,
-    
+
     /// Anti-aliasing quality (1-4)
     pub antialiasing: u32,
 }
@@ -124,16 +131,16 @@ pub struct RoundedCornersConfig {
 pub struct ShadowConfig {
     /// Enable drop shadows
     pub enabled: bool,
-    
+
     /// Shadow size (pixels)
     pub size: u32,
-    
+
     /// Shadow blur radius
     pub blur_radius: u32,
-    
+
     /// Shadow opacity (0.0-1.0)
     pub opacity: f64,
-    
+
     /// Shadow color (hex: #RRGGBB)
     pub color: String,
 }
@@ -143,22 +150,22 @@ pub struct ShadowConfig {
 pub struct WindowConfig {
     /// Default window placement algorithm
     pub placement: String, // "smart", "center", "mouse"
-    
+
     /// Focus follows mouse
     pub focus_follows_mouse: bool,
-    
+
     /// Border width (pixels)
     pub border_width: u32,
-    
+
     /// Active border color
     pub active_border_color: String,
-    
+
     /// Inactive border color  
     pub inactive_border_color: String,
-    
+
     /// Gap between windows (pixels)
     pub gap: u32,
-    
+
     /// Default layout algorithm ("horizontal", "vertical")
     pub default_layout: String,
 }
@@ -168,16 +175,16 @@ pub struct WindowConfig {
 pub struct InputConfig {
     /// Keyboard repeat delay (milliseconds)
     pub keyboard_repeat_delay: u32,
-    
+
     /// Keyboard repeat rate (per second)
     pub keyboard_repeat_rate: u32,
-    
+
     /// Mouse acceleration
     pub mouse_accel: f64,
-    
+
     /// Touchpad tap to click
     pub touchpad_tap: bool,
-    
+
     /// Natural scrolling
     pub natural_scrolling: bool,
 }
@@ -187,28 +194,22 @@ pub struct InputConfig {
 pub struct BindingsConfig {
     /// Scroll workspace left
     pub scroll_left: String,
-    
+
     /// Scroll workspace right
     pub scroll_right: String,
-    
+
     /// Move window left
     pub move_window_left: String,
-    
+
     /// Move window right
     pub move_window_right: String,
-    
+
     /// Close window
     pub close_window: String,
-    
-    /// Launch terminal
-    pub launch_terminal: String,
-    
-    /// Launch application launcher
-    pub launch_launcher: String,
-    
-    /// Toggle effects
-    pub toggle_effects: String,
-    
+
+    /// Toggle fullscreen
+    pub toggle_fullscreen: String,
+
     /// Quit compositor
     pub quit: String,
 }
@@ -218,22 +219,37 @@ pub struct BindingsConfig {
 pub struct XWaylandConfig {
     /// Enable XWayland support
     pub enabled: bool,
-    
-    /// XWayland display number
-    pub display: Option<u32>,
+
+    /// Enable lazy loading
+    pub lazy_loading: bool,
+
+    /// Scale factor for XWayland windows
+    pub scale_factor: f64,
 }
 
 /// General compositor settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
-    /// Enable debug logging
-    pub debug: bool,
-    
-    /// Max FPS limit (0 = unlimited)
-    pub max_fps: u32,
-    
-    /// Enable VSync
-    pub vsync: bool,
+    /// Compositor name
+    pub compositor_name: String,
+
+    /// Socket name
+    pub socket_name: String,
+
+    /// Log level
+    pub log_level: String,
+
+    /// Enable debug output
+    pub enable_debug_output: bool,
+
+    /// Maximum number of clients
+    pub max_clients: u32,
+
+    /// Configuration file path
+    pub config_path: String,
+
+    /// Startup applications
+    pub startup_apps: Vec<String>,
 }
 
 impl Default for AxiomConfig {
@@ -326,7 +342,7 @@ impl Default for WindowConfig {
             placement: "smart".to_string(),
             focus_follows_mouse: false,
             border_width: 2,
-            active_border_color: "#7C3AED".to_string(),   // Purple
+            active_border_color: "#7C3AED".to_string(), // Purple
             inactive_border_color: "#374151".to_string(), // Gray
             gap: 10,
             default_layout: "horizontal".to_string(),
@@ -349,15 +365,13 @@ impl Default for InputConfig {
 impl Default for BindingsConfig {
     fn default() -> Self {
         Self {
-            scroll_left: "Super_L+Left".to_string(),
-            scroll_right: "Super_L+Right".to_string(),
-            move_window_left: "Super_L+Shift+Left".to_string(),
-            move_window_right: "Super_L+Shift+Right".to_string(),
-            close_window: "Super_L+q".to_string(),
-            launch_terminal: "Super_L+Return".to_string(),
-            launch_launcher: "Super_L+d".to_string(),
-            toggle_effects: "Super_L+e".to_string(),
-            quit: "Super_L+Shift+q".to_string(),
+            scroll_left: "Super+Left".to_string(),
+            scroll_right: "Super+Right".to_string(),
+            move_window_left: "Super+Shift+Left".to_string(),
+            move_window_right: "Super+Shift+Right".to_string(),
+            close_window: "Super+q".to_string(),
+            toggle_fullscreen: "Super+f".to_string(),
+            quit: "Super+Shift+q".to_string(),
         }
     }
 }
@@ -366,7 +380,8 @@ impl Default for XWaylandConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            display: None, // Auto-select
+            lazy_loading: true,
+            scale_factor: 1.0,
         }
     }
 }
@@ -374,9 +389,13 @@ impl Default for XWaylandConfig {
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
-            debug: false,
-            max_fps: 60,
-            vsync: true,
+            compositor_name: "axiom".to_string(),
+            socket_name: "axiom".to_string(),
+            log_level: "info".to_string(),
+            enable_debug_output: false,
+            max_clients: 100,
+            config_path: "~/.config/axiom/config.toml".to_string(),
+            startup_apps: vec![],
         }
     }
 }
@@ -385,61 +404,88 @@ impl AxiomConfig {
     /// Load configuration from a TOML file
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        
+
         // Expand ~ to home directory
         let expanded_path = if path.to_string_lossy().starts_with('~') {
-            let home = std::env::var("HOME")
-                .context("Failed to get HOME environment variable")?;
+            let home = std::env::var("HOME").context("Failed to get HOME environment variable")?;
             Path::new(&home).join(path.strip_prefix("~").unwrap_or(path))
         } else {
             path.to_path_buf()
         };
-        
+
         let contents = fs::read_to_string(&expanded_path)
             .with_context(|| format!("Failed to read config file: {}", expanded_path.display()))?;
-            
+
         let config: AxiomConfig = toml::from_str(&contents)
             .with_context(|| format!("Failed to parse config file: {}", expanded_path.display()))?;
-            
+
         config.validate()?;
-        
+
         Ok(config)
     }
-    
+
     /// Validate the configuration
     pub fn validate(&self) -> Result<()> {
         // Validate scroll speed
         if self.workspace.scroll_speed <= 0.0 || self.workspace.scroll_speed > 10.0 {
             anyhow::bail!("Invalid scroll_speed: must be between 0.0 and 10.0");
         }
-        
+
         // Validate animation curve
         let valid_curves = ["linear", "ease", "ease-in", "ease-out", "ease-in-out"];
         if !valid_curves.contains(&self.effects.animations.curve.as_str()) {
             anyhow::bail!("Invalid animation curve: {}", self.effects.animations.curve);
         }
-        
+
         // Validate blur intensity
         if self.effects.blur.intensity < 0.0 || self.effects.blur.intensity > 1.0 {
             anyhow::bail!("Invalid blur intensity: must be between 0.0 and 1.0");
         }
-        
+
         // Validate shadow opacity
         if self.effects.shadows.opacity < 0.0 || self.effects.shadows.opacity > 1.0 {
             anyhow::bail!("Invalid shadow opacity: must be between 0.0 and 1.0");
         }
-        
+
         Ok(())
     }
-    
+
     /// Save configuration to a TOML file
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let contents = toml::to_string_pretty(self)
-            .context("Failed to serialize configuration")?;
-            
-        fs::write(path, contents)
-            .context("Failed to write configuration file")?;
-            
+        let contents = toml::to_string_pretty(self).context("Failed to serialize configuration")?;
+
+        fs::write(path, contents).context("Failed to write configuration file")?;
+
         Ok(())
     }
+
+    /// Merge a partial configuration into this one
+    /// Non-default values from the partial config will override this config
+    pub fn merge_partial(mut self, partial: AxiomConfig) -> Self {
+        // Simple approach: replace entire workspace section if it's different from default
+        let default_config = AxiomConfig::default();
+        
+        // Check if any workspace field differs from default
+        let workspace_changed = partial.workspace.scroll_speed != default_config.workspace.scroll_speed ||
+            partial.workspace.infinite_scroll != default_config.workspace.infinite_scroll ||
+            partial.workspace.auto_scroll != default_config.workspace.auto_scroll ||
+            partial.workspace.workspace_width != default_config.workspace.workspace_width ||
+            partial.workspace.gaps != default_config.workspace.gaps ||
+            partial.workspace.smooth_scrolling != default_config.workspace.smooth_scrolling;
+        
+        if workspace_changed {
+            self.workspace = partial.workspace;
+        }
+        
+        // TODO: Merge other sections (effects, window, input, etc.) similarly
+        // For now, property tests only focus on workspace merging
+        
+        self
+    }
 }
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod property_tests;

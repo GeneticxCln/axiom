@@ -1,0 +1,79 @@
+# Maintainer: Axiom Contributors <axiom@example.com>
+pkgname=axiom-compositor-git
+pkgver=0.1.0.r$(git rev-list --count HEAD).$(git rev-parse --short HEAD)
+pkgrel=1
+pkgdesc="Hybrid Wayland compositor combining niri's scrollable workspaces with Hyprland's visual effects"
+arch=('x86_64')
+url="https://github.com/yourusername/axiom"
+license=('MIT')
+depends=(
+    'wayland'
+    'libxkbcommon'
+    'mesa'
+    'libinput'
+    'systemd-libs'
+    'dbus'
+    'vulkan-icd-loader'
+)
+makedepends=(
+    'rust'
+    'cargo'
+    'git'
+    'meson'
+    'ninja'
+    'wayland-protocols'
+    'pkgconf'
+)
+optdepends=(
+    'xorg-xwayland: X11 application support'
+    'vulkan-intel: Intel GPU support'
+    'vulkan-radeon: AMD GPU support'
+    'nvidia-utils: NVIDIA GPU support'
+)
+provides=('axiom-compositor')
+conflicts=('axiom-compositor')
+source=("git+https://github.com/yourusername/axiom.git")
+md5sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/axiom"
+    printf "0.1.0.r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd "$srcdir/axiom"
+    cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+    cd "$srcdir/axiom"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --all-features
+}
+
+check() {
+    cd "$srcdir/axiom"
+    cargo test --frozen --all-features
+}
+
+package() {
+    cd "$srcdir/axiom"
+    
+    # Install binary
+    install -Dm755 "target/release/axiom" "$pkgdir/usr/bin/axiom"
+    
+    # Install desktop file
+    install -Dm644 "packaging/axiom.desktop" "$pkgdir/usr/share/applications/axiom.desktop"
+    
+    # Install configuration
+    install -Dm644 "config/axiom.toml" "$pkgdir/usr/share/axiom/axiom.toml"
+    install -Dm644 "config/axiom.toml" "$pkgdir/etc/axiom/axiom.toml"
+    
+    # Install documentation
+    install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    
+    # Install session file for display managers
+    install -Dm644 "packaging/axiom.session" "$pkgdir/usr/share/wayland-sessions/axiom.desktop"
+}
