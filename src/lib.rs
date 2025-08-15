@@ -35,8 +35,9 @@ pub mod effects;
 pub mod input;
 pub mod ipc;
 pub mod smithay_backend;
-pub mod smithay_enhanced;  // Enhanced Smithay with Wayland socket support
-// TODO: Real Wayland protocol implementation will be integrated when Smithay API is stable
+pub mod smithay_enhanced; // Enhanced Smithay with Wayland socket support
+                          // TODO: Real Wayland protocol implementation will be integrated when Smithay API is stable
+pub mod renderer;
 pub mod window;
 pub mod workspace;
 pub mod xwayland;

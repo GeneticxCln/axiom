@@ -26,16 +26,17 @@ env_logger = "0.10"
 wayland-server = "0.31"
 wayland-protocols = { version = "0.31", features = ["server", "staging"] }
 # Smithay compositor framework with available features
-smithay = { version = "0.3.0", features = [
+smithay = { version = "0.7.0", features = [
     "backend_winit", 
     "renderer_gl",
-    "wayland_frontend"
+    "wayland_frontend",
+    "desktop"
 ] }
 glium = "0.34"
 cgmath = "0.18"
 xkbcommon = "0.7"
 libc = "0.2"
-calloop = "0.12"
+calloop = "0.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -47,10 +48,12 @@ winit = "0.29"
 serde_json = "1.0"
 interprocess = "1.2"  # For Unix socket communication
 dbus = "0.9"  # Alternative IPC method
+ctrlc = "3.4"  # For graceful shutdown
 
 # Utilities
 rand = "0.8"  # For input simulation in Phase 3
 bytemuck = { version = "1.14", features = ["derive"] }  # For GPU buffer data
+sysinfo = "0.37"  # System metrics for IPC performance reporting
 
 # Optional memory profiling
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
@@ -77,6 +80,7 @@ path = "src/main.rs"
 default = []
 demo = []
 memory-profiling = ["tikv-jemallocator"]
+real-compositor = []
 
 # Development dependencies for testing
 [dev-dependencies]

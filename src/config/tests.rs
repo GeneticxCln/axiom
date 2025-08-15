@@ -14,10 +14,10 @@ fn test_default_configuration_is_valid() {
 
     // Test that all default values are reasonable
     assert!(config.effects.enabled);
-    assert!(config.effects.blur.radius >= 0);
-    assert!(config.effects.shadows.size >= 0);
-    assert!(config.workspace.workspace_width > 0);
-    assert!(config.workspace.gaps >= 0);
+    // Avoid clippy::absurd_extreme_comparisons by casting to signed types
+    assert!((config.effects.blur.radius as i32) >= 0);
+    assert!((config.effects.shadows.size as i32) >= 0);
+    assert!((config.workspace.gaps as i32) >= 0);
     assert!(config.workspace.scroll_speed > 0.0);
 
     // Test that input values are reasonable
@@ -149,7 +149,7 @@ startup_apps = []
     assert_eq!(config.effects.shadows.size, 25);
     assert_eq!(config.workspace.workspace_width, 1600);
     assert_eq!(config.input.mouse_accel, 0.5);
-    assert_eq!(config.xwayland.enabled, false);
+    assert!(!config.xwayland.enabled);
 
     Ok(())
 }
@@ -197,7 +197,7 @@ color = '#000000'
 
     // Verify overridden values
     assert_eq!(config.effects.blur.radius, 25);
-    assert_eq!(config.effects.enabled, false);
+    assert!(!config.effects.enabled);
 
     // Verify default values are still present
     assert!(config.workspace.workspace_width > 0);

@@ -216,6 +216,7 @@ pub struct BindingsConfig {
 
 /// XWayland configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct XWaylandConfig {
     /// Enable XWayland support
     pub enabled: bool,
@@ -225,6 +226,18 @@ pub struct XWaylandConfig {
 
     /// Scale factor for XWayland windows
     pub scale_factor: f64,
+
+    /// Path to XWayland executable
+    pub xwayland_path: String,
+
+    /// Auto-restart XWayland if it crashes
+    pub auto_restart: bool,
+
+    /// Additional command line arguments
+    pub extra_args: Vec<String>,
+
+    /// Maximum number of X11 windows
+    pub max_windows: u32,
 }
 
 /// General compositor settings
@@ -382,6 +395,10 @@ impl Default for XWaylandConfig {
             enabled: true,
             lazy_loading: true,
             scale_factor: 1.0,
+            xwayland_path: "/usr/bin/Xwayland".to_string(),
+            auto_restart: true,
+            extra_args: vec!["-extension".to_string(), "MIT-SHM".to_string()],
+            max_windows: 50,
         }
     }
 }
@@ -464,22 +481,23 @@ impl AxiomConfig {
     pub fn merge_partial(mut self, partial: AxiomConfig) -> Self {
         // Simple approach: replace entire workspace section if it's different from default
         let default_config = AxiomConfig::default();
-        
+
         // Check if any workspace field differs from default
-        let workspace_changed = partial.workspace.scroll_speed != default_config.workspace.scroll_speed ||
-            partial.workspace.infinite_scroll != default_config.workspace.infinite_scroll ||
-            partial.workspace.auto_scroll != default_config.workspace.auto_scroll ||
-            partial.workspace.workspace_width != default_config.workspace.workspace_width ||
-            partial.workspace.gaps != default_config.workspace.gaps ||
-            partial.workspace.smooth_scrolling != default_config.workspace.smooth_scrolling;
-        
+        let workspace_changed = partial.workspace.scroll_speed
+            != default_config.workspace.scroll_speed
+            || partial.workspace.infinite_scroll != default_config.workspace.infinite_scroll
+            || partial.workspace.auto_scroll != default_config.workspace.auto_scroll
+            || partial.workspace.workspace_width != default_config.workspace.workspace_width
+            || partial.workspace.gaps != default_config.workspace.gaps
+            || partial.workspace.smooth_scrolling != default_config.workspace.smooth_scrolling;
+
         if workspace_changed {
             self.workspace = partial.workspace;
         }
-        
+
         // TODO: Merge other sections (effects, window, input, etc.) similarly
         // For now, property tests only focus on workspace merging
-        
+
         self
     }
 }

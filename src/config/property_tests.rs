@@ -220,11 +220,19 @@ prop_compose! {
         enabled in any::<bool>(),
         lazy_loading in any::<bool>(),
         scale_factor in 0.5f64..3.0f64,
+        auto_restart in any::<bool>(),
+        max_windows in 1u32..200u32,
+        xwayland_path in Just("/usr/bin/Xwayland".to_string()),
+        extra_args in prop::collection::vec("[-A-Za-z0-9_.+/]{1,20}", 0..4),
     ) -> XWaylandConfig {
         XWaylandConfig {
             enabled,
             lazy_loading,
             scale_factor,
+            xwayland_path,
+            auto_restart,
+            extra_args,
+            max_windows,
         }
     }
 }

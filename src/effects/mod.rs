@@ -20,7 +20,9 @@ mod shaders;
 mod shadow;
 
 // Re-export animation types for use in effects engine
-pub use animations::{AnimationController, AnimationProperty, AnimationStats, AnimationUpdate, AnimationValue};
+pub use animations::{
+    AnimationController, AnimationProperty, AnimationStats, AnimationUpdate, AnimationValue,
+};
 
 /// Different types of animations
 #[derive(Debug, Clone, PartialEq)]
@@ -423,9 +425,9 @@ impl EffectsEngine {
             .window_effects
             .entry(window_id)
             .or_insert_with(WindowEffectState::default);
-        
+
         effect_state.blur_radius = blur_radius.max(0.0); // Ensure non-negative
-        
+
         debug!(
             "🌊 Set window {} blur radius to {:.1}",
             window_id, effect_state.blur_radius
@@ -565,7 +567,6 @@ impl EffectsEngine {
         }
     }
 
-
     /// Adapt effects quality based on performance
     fn adapt_quality_for_performance(&mut self) {
         let target_frame_time = Duration::from_millis(16); // 60 FPS
@@ -638,18 +639,18 @@ impl EffectsEngine {
     /// Initialize GPU context for hardware-accelerated effects
     pub fn initialize_gpu(&mut self, device: Arc<Device>, queue: Arc<Queue>) -> Result<()> {
         info!("🚀 Initializing GPU acceleration for effects...");
-        
+
         // Store GPU context
         self.gpu_device = Some(device.clone());
         self.gpu_queue = Some(queue.clone());
-        
+
         // Initialize shader manager with Arc<Device>
         // Initialize blur renderer
         if self.blur_params.enabled {
             // Create shader manager for effects
             let mut shader_manager = shaders::ShaderManager::new(device.clone());
             shader_manager.compile_all_shaders()?;
-            
+
             // Convert our BlurParams to blur module's BlurParams
             let blur_params = blur::BlurParams {
                 blur_type: blur::BlurType::Gaussian {
@@ -660,31 +661,31 @@ impl EffectsEngine {
                 adaptive_quality: true,
                 performance_scale: self.effects_quality,
             };
-            
+
             self.blur_renderer = Some(blur::BlurRenderer::new(
-                device.clone(), 
+                device.clone(),
                 queue.clone(),
                 Arc::new(shader_manager),
-                blur_params
+                blur_params,
             )?);
             debug!("🌊 GPU blur renderer initialized");
         }
-        
+
         // Initialize shadow renderer - temporarily disabled until shader manager is properly integrated
         // TODO: Re-enable once we have proper GPU context and shader management
         if self.default_shadow.enabled {
             debug!("🌟 Shadow rendering configured (GPU initialization deferred)");
         }
-        
+
         info!("✅ GPU effects acceleration ready");
         Ok(())
     }
-    
+
     /// Get animation statistics from the animation controller
     pub fn get_animation_stats(&self) -> AnimationStats {
         self.animation_controller.get_animation_stats()
     }
-    
+
     /// Check if GPU acceleration is available
     pub fn has_gpu_acceleration(&self) -> bool {
         self.gpu_device.is_some() && self.gpu_queue.is_some()

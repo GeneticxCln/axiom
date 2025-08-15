@@ -137,7 +137,6 @@ impl ScrollableWorkspaces {
         Ok(workspace_manager)
     }
 
-
     /// Ensure a column exists at the given index
     pub fn ensure_column(&mut self, index: i32) -> &mut WorkspaceColumn {
         if !self.columns.contains_key(&index) {
@@ -486,12 +485,15 @@ impl ScrollableWorkspaces {
     pub fn update(&mut self) -> Result<()> {
         self.update_animations()
     }
-    
+
     /// Set viewport size for layout calculations
     pub fn set_viewport_size(&mut self, width: f64, height: f64) {
         self.viewport_width = width;
         self.viewport_height = height;
-        debug!("📐 Workspace viewport updated to {:.0}x{:.0}", width, height);
+        debug!(
+            "📐 Workspace viewport updated to {:.0}x{:.0}",
+            width, height
+        );
     }
 
     /// Check if window exists in any column

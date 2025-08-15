@@ -11,10 +11,10 @@ use cgmath::{InnerSpace, Vector2, Vector3, Vector4};
 use log::{debug, info};
 use std::sync::Arc;
 use wgpu::{
-    BindGroupDescriptor, BindGroupEntry, BlendState, Buffer, BufferDescriptor,
-    BufferUsages, ColorTargetState, ColorWrites, CommandEncoder, Device, FragmentState,
-    MultisampleState, PrimitiveState, Queue, RenderPipeline, RenderPipelineDescriptor, Texture,
-    TextureFormat, TextureUsages, TextureView, VertexState,
+    BindGroupDescriptor, BindGroupEntry, BlendState, Buffer, BufferDescriptor, BufferUsages,
+    ColorTargetState, ColorWrites, CommandEncoder, Device, FragmentState, MultisampleState,
+    PrimitiveState, Queue, RenderPipeline, RenderPipelineDescriptor, Texture, TextureFormat,
+    TextureUsages, TextureView, VertexState,
 };
 
 use super::shaders::{ShaderManager, ShaderType};

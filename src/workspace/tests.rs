@@ -289,11 +289,15 @@ fn test_large_number_of_windows() -> Result<()> {
     for i in 50..60 {
         assert!(!workspaces.window_exists(i));
     }
-    
+
     // The column count may not immediately reflect removals due to lazy cleanup
     // But should still be reasonable (not more than original)
     let final_count = workspaces.active_column_count();
-    assert!(final_count <= 100, "Final count {} should not exceed original 100", final_count);
+    assert!(
+        final_count <= 100,
+        "Final count {} should not exceed original 100",
+        final_count
+    );
 
     Ok(())
 }
@@ -373,7 +377,7 @@ mod property_tests {
             // The important thing is that windows were actually removed
             let final_count = workspaces.active_column_count();
             prop_assert!(final_count <= window_ids.len()); // Should not exceed original count
-            
+
             // Verify all windows are actually gone
             for &id in &window_ids {
                 prop_assert!(!workspaces.window_exists(id));

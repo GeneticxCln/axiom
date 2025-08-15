@@ -33,8 +33,17 @@ mod demo_workspace;
 mod effects;
 mod input;
 mod ipc;
+#[cfg(feature = "real-compositor")]
+mod multi_output; // Multi-output support for multiple monitors
+#[cfg(feature = "real-compositor")]
+mod real_input; // Real input handling from Smithay
+#[cfg(feature = "real-compositor")]
+mod real_smithay; // Real Smithay compositor implementation (Phase 5)
+#[cfg(feature = "real-compositor")]
+mod real_window; // Real window management with Wayland surfaces
+mod renderer; // GPU rendering pipeline
 mod smithay_backend;
-mod smithay_enhanced;  // Enhanced Smithay with Wayland socket support
+mod smithay_enhanced; // Enhanced Smithay with Wayland socket support
 mod wayland_protocols; // Real Wayland protocol implementation
 mod window;
 mod workspace;
@@ -77,6 +86,10 @@ struct Cli {
     /// Use real Smithay backend with full Wayland protocol support (Phase 5)
     #[arg(long)]
     real_smithay: bool,
+
+    /// Use completely real Smithay compositor with proper protocols (Phase 5)
+    #[arg(long)]
+    real_compositor: bool,
 }
 
 #[tokio::main]
@@ -113,11 +126,28 @@ async fn main() -> Result<()> {
         info!("🚫 Visual effects disabled via CLI flag");
     }
 
-    // Check if we should use real Smithay backend
+    // Check if we should use completely real Smithay compositor
+    if cli.real_compositor {
+        info!("🚀 Using completely real Smithay compositor with full protocol support");
+        info!("🌊 This is Phase 5: Production-ready Wayland compositor with proper protocols");
+
+        // Run with real Smithay compositor
+        #[cfg(feature = "real-compositor")]
+        {
+            return real_smithay::run_real_compositor(config);
+        }
+        #[cfg(not(feature = "real-compositor"))]
+        {
+            error!("❌ real-compositor feature not enabled at compile time. Rebuild with `--features real-compositor`.");
+            return Ok(());
+        }
+    }
+
+    // Check if we should use enhanced Smithay backend
     if cli.real_smithay {
         info!("🔧 Using enhanced Smithay backend with Wayland socket support");
         info!("🌊 This is Phase 5: Production-ready Wayland compositor");
-        
+
         // Run with enhanced Smithay backend
         smithay_enhanced::run_enhanced_compositor(config, cli.windowed).await?;
         return Ok(());

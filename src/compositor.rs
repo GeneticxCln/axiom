@@ -313,7 +313,6 @@ impl AxiomCompositor {
 
         // 5. Apply global effects (workspace transitions, blur backgrounds)
         self.apply_global_effects();
-
         // 6. Performance monitoring for effects
         let (frame_time, effects_quality, active_effects) =
             self.effects_engine.get_performance_stats();
@@ -333,6 +332,15 @@ impl AxiomCompositor {
             self.workspace_manager.focused_column_index(),
             active_effects
         );
+
+        // 7. Broadcast basic performance metrics over IPC for Lazy UI
+        let frame_time_ms = (frame_time.as_secs_f64() * 1000.0) as f32;
+        let active_windows = self.window_manager.windows().count() as u32;
+        let current_workspace = self.workspace_manager.focused_column_index();
+
+        // Rate-limited IPC metrics broadcast (~10Hz)
+        self.ipc_server
+            .maybe_broadcast_performance_metrics(frame_time_ms, active_windows, current_workspace);
 
         Ok(())
     }

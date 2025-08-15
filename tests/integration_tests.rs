@@ -64,17 +64,14 @@ async fn test_compositor_initialization() -> Result<()> {
     match result {
         Ok(Ok(_compositor)) => {
             // Compositor created successfully
-            assert!(true);
         }
         Ok(Err(e)) => {
             // Expected in CI environment without display
             println!("Expected initialization failure in CI: {}", e);
-            assert!(true);
         }
         Err(_) => {
             // Timeout - this might happen in CI
             println!("Compositor initialization timed out (expected in CI)");
-            assert!(true);
         }
     }
 
@@ -150,10 +147,8 @@ async fn test_effects_engine() -> Result<()> {
     effects.update()?;
 
     // Test performance stats
-    let (frame_time, quality, active_count) = effects.get_performance_stats();
-    assert!(frame_time.as_millis() >= 0);
-    assert!(quality >= 0.0 && quality <= 1.0);
-    assert!(active_count >= 0);
+    let (_frame_time, quality, _active_count) = effects.get_performance_stats();
+    assert!((0.0..=1.0).contains(&quality));
 
     // Test shutdown
     effects.shutdown()?;
@@ -189,7 +184,7 @@ async fn test_input_processing() -> Result<()> {
     for action in &actions {
         match action {
             CompositorAction::ScrollWorkspaceLeft | CompositorAction::ScrollWorkspaceRight => {
-                assert!(true); // Expected actions
+                // Expected actions
             }
             _ => {
                 // Other actions might be present too
@@ -259,12 +254,11 @@ async fn test_error_recovery() -> Result<()> {
         Ok(mut engine) => {
             // If it accepts invalid config, it should sanitize it
             let (_, quality, _) = engine.get_performance_stats();
-            assert!(quality >= 0.0 && quality <= 1.0);
+            assert!((0.0..=1.0).contains(&quality));
             engine.shutdown()?;
         }
         Err(_) => {
             // Expected to reject invalid configuration
-            assert!(true);
         }
     }
 
