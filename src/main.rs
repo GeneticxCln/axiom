@@ -27,24 +27,21 @@ use clap::Parser;
 use log::{error, info};
 
 mod compositor;
+mod decoration;
+mod smithay_backend_real;
+mod smithay_backend_simple; // Real Smithay implementation
+                            // mod smithay_backend_production;  // Phase 6: Production Smithay backend (disabled for now)
 mod config;
 mod demo_phase4_effects;
+mod demo_phase6_minimal;
+mod demo_phase6_working;
 mod demo_workspace;
 mod effects;
 mod input;
 mod ipc;
-#[cfg(feature = "real-compositor")]
-mod multi_output; // Multi-output support for multiple monitors
-#[cfg(feature = "real-compositor")]
-mod real_input; // Real input handling from Smithay
-#[cfg(feature = "real-compositor")]
-mod real_smithay; // Real Smithay compositor implementation (Phase 5)
-#[cfg(feature = "real-compositor")]
-mod real_window; // Real window management with Wayland surfaces
-mod renderer; // GPU rendering pipeline
-mod smithay_backend;
-mod smithay_enhanced; // Enhanced Smithay with Wayland socket support
-mod wayland_protocols; // Real Wayland protocol implementation
+mod smithay_backend_minimal; // Phase 6.1: Minimal working backend
+mod smithay_backend_phase6; // Phase 6.1: WORKING Smithay backend
+mod smithay_backend_phase6_2; // Phase 6.2: Full protocol implementation
 mod window;
 mod workspace;
 mod xwayland;
@@ -83,13 +80,9 @@ struct Cli {
     #[arg(long)]
     effects_demo: bool,
 
-    /// Use real Smithay backend with full Wayland protocol support (Phase 5)
+    /// Run Phase 6.2 Smithay backend demo with protocol simulation
     #[arg(long)]
-    real_smithay: bool,
-
-    /// Use completely real Smithay compositor with proper protocols (Phase 5)
-    #[arg(long)]
-    real_compositor: bool,
+    phase6_2_demo: bool,
 }
 
 #[tokio::main]
@@ -126,37 +119,10 @@ async fn main() -> Result<()> {
         info!("🚫 Visual effects disabled via CLI flag");
     }
 
-    // Check if we should use completely real Smithay compositor
-    if cli.real_compositor {
-        info!("🚀 Using completely real Smithay compositor with full protocol support");
-        info!("🌊 This is Phase 5: Production-ready Wayland compositor with proper protocols");
-
-        // Run with real Smithay compositor
-        #[cfg(feature = "real-compositor")]
-        {
-            return real_smithay::run_real_compositor(config);
-        }
-        #[cfg(not(feature = "real-compositor"))]
-        {
-            error!("❌ real-compositor feature not enabled at compile time. Rebuild with `--features real-compositor`.");
-            return Ok(());
-        }
-    }
-
-    // Check if we should use enhanced Smithay backend
-    if cli.real_smithay {
-        info!("🔧 Using enhanced Smithay backend with Wayland socket support");
-        info!("🌊 This is Phase 5: Production-ready Wayland compositor");
-
-        // Run with enhanced Smithay backend
-        smithay_enhanced::run_enhanced_compositor(config, cli.windowed).await?;
-        return Ok(());
-    }
-
-    // Initialize and run compositor with simulated backend
+    // Initialize and run compositor
     info!("🏗️  Initializing Axiom compositor...");
 
-    let mut compositor = AxiomCompositor::new(config, cli.windowed).await?;
+    let mut compositor = AxiomCompositor::new(config.clone(), cli.windowed).await?;
 
     info!("✨ Axiom is ready! Where productivity meets beauty.");
 
@@ -174,7 +140,14 @@ async fn main() -> Result<()> {
         info!("🎆 Phase 4 effects demo completed!");
     }
 
-    if cli.demo || cli.effects_demo {
+    if cli.phase6_2_demo {
+        info!("🌊 Running Phase 6.2 Smithay backend demo with protocol simulation...");
+        run_phase6_2_demo(config.clone(), cli.windowed).await?;
+        info!("🎆 Phase 6.2 demo completed!");
+        return Ok(()); // Exit after demo
+    }
+
+    if cli.demo || cli.effects_demo || cli.phase6_2_demo {
         info!("🎆 All demos completed! Continuing with normal compositor operation...");
     }
 
@@ -182,6 +155,61 @@ async fn main() -> Result<()> {
     compositor.run().await?;
 
     info!("👋 Axiom compositor shutting down");
+    Ok(())
+}
+
+/// Run Phase 6.2 Smithay backend demo with protocol simulation
+async fn run_phase6_2_demo(config: AxiomConfig, windowed: bool) -> Result<()> {
+    use crate::decoration::DecorationManager;
+    use crate::effects::EffectsEngine;
+    use crate::input::InputManager;
+    use crate::smithay_backend_phase6_2::AxiomSmithayBackendPhase6_2;
+    use crate::window::WindowManager;
+    use crate::workspace::ScrollableWorkspaces;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    info!("🌊 Initializing Phase 6.2 Enhanced Protocol Simulation Backend...");
+    info!("🔧 Creating required manager components...");
+
+    // Create all required manager components
+    let workspace_manager = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)?));
+    let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)?));
+    let effects_engine = Arc::new(RwLock::new(EffectsEngine::new(&config.effects)?));
+    let decoration_manager = Arc::new(RwLock::new(DecorationManager::new(&config.window)));
+    let input_manager = Arc::new(RwLock::new(InputManager::new(
+        &config.input,
+        &config.bindings,
+    )?));
+
+    let mut backend = AxiomSmithayBackendPhase6_2::new(
+        config,
+        windowed,
+        workspace_manager,
+        window_manager,
+        effects_engine,
+        decoration_manager,
+        input_manager,
+    )?;
+
+    backend.initialize().await?;
+
+    info!("✨ Phase 6.2 backend initialized successfully!");
+    info!("🔌 Socket: {:?}", backend.socket_name());
+
+    // Run the comprehensive demonstration
+    backend.demonstrate_protocol_simulation().await?;
+
+    // Clean up demonstration
+    backend.demonstrate_client_cleanup().await?;
+
+    info!("📊 Final status report:");
+    backend.report_status();
+
+    // Shutdown cleanly
+    backend.shutdown().await?;
+
+    info!("🎯 Phase 6.2 demo completed successfully!");
     Ok(())
 }
 

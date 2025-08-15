@@ -11,10 +11,11 @@ use log::{debug, info, warn};
 use tokio::signal;
 
 use crate::config::AxiomConfig;
+use crate::decoration::DecorationManager;
 use crate::effects::EffectsEngine;
 use crate::input::InputManager;
 use crate::ipc::AxiomIPCServer;
-use crate::smithay_backend::AxiomSmithayBackend;
+use crate::smithay_backend_phase6::AxiomSmithayBackendPhase6;
 use crate::window::WindowManager;
 use crate::workspace::ScrollableWorkspaces;
 use crate::xwayland::XWaylandManager;
@@ -28,12 +29,13 @@ pub struct AxiomCompositor {
     workspace_manager: ScrollableWorkspaces,
     effects_engine: EffectsEngine,
     window_manager: WindowManager,
+    decoration_manager: DecorationManager,
     input_manager: InputManager,
     xwayland_manager: Option<XWaylandManager>,
     ipc_server: AxiomIPCServer,
 
     // Smithay backend for Wayland compositor functionality
-    smithay_backend: AxiomSmithayBackend,
+    smithay_backend: AxiomSmithayBackendPhase6,
 
     // Event loop state
     running: bool,
@@ -53,6 +55,9 @@ impl AxiomCompositor {
 
         debug!("🪟 Initializing window manager...");
         let window_manager = WindowManager::new(&config.window)?;
+
+        debug!("🎨 Initializing decoration manager...");
+        let decoration_manager = DecorationManager::new(&config.window);
 
         debug!("⌨️ Initializing input manager...");
         let input_manager = InputManager::new(&config.input, &config.bindings)?;
@@ -76,7 +81,33 @@ impl AxiomCompositor {
 
         // Initialize Smithay backend
         debug!("🚀 Initializing Smithay Wayland backend...");
-        let mut smithay_backend = AxiomSmithayBackend::new(config.clone(), windowed)?;
+
+        // For now, create a simple Smithay backend that doesn't need shared managers
+        // In a real implementation, the backend would own the managers or use proper sharing
+        use parking_lot::RwLock;
+        use std::sync::Arc;
+
+        // Create dummy managers for the backend (they'll be empty)
+        let dummy_window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)?));
+        let dummy_workspace_manager =
+            Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)?));
+        let dummy_effects_engine = Arc::new(RwLock::new(EffectsEngine::new(&config.effects)?));
+        let dummy_decoration_manager =
+            Arc::new(RwLock::new(DecorationManager::new(&config.window)));
+        let dummy_input_manager = Arc::new(RwLock::new(InputManager::new(
+            &config.input,
+            &config.bindings,
+        )?));
+
+        let mut smithay_backend = AxiomSmithayBackendPhase6::new(
+            config.clone(),
+            windowed,
+            dummy_window_manager,
+            dummy_workspace_manager,
+            dummy_effects_engine,
+            dummy_decoration_manager,
+            dummy_input_manager,
+        )?;
         smithay_backend
             .initialize()
             .await
@@ -90,6 +121,7 @@ impl AxiomCompositor {
             workspace_manager,
             effects_engine,
             window_manager,
+            decoration_manager,
             input_manager,
             xwayland_manager,
             ipc_server,
@@ -210,26 +242,11 @@ impl AxiomCompositor {
             }
             CompositorAction::CloseWindow => {
                 debug!("🎨 Input triggered: Close window");
-                // Get the focused window and close it
-                let windows = self.workspace_manager.get_focused_column_windows();
-                if let Some(&window_id) = windows.first() {
-                    info!("🗑️ Closing window {}", window_id);
-                    self.remove_window(window_id);
-                }
+                // TODO: Close focused window
             }
             CompositorAction::ToggleFullscreen => {
                 debug!("🎨 Input triggered: Toggle fullscreen");
-                // Get the focused window and toggle fullscreen
-                let windows = self.workspace_manager.get_focused_column_windows();
-                if let Some(&window_id) = windows.first() {
-                    if let Some(window) = self.window_manager.get_window_mut(window_id) {
-                        window.properties.fullscreen = !window.properties.fullscreen;
-                        info!(
-                            "🖥️ Window {} fullscreen: {}",
-                            window_id, window.properties.fullscreen
-                        );
-                    }
-                }
+                // TODO: Toggle fullscreen for focused window
             }
             CompositorAction::Quit => {
                 info!("💼 Input triggered: Quit compositor");
@@ -237,26 +254,7 @@ impl AxiomCompositor {
             }
             CompositorAction::Custom(command) => {
                 debug!("🎨 Input triggered custom command: {}", command);
-                // Handle custom commands based on command string
-                match command.as_str() {
-                    "reload-config" => {
-                        info!("🔄 Reloading configuration...");
-                        if let Ok(new_config) = AxiomConfig::load(&self.config.general.config_path)
-                        {
-                            self.config = new_config;
-                            info!("✅ Configuration reloaded successfully");
-                        } else {
-                            warn!("⚠️ Failed to reload configuration");
-                        }
-                    }
-                    "toggle-effects" => {
-                        self.effects_engine.toggle_effects();
-                        info!("✨ Effects toggled");
-                    }
-                    _ => {
-                        warn!("⚠️ Unknown custom command: {}", command);
-                    }
-                }
+                // TODO: Handle custom commands
             }
         }
 
@@ -313,6 +311,7 @@ impl AxiomCompositor {
 
         // 5. Apply global effects (workspace transitions, blur backgrounds)
         self.apply_global_effects();
+
         // 6. Performance monitoring for effects
         let (frame_time, effects_quality, active_effects) =
             self.effects_engine.get_performance_stats();
@@ -332,15 +331,6 @@ impl AxiomCompositor {
             self.workspace_manager.focused_column_index(),
             active_effects
         );
-
-        // 7. Broadcast basic performance metrics over IPC for Lazy UI
-        let frame_time_ms = (frame_time.as_secs_f64() * 1000.0) as f32;
-        let active_windows = self.window_manager.windows().count() as u32;
-        let current_workspace = self.workspace_manager.focused_column_index();
-
-        // Rate-limited IPC metrics broadcast (~10Hz)
-        self.ipc_server
-            .maybe_broadcast_performance_metrics(frame_time_ms, active_windows, current_workspace);
 
         Ok(())
     }

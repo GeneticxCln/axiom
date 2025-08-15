@@ -159,7 +159,7 @@ impl AnimationController {
 
         self.active_animations
             .entry(window_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(active_animation);
 
         self.animation_count += 1;
@@ -463,9 +463,9 @@ impl AnimationController {
 
                     if !already_active {
                         // Start this event
-                        let _window_id = event.target_window.unwrap_or(0); // 0 = global
-                                                                           // For now, just track that the event started
-                                                                           // In a full implementation, we'd manage these animations properly
+                        let window_id = event.target_window.unwrap_or(0); // 0 = global
+                                                                          // For now, just track that the event started
+                                                                          // In a full implementation, we'd manage these animations properly
 
                         // This is a bit of a hack - we'd need to track this better
                         // For now, just create a dummy ActiveAnimation

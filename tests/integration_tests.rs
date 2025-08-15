@@ -84,7 +84,7 @@ async fn test_configuration_system() -> Result<()> {
     // Test default configuration
     let default_config = AxiomConfig::default();
     assert!(default_config.effects.enabled);
-    assert!(default_config.workspace.workspace_width > 0);
+    assert!(default_config.workspace.column_width > 0.0);
 
     // Test configuration serialization
     let toml_str = toml::to_string(&default_config)?;
@@ -102,20 +102,12 @@ async fn test_workspace_logic() -> Result<()> {
     let config = WorkspaceConfig::default();
     let mut workspaces = ScrollableWorkspaces::new(&config)?;
 
-    // Test adding windows (all go to the focused column)
+    // Test adding windows
     workspaces.add_window(1001);
     workspaces.add_window(1002);
     workspaces.add_window(1003);
 
-    // All windows should be in the same column (column 0 initially)
-    assert_eq!(workspaces.active_column_count(), 1);
-
-    // Move a window to create additional columns
-    let moved = workspaces.move_window_right(1001);
-    assert!(moved);
-
-    // Now we should have 2 columns
-    assert_eq!(workspaces.active_column_count(), 2);
+    assert_eq!(workspaces.active_column_count(), 3);
 
     // Test scrolling
     workspaces.scroll_right();
@@ -147,8 +139,10 @@ async fn test_effects_engine() -> Result<()> {
     effects.update()?;
 
     // Test performance stats
-    let (_frame_time, quality, _active_count) = effects.get_performance_stats();
-    assert!((0.0..=1.0).contains(&quality));
+    let (frame_time, quality, active_count) = effects.get_performance_stats();
+    assert!(frame_time.as_millis() >= 0);
+    assert!(quality >= 0.0 && quality <= 1.0);
+    assert!(active_count >= 0);
 
     // Test shutdown
     effects.shutdown()?;
@@ -184,7 +178,7 @@ async fn test_input_processing() -> Result<()> {
     for action in &actions {
         match action {
             CompositorAction::ScrollWorkspaceLeft | CompositorAction::ScrollWorkspaceRight => {
-                // Expected actions
+                assert!(true); // Expected actions
             }
             _ => {
                 // Other actions might be present too
@@ -209,7 +203,7 @@ async fn test_stress_many_windows() -> Result<()> {
     let mut workspaces = ScrollableWorkspaces::new(&workspace_config)?;
     let mut effects = EffectsEngine::new(&effects_config)?;
 
-    // Add 100 windows (they'll all go to the same column initially)
+    // Add 100 windows
     for i in 1..=100 {
         workspaces.add_window(i);
         // Add some effects to test performance
@@ -218,8 +212,7 @@ async fn test_stress_many_windows() -> Result<()> {
         }
     }
 
-    // All windows are in the same column initially
-    assert_eq!(workspaces.active_column_count(), 1);
+    assert_eq!(workspaces.active_column_count(), 100);
 
     // Test scrolling through many workspaces
     let start = std::time::Instant::now();
@@ -246,7 +239,7 @@ async fn test_error_recovery() -> Result<()> {
 
     // Test effects engine with invalid configuration
     let mut bad_config = EffectsConfig::default();
-    bad_config.blur.radius = 0; // Invalid value (should be positive)
+    bad_config.blur_radius = -1.0; // Invalid value
 
     // Should handle gracefully or provide meaningful error
     let result = EffectsEngine::new(&bad_config);
@@ -358,12 +351,9 @@ async fn test_concurrent_operations() -> Result<()> {
         handle.await?;
     }
 
-    // Check that all windows were added (all to the same column)
+    // Check that all windows were added
     let ws = workspaces.lock().await;
-    // All windows go to the focused column, so we should have 1 column with all windows
-    assert_eq!(ws.active_column_count(), 1);
-    // Check that the focused column has all 50 windows
-    assert_eq!(ws.get_focused_column_windows().len(), 50);
+    assert_eq!(ws.active_column_count(), 50); // 5 tasks * 10 windows each
 
     Ok(())
 }

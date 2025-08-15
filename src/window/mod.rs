@@ -2,7 +2,7 @@
 //! Handles window placement, focusing, and layout algorithms
 
 use crate::config::WindowConfig;
-use crate::smithay_backend::BackendWindow;
+use crate::smithay_backend_simple::BackendWindow;
 use anyhow::Result;
 use std::collections::HashMap;
 
@@ -70,6 +70,18 @@ impl Default for WindowProperties {
     }
 }
 
+impl AxiomWindow {
+    /// Create a new AxiomWindow
+    pub fn new(id: u64, title: String) -> Self {
+        Self {
+            window: BackendWindow::new(id, title),
+            workspace_position: 0.0,
+            properties: WindowProperties::default(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct WindowManager {
     #[allow(dead_code)]
     config: WindowConfig,

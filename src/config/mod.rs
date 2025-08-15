@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 
 /// Main configuration struct containing all Axiom settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AxiomConfig {
     /// Workspace configuration (scrollable behavior)
     #[serde(default)]
@@ -207,8 +207,14 @@ pub struct BindingsConfig {
     /// Close window
     pub close_window: String,
 
-    /// Toggle fullscreen
-    pub toggle_fullscreen: String,
+    /// Launch terminal
+    pub launch_terminal: String,
+
+    /// Launch application launcher
+    pub launch_launcher: String,
+
+    /// Toggle effects
+    pub toggle_effects: String,
 
     /// Quit compositor
     pub quit: String,
@@ -221,62 +227,21 @@ pub struct XWaylandConfig {
     /// Enable XWayland support
     pub enabled: bool,
 
-    /// Enable lazy loading
-    pub lazy_loading: bool,
-
-    /// Scale factor for XWayland windows
-    pub scale_factor: f64,
-
-    /// Path to XWayland executable
-    pub xwayland_path: String,
-
-    /// Auto-restart XWayland if it crashes
-    pub auto_restart: bool,
-
-    /// Additional command line arguments
-    pub extra_args: Vec<String>,
-
-    /// Maximum number of X11 windows
-    pub max_windows: u32,
+    /// XWayland display number
+    pub display: Option<u32>,
 }
 
 /// General compositor settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
-    /// Compositor name
-    pub compositor_name: String,
+    /// Enable debug logging
+    pub debug: bool,
 
-    /// Socket name
-    pub socket_name: String,
+    /// Max FPS limit (0 = unlimited)
+    pub max_fps: u32,
 
-    /// Log level
-    pub log_level: String,
-
-    /// Enable debug output
-    pub enable_debug_output: bool,
-
-    /// Maximum number of clients
-    pub max_clients: u32,
-
-    /// Configuration file path
-    pub config_path: String,
-
-    /// Startup applications
-    pub startup_apps: Vec<String>,
-}
-
-impl Default for AxiomConfig {
-    fn default() -> Self {
-        Self {
-            workspace: WorkspaceConfig::default(),
-            effects: EffectsConfig::default(),
-            window: WindowConfig::default(),
-            input: InputConfig::default(),
-            bindings: BindingsConfig::default(),
-            xwayland: XWaylandConfig::default(),
-            general: GeneralConfig::default(),
-        }
-    }
+    /// Enable VSync
+    pub vsync: bool,
 }
 
 impl Default for WorkspaceConfig {

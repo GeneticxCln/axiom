@@ -1,65 +1,152 @@
-//! # Axiom Wayland Compositor Library
+//! Axiom Wayland Compositor Library
 //!
-//! The first Wayland compositor combining niri's scrollable workspace innovation
-//! with Hyprland's visual effects system.
+//! A hybrid Wayland compositor combining scrollable workspaces with beautiful visual effects.
+//! This library exposes the core functionality for building Wayland compositors with:
+//!
+//! - **Scrollable Workspaces**: Smooth infinite scrolling between workspace columns
+//! - **Visual Effects**: Blur, shadows, animations, and custom shaders
+//! - **Window Management**: Intelligent tiling and floating window support
+//! - **Input Handling**: Comprehensive keyboard and mouse input processing
+//! - **IPC Communication**: Integration with Lazy UI and external tools
+//! - **Smithay Integration**: Full Wayland compositor protocol support
 //!
 //! ## Architecture
 //!
-//! Axiom is built on a modular architecture:
-//! - `compositor`: Core compositor logic and event loop
-//! - `workspace`: Scrollable workspace management (niri-inspired)
-//! - `effects`: Visual effects engine (Hyprland-inspired)
-//! - `window`: Window management and layout algorithms
-//! - `input`: Keyboard, mouse, and gesture input handling
-//! - `config`: Configuration parsing and management
-//! - `xwayland`: X11 compatibility layer
-//! - `ipc`: IPC communication with Lazy UI
-//! - `smithay_backend`: Smithay Wayland compositor integration
+//! The compositor is built with a modular architecture:
+//!
+//! ```text
+//! ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+//! │   Lazy UI       │◄──►│  Axiom Compositor│◄──►│  Wayland Apps   │
+//! │   (External)    │    │   (Main Process) │    │  (Clients)      │
+//! └─────────────────┘    └──────────────────┘    └─────────────────┘
+//!                                 │
+//!                                 ▼
+//!                        ┌──────────────────┐
+//!                        │ Smithay Backend  │
+//!                        │ (Wayland Server) │
+//!                        └──────────────────┘
+//! ```
+//!
+//! ## Features
+//!
+//! - **Phase-based Development**: Gradual implementation from basic functionality to full compositor
+//! - **Multiple Backends**: Support for both development (windowed) and production (DRM) modes
+//! - **Effects Pipeline**: GPU-accelerated visual effects with automatic performance scaling
+//! - **Protocol Extensions**: Enhanced Wayland protocols for advanced window management
 //!
 //! ## Usage
 //!
-//! ```rust,no_run
-//! use axiom::{AxiomCompositor, AxiomConfig};
+//! ```rust
+//! use axiom::{AxiomCompositor, config::AxiomConfig};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     let config = AxiomConfig::default();
-//!     let mut compositor = AxiomCompositor::new(config, false).await?;
+//!     let config = AxiomConfig::load_from_file("config/axiom.toml")?;
+//!     let compositor = AxiomCompositor::new(config, false).await?;
 //!     compositor.run().await
 //! }
 //! ```
 
+#![warn(missing_docs, rust_2018_idioms)]
+#![allow(dead_code)] // Remove this once development is complete
+
+// Re-export main compositor
+pub use crate::compositor::AxiomCompositor;
+
+// Re-export configuration
+pub use crate::config::AxiomConfig;
+
+// Re-export core modules
+pub use crate::decoration::{DecorationManager, DecorationMode};
+pub use crate::effects::EffectsEngine;
+pub use crate::input::InputManager;
+pub use crate::window::{Rectangle, WindowManager};
+pub use crate::workspace::ScrollableWorkspaces;
+
+// Module declarations
 pub mod compositor;
 pub mod config;
+pub mod decoration;
 pub mod effects;
 pub mod input;
 pub mod ipc;
-pub mod smithay_backend;
-pub mod smithay_enhanced; // Enhanced Smithay with Wayland socket support
-                          // TODO: Real Wayland protocol implementation will be integrated when Smithay API is stable
-pub mod renderer;
 pub mod window;
 pub mod workspace;
 pub mod xwayland;
 
-// Demo modules for development and testing
-#[cfg(any(test, feature = "demo"))]
-pub mod demo_phase4_effects;
-#[cfg(any(test, feature = "demo"))]
-pub mod demo_workspace;
+// Real backend modules
+pub mod axiom_real_compositor;
+pub mod backend_real;
 
-// Re-export main types for easy access
-pub use compositor::AxiomCompositor;
-pub use config::AxiomConfig;
-pub use effects::EffectsEngine;
-pub use input::InputManager;
-pub use ipc::AxiomIPCServer;
-pub use window::WindowManager;
-pub use workspace::ScrollableWorkspaces;
+// Backend modules
+pub mod smithay_backend_phase6;
+pub mod smithay_backend_simple;
 
-// Re-export common error types
-pub use anyhow::{Context, Error, Result};
-
-/// Version information for Axiom
+/// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
+
+/// Build information
+pub const BUILD_INFO: BuildInfo = BuildInfo {
+    version: VERSION,
+    git_commit: option_env!("GIT_COMMIT"),
+    build_date: env!("BUILD_DATE"),
+    target_triple: env!("TARGET_TRIPLE"),
+};
+
+/// Build information structure
+pub struct BuildInfo {
+    /// Crate version
+    pub version: &'static str,
+    /// Git commit hash (if available)
+    pub git_commit: Option<&'static str>,
+    /// Build date
+    pub build_date: &'static str,
+    /// Target triple
+    pub target_triple: &'static str,
+}
+
+impl BuildInfo {
+    /// Get formatted version string
+    pub fn version_string(&self) -> String {
+        match self.git_commit {
+            Some(commit) => format!("{} ({})", self.version, &commit[..8]),
+            None => self.version.to_string(),
+        }
+    }
+
+    /// Get full build information
+    pub fn full_info(&self) -> String {
+        format!(
+            "Axiom Compositor {} built on {} for {}",
+            self.version_string(),
+            self.build_date,
+            self.target_triple
+        )
+    }
+}
+
+/// Result type alias for convenience
+pub type Result<T> = anyhow::Result<T>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_version_info() {
+        assert!(!VERSION.is_empty());
+        assert!(!BUILD_INFO.version.is_empty());
+        assert!(!BUILD_INFO.build_date.is_empty());
+        assert!(!BUILD_INFO.target_triple.is_empty());
+    }
+
+    #[test]
+    fn test_build_info_formatting() {
+        let version_str = BUILD_INFO.version_string();
+        assert!(version_str.contains(VERSION));
+
+        let full_info = BUILD_INFO.full_info();
+        assert!(full_info.contains("Axiom Compositor"));
+        assert!(full_info.contains(VERSION));
+    }
+}
