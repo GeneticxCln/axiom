@@ -20,9 +20,7 @@ mod shaders;
 mod shadow;
 
 // Re-export animation types for use in effects engine
-pub use animations::{
-    AnimationController, AnimationProperty, AnimationStats, AnimationUpdate, AnimationValue,
-};
+pub use animations::AnimationStats;
 
 /// Different types of animations
 #[derive(Debug, Clone, PartialEq)]

@@ -6,10 +6,7 @@
 use anyhow::Result;
 use log::{debug, info};
 use std::collections::HashMap;
-use smithay::reexports::wayland_server::{
-    protocol::{wl_compositor, wl_output, wl_seat, wl_shm, wl_surface::WlSurface},
-    Display,
-};
+use smithay::reexports::wayland_server::Display;
 
 /// State type for the Wayland display
 pub struct WaylandState;

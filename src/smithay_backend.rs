@@ -3,17 +3,13 @@
 //! This module implements a proper Wayland compositor using Smithay 0.3.0
 //! with Winit backend, OpenGL rendering, and real protocol support.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use log::{debug, info, warn};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use smithay::{
-    utils::{Rectangle, Size},
-};
 
 /// Phase 3: Placeholder for Smithay integration with proper Wayland protocols
 /// This module currently stubs the backend loop while real integration is migrated to newer APIs.

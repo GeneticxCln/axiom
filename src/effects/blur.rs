@@ -11,9 +11,9 @@ use cgmath::Vector2;
 use log::{debug, info};
 use std::sync::Arc;
 use wgpu::{
-    BindGroup, BindGroupDescriptor, BindGroupEntry, BlendState, Buffer, BufferDescriptor,
+    BindGroupDescriptor, BindGroupEntry, BlendState, Buffer, BufferDescriptor,
     BufferUsages, ColorTargetState, ColorWrites, CommandEncoder, Device, FragmentState,
-    MultisampleState, PrimitiveState, Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor,
+    MultisampleState, PrimitiveState, Queue, RenderPipeline, RenderPipelineDescriptor,
     Texture, TextureFormat, TextureUsages, TextureView, VertexState,
 };
 
