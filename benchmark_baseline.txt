@@ -1,0 +1,1517 @@
+   Compiling libc v0.2.175
+   Compiling proc-macro2 v1.0.97
+   Compiling unicode-ident v1.0.18
+   Compiling pkg-config v0.3.32
+   Compiling cfg-if v1.0.1
+   Compiling autocfg v1.5.0
+   Compiling xml-rs v0.8.27
+   Compiling once_cell v1.21.3
+   Compiling rustix v1.0.8
+   Compiling smallvec v1.15.1
+   Compiling crossbeam-utils v0.8.21
+   Compiling log v0.4.27
+   Compiling libloading v0.8.8
+   Compiling bitflags v2.9.1
+   Compiling dlib v0.5.2
+   Compiling shlex v1.3.0
+   Compiling thiserror v1.0.69
+   Compiling zerocopy v0.8.26
+   Compiling cfg_aliases v0.1.1
+   Compiling memchr v2.7.5
+   Compiling getrandom v0.3.3
+   Compiling downcast-rs v1.2.1
+   Compiling scoped-tls v1.0.1
+   Compiling wayland-client v0.31.11
+   Compiling cc v1.2.32
+   Compiling khronos_api v3.1.0
+   Compiling bitflags v1.3.2
+   Compiling memoffset v0.6.5
+   Compiling lock_api v0.4.13
+   Compiling version_check v0.9.5
+   Compiling num-traits v0.2.19
+   Compiling lazy_static v1.5.0
+   Compiling linux-raw-sys v0.9.4
+   Compiling rustix v0.38.44
+   Compiling wayland-sys v0.31.7
+   Compiling x11-dl v2.21.0
+   Compiling wayland-sys v0.28.6
+   Compiling serde v1.0.219
+   Compiling wayland-sys v0.29.5
+   Compiling gl_generator v0.14.0
+   Compiling quote v1.0.40
+   Compiling ahash v0.8.12
+   Compiling quick-xml v0.37.5
+   Compiling parking_lot_core v0.9.11
+   Compiling syn v2.0.105
+   Compiling wayland-scanner v0.29.5
+   Compiling wayland-scanner v0.28.6
+   Compiling parking_lot_core v0.8.6
+   Compiling scopeguard v1.2.0
+   Compiling nix v0.18.0
+   Compiling smithay-client-toolkit v0.18.1
+   Compiling drm-sys v0.1.2
+   Compiling ab_glyph_rasterizer v0.1.10
+   Compiling xcursor v0.3.10
+   Compiling glutin_egl_sys v0.6.0
+   Compiling glutin_glx_sys v0.5.0
+   Compiling libudev-sys v0.1.4
+   Compiling wayland-scanner v0.31.7
+   Compiling ash v0.37.3+1.3.251
+   Compiling linux-raw-sys v0.4.15
+   Compiling wayland-backend v0.3.11
+   Compiling khronos-egl v6.0.0
+   Compiling wayland-client v0.28.6
+   Compiling wayland-protocols v0.28.6
+   Compiling drm-fourcc v2.2.0
+   Compiling slog v2.7.0
+   Compiling pin-project-lite v0.2.16
+   Compiling arrayvec v0.7.6
+   Compiling nix v0.20.0
+   Compiling wayland-server v0.29.5
+   Compiling wayland-client v0.29.5
+   Compiling crossbeam-epoch v0.9.18
+   Compiling libdbus-sys v0.2.5
+   Compiling winit v0.29.15
+   Compiling glutin v0.31.3
+   Compiling wgpu-hal v0.19.5
+   Compiling xkeysym v0.2.1
+   Compiling slab v0.4.11
+   Compiling object v0.36.7
+   Compiling gbm-sys v0.2.2
+   Compiling hashbrown v0.15.5
+   Compiling semver v1.0.26
+   Compiling equivalent v1.0.2
+   Compiling input-sys v1.18.0
+   Compiling crossbeam-deque v0.8.6
+   Compiling nix v0.24.3
+   Compiling instant v0.1.13
+   Compiling termcolor v1.4.1
+   Compiling ttf-parser v0.15.2
+   Compiling indexmap v2.10.0
+   Compiling raw-window-handle v0.6.2
+   Compiling ttf-parser v0.25.1
+   Compiling cursor-icon v1.2.0
+   Compiling arrayref v0.3.9
+   Compiling strict-num v0.1.1
+   Compiling wayland-commons v0.29.5
+   Compiling memmap2 v0.9.7
+   Compiling nix v0.22.3
+   Compiling wayland-commons v0.28.6
+   Compiling thiserror-impl v1.0.69
+   Compiling serde_derive v1.0.219
+   Compiling bytemuck_derive v1.10.1
+   Compiling wayland-server v0.31.10
+   Compiling polling v3.10.0
+   Compiling wayland-csd-frame v0.3.0
+   Compiling bytemuck v1.23.2
+   Compiling tiny-skia-path v0.11.4
+   Compiling owned_ttf_parser v0.25.1
+   Compiling calloop v0.12.4
+   Compiling owned_ttf_parser v0.15.2
+   Compiling wayland-protocols v0.29.5
+   Compiling concurrent-queue v2.5.0
+   Compiling wayland-protocols v0.31.2
+   Compiling wayland-cursor v0.31.11
+   Compiling calloop-wayland-source v0.2.0
+   Compiling memoffset v0.9.1
+   Compiling glutin-winit v0.4.2
+   Compiling wgpu-core v0.19.4
+   Compiling libloading v0.7.4
+   Compiling serde_json v1.0.142
+   Compiling cfg-if v0.1.10
+   Compiling parking v2.2.1
+   Compiling allocator-api2 v0.2.21
+   Compiling bit-vec v0.6.3
+   Compiling same-file v1.0.6
+   Compiling winit v0.25.0
+   Compiling percent-encoding v2.3.1
+   Compiling unicode-width v0.1.14
+   Compiling cgmath v0.18.0
+   Compiling fastrand v2.3.0
+   Compiling codespan-reporting v0.11.1
+   Compiling hashbrown v0.14.5
+   Compiling walkdir v2.5.0
+   Compiling bit-set v0.5.3
+   Compiling event-listener v5.4.1
+   Compiling rusttype v0.9.3
+   Compiling tiny-skia v0.11.4
+   Compiling ab_glyph v0.2.31
+   Compiling tracing-attributes v0.1.30
+   Compiling parking_lot v0.12.4
+   Compiling rustc_version v0.4.1
+   Compiling parking_lot v0.11.2
+   Compiling aho-corasick v1.1.3
+   Compiling crossbeam-channel v0.5.15
+   Compiling crossbeam-queue v0.3.12
+   Compiling spirv v0.3.0+sdk-1.3.268.0
+   Compiling gpu-alloc-types v0.3.0
+   Compiling gpu-descriptor-types v0.1.2
+   Compiling libloading v0.6.7
+   Compiling xdg v2.5.2
+   Compiling futures-core v0.3.31
+   Compiling cty v0.2.2
+   Compiling rustc-hash v1.1.0
+   Compiling hexf-parse v0.2.1
+   Compiling utf8parse v0.2.2
+   Compiling heck v0.5.0
+   Compiling raw-window-handle v0.5.2
+   Compiling regex-syntax v0.8.5
+   Compiling x11rb-protocol v0.13.1
+   Compiling unicode-xid v0.2.6
+   Compiling as-raw-xcb-connection v1.0.1
+   Compiling naga v0.19.2
+   Compiling andrew v0.3.1
+   Compiling calloop v0.6.5
+   Compiling anstyle-parse v0.2.7
+   Compiling clap_derive v4.5.45
+   Compiling raw-window-handle v0.4.3
+   Compiling dlib v0.4.2
+   Compiling gpu-descriptor v0.2.4
+   Compiling gpu-alloc v0.6.0
+   Compiling crossbeam v0.8.4
+   Compiling regex-automata v0.4.9
+   Compiling drm-ffi v0.2.1
+   Compiling interprocess v1.2.1
+   Compiling event-listener-strategy v0.5.4
+   Compiling wayland-cursor v0.28.6
+   Compiling xkbcommon-dl v0.4.2
+   Compiling mio v0.7.14
+   Compiling wayland-protocols-wlr v0.2.0
+   Compiling wayland-protocols-plasma v0.2.0
+   Compiling getrandom v0.2.16
+   Compiling memmap2 v0.1.0
+   Compiling glium v0.34.0
+   Compiling smithay v0.3.0
+   Compiling wgpu v0.19.4
+   Compiling wgpu-types v0.19.2
+   Compiling tracing-core v0.1.34
+   Compiling sctk-adwaita v0.8.3
+   Compiling either v1.15.0
+   Compiling colorchoice v1.0.4
+   Compiling anstyle v1.0.11
+   Compiling smol_str v0.2.2
+   Compiling is_terminal_polyfill v1.70.1
+   Compiling adler2 v2.0.1
+   Compiling renderdoc-sys v1.1.0
+   Compiling anstyle-query v1.1.4
+   Compiling regex-syntax v0.6.29
+   Compiling gimli v0.31.1
+   Compiling arc-swap v1.7.1
+   Compiling atomic-waker v1.1.2
+   Compiling futures-io v0.3.31
+   Compiling anyhow v1.0.99
+   Compiling rayon-core v1.13.0
+   Compiling glow v0.13.1
+   Compiling profiling v1.0.17
+   Compiling anstream v0.6.20
+   Compiling piper v0.2.4
+   Compiling slog-scope v4.4.0
+   Compiling regex-automata v0.1.10
+   Compiling miniz_oxide v0.8.9
+   Compiling smithay-client-toolkit v0.12.3
+   Compiling addr2line v0.24.2
+   Compiling regex v1.11.1
+   Compiling mio-misc v1.2.2
+   Compiling rand_core v0.6.4
+   Compiling drm v0.5.0
+   Compiling udev v0.6.3
+   Compiling async-channel v2.5.0
+   Compiling raw-window-handle v0.3.4
+   Compiling futures-lite v2.6.1
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling tokio-macros v2.5.0
+   Compiling approx v0.4.0
+   Compiling x11rb v0.13.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling half v2.6.0
+   Compiling plotters-backend v0.3.7
+   Compiling winnow v0.7.12
+   Compiling overload v0.1.1
+   Compiling strsim v0.11.1
+   Compiling async-task v4.7.1
+   Compiling itoa v1.0.15
+   Compiling clap_lex v0.7.5
+   Compiling ciborium-io v0.2.2
+   Compiling ryu v1.0.20
+   Compiling rustc-demangle v0.1.26
+   Compiling toml_write v0.1.2
+   Compiling toml_edit v0.22.27
+   Compiling clap_builder v4.5.44
+   Compiling backtrace v0.3.75
+   Compiling ciborium-ll v0.2.2
+   Compiling blocking v1.6.2
+   Compiling nu-ansi-term v0.46.0
+   Compiling plotters-svg v0.3.7
+   Compiling wayland-egl v0.29.5
+   Compiling rand_chacha v0.3.1
+   Compiling gbm v0.7.0
+   Compiling dbus v0.9.7
+   Compiling input v0.6.0
+   Compiling matchers v0.1.0
+   Compiling slog-stdlog v4.1.1
+   Compiling itertools v0.10.5
+   Compiling tracing-log v0.2.0
+   Compiling tracing v0.1.41
+   Compiling tempfile v3.20.0
+   Compiling calloop v0.9.3
+   Compiling xkbcommon v0.4.1
+   Compiling mio v1.0.4
+   Compiling memmap2 v0.8.0
+   Compiling is-terminal v0.4.16
+   Compiling socket2 v0.6.0
+   Compiling signal-hook-registry v1.4.6
+   Compiling spinning v0.1.0
+   Compiling sharded-slab v0.1.7
+   Compiling thread_local v1.1.9
+   Compiling takeable-option v0.5.0
+   Compiling scan_fmt v0.2.6
+   Compiling static_assertions v1.1.0
+   Compiling cast v0.3.0
+   Compiling appendlist v1.4.0
+   Compiling humantime v2.2.0
+   Compiling intmap v0.7.1
+   Compiling fnv v1.0.7
+   Compiling bytes v1.10.1
+   Compiling to_method v1.1.0
+   Compiling env_logger v0.10.2
+   Compiling tokio v1.47.1
+   Compiling criterion-plot v0.5.0
+   Compiling tracing-subscriber v0.3.19
+   Compiling xkbcommon v0.7.0
+   Compiling rayon v1.11.0
+   Compiling rand v0.8.5
+   Compiling clap v4.5.45
+   Compiling plotters v0.3.7
+   Compiling toml v0.8.23
+   Compiling tinytemplate v1.2.1
+   Compiling ciborium v0.2.2
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling criterion v0.5.1
+   Compiling axiom v0.1.0 (/home/sasha/axiom)
+warning: unused imports: `BindGroup`, `Buffer`, `CommandEncoder`, and `RenderPipeline`
+  --> src/effects/mod.rs:13:27
+   |
+13 | use wgpu::{Device, Queue, Buffer, RenderPipeline, BindGroup, CommandEncoder};
+   |                           ^^^^^^  ^^^^^^^^^^^^^^  ^^^^^^^^^  ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `Matrix4`, `Vector3`, and `Vector4`
+  --> src/effects/mod.rs:14:14
+   |
+14 | use cgmath::{Matrix4, Vector3, Vector4};
+   |              ^^^^^^^  ^^^^^^^  ^^^^^^^
+
+warning: unused import: `Device`
+ --> src/effects/shaders.rs:9:12
+  |
+9 | use wgpu::{Device, ShaderModule, ShaderModuleDescriptor, ShaderSource};
+  |            ^^^^^^
+
+warning: unused imports: `BindGroup` and `RenderPass`
+  --> src/effects/blur.rs:10:66
+   |
+10 |     Device, Queue, Buffer, Texture, TextureView, RenderPipeline, BindGroup, 
+   |                                                                  ^^^^^^^^^
+11 |     CommandEncoder, RenderPass, TextureFormat, TextureUsages,
+   |                     ^^^^^^^^^^
+
+warning: unused import: `BindGroup`
+  --> src/effects/shadow.rs:10:66
+   |
+10 |     Device, Queue, Buffer, Texture, TextureView, RenderPipeline, BindGroup,
+   |                                                                  ^^^^^^^^^
+
+warning: unused import: `Matrix4`
+  --> src/effects/animations.rs:11:41
+   |
+11 | use cgmath::{Vector2, Vector3, Vector4, Matrix4};
+   |                                         ^^^^^^^
+
+warning: unused import: `warn`
+ --> src/input/mod.rs:5:24
+  |
+5 | use log::{info, debug, warn};
+  |                        ^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> src/demo_phase4_effects.rs:12:5
+   |
+12 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `window_id`
+   --> src/compositor.rs:184:30
+    |
+184 |                 if let Some((window_id, _, _, _)) = self.get_workspace_info().into() {
+    |                              ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_window_id`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `window_id`
+   --> src/compositor.rs:194:30
+    |
+194 |                 if let Some((window_id, _, _, _)) = self.get_workspace_info().into() {
+    |                              ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_window_id`
+
+warning: unused variable: `window1`
+  --> src/demo_workspace.rs:22:9
+   |
+22 |     let window1 = compositor.add_window("Terminal".to_string());
+   |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_window1`
+
+warning: unused variable: `window3`
+  --> src/demo_workspace.rs:24:9
+   |
+24 |     let window3 = compositor.add_window("Editor".to_string());
+   |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_window3`
+
+warning: unused variable: `scrolling`
+  --> src/demo_workspace.rs:43:35
+   |
+43 |     let (column, position, count, scrolling) = compositor.get_workspace_info();
+   |                                   ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scrolling`
+
+warning: unused variable: `i`
+  --> src/demo_workspace.rs:64:9
+   |
+64 |     for i in 0..3 {
+   |         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `scrolling`
+  --> src/demo_workspace.rs:68:39
+   |
+68 |         let (column, position, count, scrolling) = compositor.get_workspace_info();
+   |                                       ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scrolling`
+
+warning: unused variable: `scrolling`
+  --> src/demo_workspace.rs:80:35
+   |
+80 |     let (column, position, count, scrolling) = compositor.get_workspace_info();
+   |                                   ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scrolling`
+
+warning: unused variable: `count`
+   --> src/demo_workspace.rs:116:32
+    |
+116 |         let (column, position, count, _) = compositor.get_workspace_info();
+    |                                ^^^^^ help: if this is intentional, prefix it with an underscore: `_count`
+
+warning: unused variable: `i`
+   --> src/demo_phase4_effects.rs:133:14
+    |
+133 |         for (i, &window_id) in window_ids.iter().enumerate() {
+    |              ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `from`
+   --> src/demo_phase4_effects.rs:297:13
+    |
+297 |         let from = (i as f32 * 150.0, 50.0);
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_from`
+
+warning: unused variable: `to`
+   --> src/demo_phase4_effects.rs:298:13
+    |
+298 |         let to = (i as f32 * 150.0, 300.0);
+    |             ^^ help: if this is intentional, prefix it with an underscore: `_to`
+
+warning: unused variable: `delta_time`
+   --> src/workspace/mod.rs:334:13
+    |
+334 |         let delta_time = now.duration_since(self.last_update).as_secs_f64();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_delta_time`
+
+warning: unused variable: `sample_count`
+   --> src/effects/shadow.rs:211:27
+    |
+211 |         let (blur_radius, sample_count) = match self.current_quality {
+    |                           ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sample_count`
+
+warning: unused variable: `window_position`
+   --> src/effects/shadow.rs:200:9
+    |
+200 |         window_position: Vector2<f32>,
+    |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_window_position`
+
+warning: unused variable: `window_id`
+   --> src/effects/animations.rs:439:29
+    |
+439 |                         let window_id = event.target_window.unwrap_or(0); // 0 = global
+    |                             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_window_id`
+
+warning: unused variable: `surface_data`
+   --> src/effects/mod.rs:371:53
+    |
+371 |     pub fn apply_blur_effect(&self, window_id: u64, surface_data: &mut [u8]) {
+    |                                                     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_surface_data`
+
+warning: field `windowed` is never read
+  --> src/compositor.rs:25:5
+   |
+23 | pub struct AxiomCompositor {
+   |            --------------- field in this struct
+24 |     config: AxiomConfig,
+25 |     windowed: bool,
+   |     ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: methods `config` and `is_windowed` are never used
+   --> src/compositor.rs:351:12
+    |
+42  | impl AxiomCompositor {
+    | -------------------- methods in this implementation
+...
+351 |     pub fn config(&self) -> &AxiomConfig {
+    |            ^^^^^^
+...
+356 |     pub fn is_windowed(&self) -> bool {
+    |            ^^^^^^^^^^^
+
+warning: multiple fields are never read
+  --> src/smithay_backend.rs:21:5
+   |
+19 | pub struct AxiomSmithayBackend {
+   |            ------------------- fields in this struct
+20 |     /// Configuration
+21 |     config: crate::config::AxiomConfig,
+   |     ^^^^^^
+...
+27 |     windows: HashMap<u64, BackendWindow>,
+   |     ^^^^^^^
+...
+30 |     next_window_id: u64,
+   |     ^^^^^^^^^^^^^^
+...
+36 |     last_frame: Instant,
+   |     ^^^^^^^^^^
+...
+39 |     event_loop_ready: bool,
+   |     ^^^^^^^^^^^^^^^^
+40 |     backend_ready: bool,
+   |     ^^^^^^^^^^^^^
+41 |     renderer_ready: bool,
+   |     ^^^^^^^^^^^^^^
+42 |     space_initialized: bool,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: struct `AxiomState` is never constructed
+  --> src/smithay_backend.rs:47:12
+   |
+47 | pub struct AxiomState {
+   |            ^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> src/smithay_backend.rs:71:12
+    |
+51  | impl AxiomSmithayBackend {
+    | ------------------------ methods in this implementation
+...
+71  |     pub fn create_window(&mut self, title: String) -> u64 {
+    |            ^^^^^^^^^^^^^
+...
+83  |     pub fn get_window(&self, id: u64) -> Option<&BackendWindow> {
+    |            ^^^^^^^^^^
+...
+88  |     pub fn get_window_mut(&mut self, id: u64) -> Option<&mut BackendWindow> {
+    |            ^^^^^^^^^^^^^^
+...
+93  |     pub fn remove_window(&mut self, id: u64) -> Option<BackendWindow> {
+    |            ^^^^^^^^^^^^^
+...
+103 |     pub fn windows(&self) -> &HashMap<u64, BackendWindow> {
+    |            ^^^^^^^
+...
+168 |     pub async fn render_frame(&mut self) -> Result<()> {
+    |                  ^^^^^^^^^^^^
+...
+186 |     pub fn is_initialized(&self) -> bool {
+    |            ^^^^^^^^^^^^^^
+
+warning: method `set_focused` is never used
+   --> src/smithay_backend.rs:235:12
+    |
+215 | impl BackendWindow {
+    | ------------------ method in this implementation
+...
+235 |     pub fn set_focused(&mut self, focused: bool) {
+    |            ^^^^^^^^^^^
+
+warning: fields `index` and `active` are never read
+  --> src/workspace/mod.rs:18:9
+   |
+16 | pub struct WorkspaceColumn {
+   |            --------------- fields in this struct
+17 |     /// Column index (can be negative for infinite scroll)
+18 |     pub index: i32,
+   |         ^^^^^
+...
+27 |     pub active: bool,
+   |         ^^^^^^
+   |
+   = note: `WorkspaceColumn` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variant `Momentum` is never constructed
+  --> src/workspace/mod.rs:76:5
+   |
+68 | pub enum ScrollState {
+   |          ----------- variant in this enum
+...
+76 |     Momentum {
+   |     ^^^^^^^^
+   |
+   = note: `ScrollState` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: methods `get_focused_column_mut` and `start_momentum_scroll` are never used
+   --> src/workspace/mod.rs:162:12
+    |
+113 | impl ScrollableWorkspaces {
+    | ------------------------- methods in this implementation
+...
+162 |     pub fn get_focused_column_mut(&mut self) -> &mut WorkspaceColumn {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+206 |     pub fn start_momentum_scroll(&mut self, velocity: f64) {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: variants `WindowResize` and `WorkspaceTransition` are never constructed
+  --> src/effects/mod.rs:48:5
+   |
+25 | pub enum AnimationType {
+   |          ------------- variants in this enum
+...
+48 |     WindowResize {
+   |     ^^^^^^^^^^^^
+...
+55 |     WorkspaceTransition {
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `AnimationType` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variants `BounceOut`, `ElasticOut`, and `BackOut` are never constructed
+  --> src/effects/mod.rs:70:5
+   |
+65 | pub enum EasingCurve {
+   |          ----------- variants in this enum
+...
+70 |     BounceOut,
+   |     ^^^^^^^^^
+71 |     ElasticOut,
+   |     ^^^^^^^^^^
+72 |     BackOut,
+   |     ^^^^^^^
+   |
+   = note: `EasingCurve` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `blur_radius` and `shadow` are never read
+  --> src/effects/mod.rs:85:9
+   |
+77 | pub struct WindowEffectState {
+   |            ----------------- fields in this struct
+...
+85 |     pub blur_radius: f32,
+   |         ^^^^^^^^^^^
+...
+89 |     pub shadow: ShadowParams,
+   |         ^^^^^^
+   |
+   = note: `WindowEffectState` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `blur_radius`, `offset`, and `color` are never read
+   --> src/effects/mod.rs:99:9
+    |
+96  | pub struct ShadowParams {
+    |            ------------ fields in this struct
+...
+99  |     pub blur_radius: f32,
+    |         ^^^^^^^^^^^
+100 |     pub opacity: f32,
+101 |     pub offset: (f32, f32),
+    |         ^^^^^^
+102 |     pub color: [f32; 4], // RGBA
+    |         ^^^^^
+    |
+    = note: `ShadowParams` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `background_blur` and `window_blur` are never read
+   --> src/effects/mod.rs:111:9
+    |
+107 | pub struct BlurParams {
+    |            ---------- fields in this struct
+...
+111 |     pub background_blur: bool,
+    |         ^^^^^^^^^^^^^^^
+112 |     pub window_blur: bool,
+    |         ^^^^^^^^^^^
+    |
+    = note: `BlurParams` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: multiple fields are never read
+   --> src/effects/mod.rs:117:5
+    |
+116 | pub struct EffectsEngine {
+    |            ------------- fields in this struct
+117 |     config: EffectsConfig,
+    |     ^^^^^^
+...
+123 |     blur_renderer: Option<blur::BlurRenderer>,
+    |     ^^^^^^^^^^^^^
+124 |     shadow_renderer: Option<shadow::ShadowRenderer>,
+    |     ^^^^^^^^^^^^^^^
+125 |     shader_manager: Option<Arc<shaders::ShaderManager>>,
+    |     ^^^^^^^^^^^^^^
+...
+128 |     animation_controller: animations::AnimationController,
+    |     ^^^^^^^^^^^^^^^^^^^^
+...
+138 |     blur_params: BlurParams,
+    |     ^^^^^^^^^^^
+139 |     default_shadow: ShadowParams,
+    |     ^^^^^^^^^^^^^^
+...
+150 |     gpu_device: Option<Arc<Device>>,
+    |     ^^^^^^^^^^
+151 |     gpu_queue: Option<Arc<Queue>>,
+    |     ^^^^^^^^^
+
+warning: methods `apply_blur_effect`, `remove_window`, `update_window_animations`, `apply_easing_curve`, `get_effects_quality`, and `set_animations_enabled` are never used
+   --> src/effects/mod.rs:371:12
+    |
+193 | impl EffectsEngine {
+    | ------------------ methods in this implementation
+...
+371 |     pub fn apply_blur_effect(&self, window_id: u64, surface_data: &mut [u8]) {
+    |            ^^^^^^^^^^^^^^^^^
+...
+388 |     pub fn remove_window(&mut self, window_id: u64) {
+    |            ^^^^^^^^^^^^^
+...
+498 |     fn update_window_animations(&mut self, window_id: &u64, effect_state: &mut WindowEffectState, now: Instant) -> Result<()> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+576 |     fn apply_easing_curve(&self, t: f32, curve: &EasingCurve) -> f32 {
+    |        ^^^^^^^^^^^^^^^^^^
+...
+645 |     pub fn get_effects_quality(&self) -> f32 {
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+650 |     pub fn set_animations_enabled(&mut self, enabled: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple variants are never constructed
+  --> src/effects/shaders.rs:17:5
+   |
+15 | pub enum ShaderType {
+   |          ---------- variants in this enum
+16 |     /// Basic vertex shader for window rendering
+17 |     WindowVertex,
+   |     ^^^^^^^^^^^^
+18 |     /// Fragment shader for basic window rendering
+19 |     WindowFragment,
+   |     ^^^^^^^^^^^^^^
+20 |     /// Gaussian blur (horizontal pass)
+21 |     BlurHorizontal,
+   |     ^^^^^^^^^^^^^^
+22 |     /// Gaussian blur (vertical pass)
+23 |     BlurVertical,
+   |     ^^^^^^^^^^^^
+24 |     /// Drop shadow rendering
+25 |     DropShadow,
+   |     ^^^^^^^^^^
+26 |     /// Rounded corners with anti-aliasing
+27 |     RoundedCorners,
+   |     ^^^^^^^^^^^^^^
+28 |     /// Animation transformations
+29 |     AnimationTransform,
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `ShaderType` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `device` and `compiled_shaders` are never read
+  --> src/effects/shaders.rs:34:5
+   |
+33 | pub struct ShaderManager {
+   |            ------------- fields in this struct
+34 |     device: wgpu::Device,
+   |     ^^^^^^
+35 |     compiled_shaders: std::collections::HashMap<ShaderType, ShaderModule>,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `compile_all_shaders`, `get_shader`, `compile_shader`, and `get_shader_source` are never used
+  --> src/effects/shaders.rs:39:12
+   |
+38 | impl ShaderManager {
+   | ------------------ associated items in this implementation
+39 |     pub fn new(device: wgpu::Device) -> Self {
+   |            ^^^
+...
+48 |     pub fn compile_all_shaders(&mut self) -> Result<()> {
+   |            ^^^^^^^^^^^^^^^^^^^
+...
+71 |     pub fn get_shader(&self, shader_type: &ShaderType) -> Option<&ShaderModule> {
+   |            ^^^^^^^^^^
+...
+76 |     fn compile_shader(&mut self, shader_type: ShaderType) -> Result<()> {
+   |        ^^^^^^^^^^^^^^
+...
+91 |     fn get_shader_source(&self, shader_type: &ShaderType) -> &'static str {
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: constant `WINDOW_VERTEX_SHADER` is never used
+   --> src/effects/shaders.rs:105:7
+    |
+105 | const WINDOW_VERTEX_SHADER: &str = r#"
+    |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `WINDOW_FRAGMENT_SHADER` is never used
+   --> src/effects/shaders.rs:148:7
+    |
+148 | const WINDOW_FRAGMENT_SHADER: &str = r#"
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BLUR_HORIZONTAL_SHADER` is never used
+   --> src/effects/shaders.rs:197:7
+    |
+197 | const BLUR_HORIZONTAL_SHADER: &str = r#"
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BLUR_VERTICAL_SHADER` is never used
+   --> src/effects/shaders.rs:248:7
+    |
+248 | const BLUR_VERTICAL_SHADER: &str = r#"
+    |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DROP_SHADOW_SHADER` is never used
+   --> src/effects/shaders.rs:299:7
+    |
+299 | const DROP_SHADOW_SHADER: &str = r#"
+    |       ^^^^^^^^^^^^^^^^^^
+
+warning: constant `ROUNDED_CORNERS_SHADER` is never used
+   --> src/effects/shaders.rs:338:7
+    |
+338 | const ROUNDED_CORNERS_SHADER: &str = r#"
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ANIMATION_TRANSFORM_SHADER` is never used
+   --> src/effects/shaders.rs:388:7
+    |
+388 | const ANIMATION_TRANSFORM_SHADER: &str = r#"
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variants `Gaussian`, `Background`, `Window`, and `Bokeh` are never constructed
+  --> src/effects/blur.rs:27:5
+   |
+25 | pub enum BlurType {
+   |          -------- variants in this enum
+26 |     /// Standard Gaussian blur
+27 |     Gaussian { radius: f32, intensity: f32 },
+   |     ^^^^^^^^
+28 |     /// Background blur (behind transparent windows)
+29 |     Background { radius: f32, intensity: f32 },
+   |     ^^^^^^^^^^
+30 |     /// Window content blur
+31 |     Window { radius: f32, intensity: f32 },
+   |     ^^^^^^
+32 |     /// Bokeh blur with circular highlights
+33 |     Bokeh { radius: f32, intensity: f32, highlight_threshold: f32 },
+   |     ^^^^^
+   |
+   = note: `BlurType` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `blur_type`, `enabled`, `adaptive_quality`, and `performance_scale` are never read
+  --> src/effects/blur.rs:39:9
+   |
+38 | pub struct BlurParams {
+   |            ---------- fields in this struct
+39 |     pub blur_type: BlurType,
+   |         ^^^^^^^^^
+40 |     pub enabled: bool,
+   |         ^^^^^^^
+41 |     pub adaptive_quality: bool,
+   |         ^^^^^^^^^^^^^^^^
+42 |     pub performance_scale: f32, // 0.5 to 1.0
+   |         ^^^^^^^^^^^^^^^^^
+   |
+   = note: `BlurParams` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: multiple fields are never read
+  --> src/effects/blur.rs:47:5
+   |
+46 | pub struct BlurRenderer {
+   |            ------------ fields in this struct
+47 |     device: Arc<Device>,
+   |     ^^^^^^
+48 |     queue: Arc<Queue>,
+   |     ^^^^^
+49 |     shader_manager: Arc<ShaderManager>,
+   |     ^^^^^^^^^^^^^^
+...
+52 |     horizontal_blur_pipeline: Option<RenderPipeline>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+53 |     vertical_blur_pipeline: Option<RenderPipeline>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+...
+56 |     blur_params_buffer: Buffer,
+   |     ^^^^^^^^^^^^^^^^^^
+...
+59 |     intermediate_texture: Option<Texture>,
+   |     ^^^^^^^^^^^^^^^^^^^^
+60 |     intermediate_texture_view: Option<TextureView>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+63 |     current_params: BlurParams,
+   |     ^^^^^^^^^^^^^^
+...
+66 |     last_blur_time: std::time::Duration,
+   |     ^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+   --> src/effects/blur.rs:79:12
+    |
+78  | impl BlurRenderer {
+    | ----------------- associated items in this implementation
+79  |     pub fn new(
+    |            ^^^
+...
+116 |     fn create_blur_pipelines(&mut self) -> Result<()> {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+...
+220 |     pub fn apply_blur(
+    |            ^^^^^^^^^^
+...
+273 |     fn apply_horizontal_blur(
+    |        ^^^^^^^^^^^^^^^^^^^^^
+...
+336 |     fn apply_vertical_blur(
+    |        ^^^^^^^^^^^^^^^^^^^
+...
+399 |     fn ensure_intermediate_texture(&mut self, size: Vector2<u32>) -> Result<()> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+435 |     fn create_blur_sampler(&self) -> wgpu::Sampler {
+    |        ^^^^^^^^^^^^^^^^^^^
+...
+453 |     pub fn update_blur_params(&mut self, new_params: BlurParams) {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+461 |     fn params_equal(&self, a: &BlurParams, b: &BlurParams) -> bool {
+    |        ^^^^^^^^^^^^
+...
+479 |     pub fn get_performance_stats(&self) -> (std::time::Duration, f32) {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+484 |     pub fn set_adaptive_quality(&mut self, enabled: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^
+...
+494 |     pub fn update_performance_scale(&mut self, scale: f32) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `ShadowType` is never used
+  --> src/effects/shadow.rs:26:10
+   |
+26 | pub enum ShadowType {
+   |          ^^^^^^^^^^
+
+warning: variants `Low`, `Medium`, `High`, and `Ultra` are never constructed
+  --> src/effects/shadow.rs:53:5
+   |
+52 | pub enum ShadowQuality {
+   |          ------------- variants in this enum
+53 |     Low,    // Simple shadow with minimal blur
+   |     ^^^
+54 |     Medium, // Standard shadow with moderate blur
+   |     ^^^^^^
+55 |     High,   // High-quality shadow with extensive blur
+   |     ^^^^
+56 |     Ultra,  // Maximum quality with advanced features
+   |     ^^^^^
+   |
+   = note: `ShadowQuality` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: multiple fields are never read
+  --> src/effects/shadow.rs:61:5
+   |
+60 | pub struct ShadowRenderer {
+   |            -------------- fields in this struct
+61 |     device: Arc<Device>,
+   |     ^^^^^^
+62 |     queue: Arc<Queue>,
+   |     ^^^^^
+63 |     shader_manager: Arc<ShaderManager>,
+   |     ^^^^^^^^^^^^^^
+...
+66 |     drop_shadow_pipeline: Option<RenderPipeline>,
+   |     ^^^^^^^^^^^^^^^^^^^^
+67 |     inner_shadow_pipeline: Option<RenderPipeline>,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+...
+70 |     shadow_params_buffer: Buffer,
+   |     ^^^^^^^^^^^^^^^^^^^^
+...
+73 |     shadow_map_texture: Option<Texture>,
+   |     ^^^^^^^^^^^^^^^^^^
+74 |     shadow_map_view: Option<TextureView>,
+   |     ^^^^^^^^^^^^^^^
+...
+77 |     current_quality: ShadowQuality,
+   |     ^^^^^^^^^^^^^^^
+78 |     global_shadow_params: ShadowParams,
+   |     ^^^^^^^^^^^^^^^^^^^^
+...
+81 |     last_render_time: std::time::Duration,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+   --> src/effects/shadow.rs:97:12
+    |
+96  | impl ShadowRenderer {
+    | ------------------- associated items in this implementation
+97  |     pub fn new(
+    |            ^^^
+...
+136 |     fn create_shadow_pipelines(&mut self) -> Result<()> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+...
+196 |     pub fn render_drop_shadow(
+    |            ^^^^^^^^^^^^^^^^^^
+...
+272 |     pub fn render_shadow_batch(
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+350 |     pub fn render_dynamic_shadow(
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+434 |     pub fn set_shadow_quality(&mut self, quality: ShadowQuality) {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+442 |     pub fn update_global_shadow_params(&mut self, params: ShadowParams) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+448 |     pub fn get_performance_stats(&self) -> (std::time::Duration, ShadowQuality) {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+453 |     fn ensure_shadow_map(&mut self, size: Vector2<u32>) -> Result<()> {
+    |        ^^^^^^^^^^^^^^^^^
+...
+486 |     pub fn optimize_for_performance(&mut self, frame_time: std::time::Duration, target_time: std::time::Duration) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `Keyframe` is never constructed
+  --> src/effects/animations.rs:19:12
+   |
+19 | pub struct Keyframe<T> {
+   |            ^^^^^^^^
+
+warning: fields `stiffness`, `damping`, `mass`, and `precision` are never read
+  --> src/effects/animations.rs:28:9
+   |
+27 | pub struct SpringParams {
+   |            ------------ fields in this struct
+28 |     pub stiffness: f32,      // How quickly spring responds (higher = faster)
+   |         ^^^^^^^^^
+29 |     pub damping: f32,        // How much oscillation is dampened (higher = less bouncy)
+   |         ^^^^^^^
+30 |     pub mass: f32,           // Mass of animated object (affects inertia)
+   |         ^^^^
+31 |     pub precision: f32,      // When to consider spring "settled"
+   |         ^^^^^^^^^
+   |
+   = note: `SpringParams` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `name`, `total_duration`, `repeat_count`, `start_delay`, `end_delay`, and `keyframes` are never read
+  --> src/effects/animations.rs:48:9
+   |
+47 | pub struct AnimationTimeline {
+   |            ----------------- fields in this struct
+48 |     pub name: String,
+   |         ^^^^
+49 |     pub total_duration: Duration,
+   |         ^^^^^^^^^^^^^^
+50 |     pub repeat_count: Option<u32>, // None = infinite
+   |         ^^^^^^^^^^^^
+51 |     pub start_delay: Duration,
+   |         ^^^^^^^^^^^
+52 |     pub end_delay: Duration,
+   |         ^^^^^^^^^
+53 |     pub keyframes: Vec<TimelineEvent>,
+   |         ^^^^^^^^^
+   |
+   = note: `AnimationTimeline` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `start_time`, `duration`, `animation_type`, and `target_window` are never read
+  --> src/effects/animations.rs:59:9
+   |
+58 | pub struct TimelineEvent {
+   |            ------------- fields in this struct
+59 |     pub start_time: f32,        // 0.0 to 1.0 (percentage of total duration)
+   |         ^^^^^^^^^^
+60 |     pub duration: f32,          // Duration as percentage of total
+   |         ^^^^^^^^
+61 |     pub animation_type: AnimationType,
+   |         ^^^^^^^^^^^^^^
+62 |     pub target_window: Option<u64>, // None = all windows
+   |         ^^^^^^^^^^^^^
+   |
+   = note: `TimelineEvent` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: multiple fields are never read
+  --> src/effects/animations.rs:68:5
+   |
+66 | pub struct AnimationController {
+   |            ------------------- fields in this struct
+67 |     /// Active animations by window ID
+68 |     active_animations: HashMap<u64, Vec<ActiveAnimation>>,
+   |     ^^^^^^^^^^^^^^^^^
+...
+71 |     timelines: HashMap<String, AnimationTimeline>,
+   |     ^^^^^^^^^
+72 |     active_timelines: HashMap<String, TimelineState>,
+   |     ^^^^^^^^^^^^^^^^
+...
+75 |     global_speed_multiplier: f32,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+76 |     paused: bool,
+   |     ^^^^^^
+...
+79 |     spring_states: HashMap<(u64, String), SpringState>, // (window_id, property_name)
+   |     ^^^^^^^^^^^^^
+...
+82 |     last_update_time: Instant,
+   |     ^^^^^^^^^^^^^^^^
+83 |     animation_count: usize,
+   |     ^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+  --> src/effects/animations.rs:89:5
+   |
+88 | struct ActiveAnimation {
+   |        --------------- fields in this struct
+89 |     id: u64,
+   |     ^^
+90 |     animation_type: AnimationType,
+   |     ^^^^^^^^^^^^^^
+91 |     start_time: Instant,
+   |     ^^^^^^^^^^
+92 |     duration: Duration,
+   |     ^^^^^^^^
+93 |     delay: Duration,
+   |     ^^^^^
+94 |     repeat_count: Option<u32>,
+   |     ^^^^^^^^^^^^
+95 |     current_repeat: u32,
+   |     ^^^^^^^^^^^^^^
+96 |     paused: bool,
+   |     ^^^^^^
+97 |     speed_multiplier: f32,
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `ActiveAnimation` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `start_time`, `current_repeat`, `paused`, and `active_events` are never read
+   --> src/effects/animations.rs:103:5
+    |
+102 | struct TimelineState {
+    |        ------------- fields in this struct
+103 |     start_time: Instant,
+    |     ^^^^^^^^^^
+104 |     current_repeat: u32,
+    |     ^^^^^^^^^^^^^^
+105 |     paused: bool,
+    |     ^^^^^^
+106 |     active_events: Vec<(usize, ActiveAnimation)>, // (event_index, animation)
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `TimelineState` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `current_value`, `target_value`, `velocity`, `params`, `last_update`, and `settled` are never read
+   --> src/effects/animations.rs:112:5
+    |
+111 | struct SpringState {
+    |        ----------- fields in this struct
+112 |     current_value: f32,
+    |     ^^^^^^^^^^^^^
+113 |     target_value: f32,
+    |     ^^^^^^^^^^^^
+114 |     velocity: f32,
+    |     ^^^^^^^^
+115 |     params: SpringParams,
+    |     ^^^^^^
+116 |     last_update: Instant,
+    |     ^^^^^^^^^^^
+117 |     settled: bool,
+    |     ^^^^^^^
+    |
+    = note: `SpringState` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: multiple associated items are never used
+   --> src/effects/animations.rs:137:12
+    |
+120 | impl AnimationController {
+    | ------------------------ associated items in this implementation
+...
+137 |     pub fn start_animation(
+    |            ^^^^^^^^^^^^^^^
+...
+174 |     pub fn start_spring_animation(
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+200 |     pub fn start_timeline(&mut self, timeline: AnimationTimeline) -> Result<()> {
+    |            ^^^^^^^^^^^^^^
+...
+220 |     pub fn update(&mut self) -> Result<Vec<AnimationUpdate>> {
+    |            ^^^^^^
+...
+257 |     fn update_regular_animations(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+329 |     fn update_spring_animations(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+375 |     fn update_timelines(&mut self, now: Instant, _updates: &mut Vec<AnimationUpdate>) -> Result<()> {
+    |        ^^^^^^^^^^^^^^^^
+...
+477 |     fn calculate_animation_value_static(animation: &AnimationType, progress: f32) -> Option<(AnimationProperty, AnimationValue)> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+482 |     fn apply_easing_static(animation: &AnimationType, progress: f32) -> Option<(AnimationProperty, AnimationValue)> {
+    |        ^^^^^^^^^^^^^^^^^^^
+...
+536 |     fn apply_easing_curve_static(progress: f32, curve: &EasingCurve) -> f32 {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+555 |     fn calculate_animation_value(&self, animation: &AnimationType, progress: f32) -> Option<(AnimationProperty, AnimationValue)> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+603 |     fn apply_easing(&self, progress: f32, curve: &EasingCurve) -> f32 {
+    |        ^^^^^^^^^^^^
+...
+649 |     fn cleanup_finished_animations(&mut self) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+659 |     fn generate_animation_id(&self) -> u64 {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+...
+670 |     fn get_animation_duration(&self, animation: &AnimationType) -> Duration {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+...
+681 |     fn get_animation_name(&self, animation: &AnimationType) -> &'static str {
+    |        ^^^^^^^^^^^^^^^^^^
+...
+692 |     pub fn set_paused(&mut self, paused: bool) {
+    |            ^^^^^^^^^^
+...
+702 |     pub fn set_global_speed(&mut self, speed: f32) {
+    |            ^^^^^^^^^^^^^^^^
+...
+708 |     pub fn get_animation_stats(&self) -> AnimationStats {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `AnimationUpdate` is never constructed
+   --> src/effects/animations.rs:721:12
+    |
+721 | pub struct AnimationUpdate {
+    |            ^^^^^^^^^^^^^^^
+
+warning: enum `AnimationProperty` is never used
+   --> src/effects/animations.rs:729:10
+    |
+729 | pub enum AnimationProperty {
+    |          ^^^^^^^^^^^^^^^^^
+
+warning: enum `AnimationValue` is never used
+   --> src/effects/animations.rs:742:10
+    |
+742 | pub enum AnimationValue {
+    |          ^^^^^^^^^^^^^^
+
+warning: struct `AnimationStats` is never constructed
+   --> src/effects/animations.rs:758:12
+    |
+758 | pub struct AnimationStats {
+    |            ^^^^^^^^^^^^^^
+
+warning: associated function `from_loc_and_size` is never used
+  --> src/window/mod.rs:19:12
+   |
+18 | impl Rectangle {
+   | -------------- associated function in this implementation
+19 |     pub fn from_loc_and_size((x, y): (i32, i32), (width, height): (u32, u32)) -> Self {
+   |            ^^^^^^^^^^^^^^^^^
+
+warning: field `config` is never read
+  --> src/window/mod.rs:68:5
+   |
+67 | pub struct WindowManager {
+   |            ------------- field in this struct
+68 |     config: WindowConfig,
+   |     ^^^^^^
+
+warning: methods `get_window`, `windows`, `focus_window`, `focused_window`, `calculate_layout`, and `set_window_properties` are never used
+   --> src/window/mod.rs:121:12
+    |
+80  | impl WindowManager {
+    | ------------------ methods in this implementation
+...
+121 |     pub fn get_window(&self, id: u64) -> Option<&AxiomWindow> {
+    |            ^^^^^^^^^^
+...
+131 |     pub fn windows(&self) -> impl Iterator<Item = &AxiomWindow> {
+    |            ^^^^^^^
+...
+136 |     pub fn focus_window(&mut self, id: u64) -> Result<()> {
+    |            ^^^^^^^^^^^^
+...
+144 |     pub fn focused_window(&self) -> Option<&AxiomWindow> {
+    |            ^^^^^^^^^^^^^^
+...
+149 |     pub fn calculate_layout(&self, workspace_bounds: Rectangle) -> Vec<(u64, Rectangle)> {
+    |            ^^^^^^^^^^^^^^^^
+...
+200 |     pub fn set_window_properties(&mut self, id: u64, properties: WindowProperties) -> Result<()> {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: variants `Keyboard`, `MouseButton`, `MouseMove`, and `Gesture` are never constructed
+  --> src/input/mod.rs:13:5
+   |
+11 | pub enum InputEvent {
+   |          ---------- variants in this enum
+12 |     /// Keyboard key press/release
+13 |     Keyboard {
+   |     ^^^^^^^^
+...
+19 |     MouseButton {
+   |     ^^^^^^^^^^^
+...
+26 |     MouseMove {
+   |     ^^^^^^^^^
+...
+40 |     Gesture {
+   |     ^^^^^^^
+   |
+   = note: `InputEvent` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variants `Left`, `Right`, `Middle`, and `Other` are never constructed
+  --> src/input/mod.rs:50:5
+   |
+49 | pub enum MouseButton {
+   |          ----------- variants in this enum
+50 |     Left,
+   |     ^^^^
+51 |     Right,
+   |     ^^^^^
+52 |     Middle,
+   |     ^^^^^^
+53 |     Other(u8),
+   |     ^^^^^
+   |
+   = note: `MouseButton` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variants `Swipe`, `Pinch`, and `Pan` are never constructed
+  --> src/input/mod.rs:58:5
+   |
+57 | pub enum GestureType {
+   |          ----------- variants in this enum
+58 |     Swipe,
+   |     ^^^^^
+59 |     Pinch,
+   |     ^^^^^
+60 |     Pan,
+   |     ^^^
+   |
+   = note: `GestureType` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variants `CloseWindow`, `ToggleFullscreen`, and `Custom` are never constructed
+  --> src/input/mod.rs:70:5
+   |
+65 | pub enum CompositorAction {
+   |          ---------------- variants in this enum
+...
+70 |     CloseWindow,
+   |     ^^^^^^^^^^^
+71 |     ToggleFullscreen,
+   |     ^^^^^^^^^^^^^^^^
+72 |     Quit,
+73 |     Custom(String),
+   |     ^^^^^^
+   |
+   = note: `CompositorAction` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `input_config`, `bindings_config`, and `gesture_state` are never read
+  --> src/input/mod.rs:78:5
+   |
+77 | pub struct InputManager {
+   |            ------------ fields in this struct
+78 |     input_config: InputConfig,
+   |     ^^^^^^^^^^^^
+79 |     bindings_config: BindingsConfig,
+   |     ^^^^^^^^^^^^^^^
+...
+91 |     gesture_state: Option<GestureState>,
+   |     ^^^^^^^^^^^^^
+
+warning: fields `start_time`, `start_position`, and `current_velocity` are never read
+  --> src/input/mod.rs:96:5
+   |
+95 | struct GestureState {
+   |        ------------ fields in this struct
+96 |     start_time: std::time::Instant,
+   |     ^^^^^^^^^^
+97 |     start_position: (f64, f64),
+   |     ^^^^^^^^^^^^^^
+98 |     current_velocity: (f64, f64),
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `GestureState` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: methods `mouse_position`, `is_modifier_active`, and `simulate_key_press` are never used
+   --> src/input/mod.rs:236:12
+    |
+101 | impl InputManager {
+    | ----------------- methods in this implementation
+...
+236 |     pub fn mouse_position(&self) -> (f64, f64) {
+    |            ^^^^^^^^^^^^^^
+...
+241 |     pub fn is_modifier_active(&self, modifier: &str) -> bool {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+246 |     pub fn simulate_key_press(&mut self, key_combo: &str) -> Vec<CompositorAction> {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: method `save` is never used
+   --> src/config/mod.rs:443:12
+    |
+388 | impl AxiomConfig {
+    | ---------------- method in this implementation
+...
+443 |     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    |            ^^^^
+
+warning: field `config` is never read
+ --> src/xwayland/mod.rs:8:5
+  |
+7 | pub struct XWaylandManager {
+  |            --------------- field in this struct
+8 |     config: XWaylandConfig,
+  |     ^^^^^^
+
+warning: variants `UserEvent` and `StateChange` are never constructed
+  --> src/ipc/mod.rs:29:5
+   |
+16 | pub enum AxiomMessage {
+   |          ------------ variants in this enum
+...
+29 |     UserEvent {
+   |     ^^^^^^^^^
+...
+36 |     StateChange {
+   |     ^^^^^^^^^^^
+   |
+   = note: `AxiomMessage` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `listener` and `message_sender` are never read
+   --> src/ipc/mod.rs:100:5
+    |
+98  | pub struct AxiomIPCServer {
+    |            -------------- fields in this struct
+99  |     socket_path: PathBuf,
+100 |     listener: Option<UnixListener>,
+    |     ^^^^^^^^
+101 |     message_sender: Option<tokio::sync::mpsc::UnboundedSender<AxiomMessage>>,
+    |     ^^^^^^^^^^^^^^
+
+warning: methods `accept_connections`, `send_performance_metrics`, `send_user_event`, and `socket_path` are never used
+   --> src/ipc/mod.rs:154:14
+    |
+105 | impl AxiomIPCServer {
+    | ------------------- methods in this implementation
+...
+154 |     async fn accept_connections(&mut self) -> Result<()> {
+    |              ^^^^^^^^^^^^^^^^^^
+...
+293 |     pub async fn send_performance_metrics(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+349 |     pub async fn send_user_event(&self, event_type: String, details: serde_json::Value) -> Result<()> {
+    |                  ^^^^^^^^^^^^^^^
+...
+367 |     pub fn socket_path(&self) -> &PathBuf {
+    |            ^^^^^^^^^^^
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `axiom`
+ --> benches/compositor_benchmarks.rs:7:5
+  |
+7 | use axiom::{
+  |     ^^^^^ use of unresolved module or unlinked crate `axiom`
+  |
+  = help: if you wanted to use a crate named `axiom`, use `cargo add axiom` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `axiom`
+   --> benches/compositor_benchmarks.rs:141:17
+    |
+141 |             use axiom::config::AxiomConfig;
+    |                 ^^^^^ use of unresolved module or unlinked crate `axiom`
+    |
+    = help: if you wanted to use a crate named `axiom`, use `cargo add axiom` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `axiom`
+   --> benches/compositor_benchmarks.rs:147:13
+    |
+147 |         use axiom::config::AxiomConfig;
+    |             ^^^^^ use of unresolved module or unlinked crate `axiom`
+    |
+    = help: if you wanted to use a crate named `axiom`, use `cargo add axiom` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `axiom`
+   --> benches/compositor_benchmarks.rs:156:13
+    |
+156 |         use axiom::config::AxiomConfig;
+    |             ^^^^^ use of unresolved module or unlinked crate `axiom`
+    |
+    = help: if you wanted to use a crate named `axiom`, use `cargo add axiom` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `axiom`
+   --> benches/compositor_benchmarks.rs:246:13
+    |
+246 |         use axiom::input::{InputManager, InputEvent};
+    |             ^^^^^ use of unresolved module or unlinked crate `axiom`
+    |
+    = help: if you wanted to use a crate named `axiom`, use `cargo add axiom` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `axiom`
+   --> benches/compositor_benchmarks.rs:247:13
+    |
+247 |         use axiom::config::{InputConfig, BindingsConfig};
+    |             ^^^^^ use of unresolved module or unlinked crate `axiom`
+    |
+    = help: if you wanted to use a crate named `axiom`, use `cargo add axiom` to add it to your `Cargo.toml`
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `axiom`
+   --> benches/compositor_benchmarks.rs:273:13
+    |
+273 |         use axiom::config::{WorkspaceConfig, EffectsConfig};
+    |             ^^^^^ use of unresolved module or unlinked crate `axiom`
+    |
+    = help: if you wanted to use a crate named `axiom`, use `cargo add axiom` to add it to your `Cargo.toml`
+
+error[E0282]: type annotations needed for `Arc<_, _>`
+   --> benches/compositor_benchmarks.rs:212:21
+    |
+212 |                 let workspaces_clone = Arc::clone(&workspaces);
+    |                     ^^^^^^^^^^^^^^^^
+213 |                 std::thread::spawn(move || {
+214 |                     let mut ws = workspaces_clone.lock().unwrap();
+    |                                                   ---- type must be known at this point
+    |
+help: consider giving `workspaces_clone` an explicit type, where the type for type parameter `T` is specified
+    |
+212 |                 let workspaces_clone: Arc<T, A> = Arc::clone(&workspaces);
+    |                                     +++++++++++
+
+Some errors have detailed explanations: E0282, E0433.
+For more information about an error, try `rustc --explain E0282`.
+error: could not compile `axiom` (bench "compositor_benchmarks") due to 8 previous errors
+warning: build failed, waiting for other jobs to finish...
+warning: `axiom` (bin "axiom") generated 87 warnings (run `cargo fix --bin "axiom"` to apply 8 suggestions)

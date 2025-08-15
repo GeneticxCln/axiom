@@ -1,0 +1,63 @@
+# Tarpaulin configuration for Axiom compositor test coverage
+[config]
+# Coverage output formats
+output-format = ["Html", "Json", "Lcov", "Xml"]
+
+# Output directory for coverage reports
+output-dir = "target/tarpaulin"
+
+# Include all source files in coverage
+include-paths = ["src/"]
+
+# Exclude test files from coverage calculations
+exclude-files = [
+    "src/*/tests.rs",
+    "src/*/test*.rs",
+    "src/**/tests/**",
+    "src/demo_*.rs",  # Exclude demo files
+]
+
+# Timeout for tests (in seconds)
+timeout = "120s"
+
+# Run tests with release optimizations for better performance
+release = false
+
+# Include doctests in coverage
+count-doctests = true
+
+# Fail if coverage is below threshold
+fail-under = 70.0
+
+# Generate detailed line-by-line coverage
+line = true
+
+# Generate branch coverage where possible  
+branch = false
+
+# Follow symbolic links
+follow-exec = true
+
+# Include all features when running tests
+all-features = true
+
+# Post-run hook to generate coverage badge
+post-run-hook = """
+echo "Coverage report generated in target/tarpaulin/"
+echo "Open target/tarpaulin/tarpaulin-report.html to view detailed coverage"
+"""
+
+# Engine configuration
+engine = "llvm"
+
+# Exclude integration tests that require graphics context
+exclude-tests = [
+    "test_compositor_initialization",
+    "test_effects_engine", 
+]
+
+# Include unit tests and property tests
+include-tests = [
+    "*::test_*",
+    "*::property_tests::*",
+]
