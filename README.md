@@ -83,7 +83,7 @@ axiom/
 - **🏗️ Complete Architecture**: Modular Rust codebase with clean separation of concerns
 - **⚙️ Configuration System**: TOML-based config with defaults and validation
 - **🔄 Event Loop**: Async Tokio-based main loop running at 60 FPS
-- **🤖 IPC Integration**: Unix socket communication with Lazy UI optimization system
+- **🤖 IPC Integration**: Unix socket communication with Lazy UI optimization system (socket at $XDG_RUNTIME_DIR/axiom/axiom.sock, fallback /tmp/axiom-lazy-ui.sock)
 - **📊 Performance Monitoring**: Real-time CPU, memory, GPU usage reporting
 - **🛡️ Error Handling**: Comprehensive error management with graceful shutdown
 - **🔧 CLI Interface**: Full command-line interface with debug and windowed modes
@@ -123,6 +123,13 @@ cargo build --release
 # Run in production
 sudo ./target/release/axiom
 ```
+
+### Configuration Precedence
+
+- Defaults (compiled)
+- Config file (TOML)
+- CLI flags
+- IPC runtime updates (validated, whitelisted)
 
 ### Dependencies
 
@@ -173,7 +180,7 @@ Axiom seamlessly integrates with the **Lazy UI** optimization system:
 - **Usage pattern learning** - Optimization based on your workflow
 
 ### IPC Communication
-- **Unix socket**: `/tmp/axiom-lazy-ui.sock`
+- **Unix socket**: `$XDG_RUNTIME_DIR/axiom/axiom.sock` (fallback `/tmp/axiom-lazy-ui.sock`)
 - **JSON protocol**: Structured message exchange
 - **Async messaging**: Non-blocking optimization updates
 

@@ -45,6 +45,7 @@ mod smithay_backend_phase6_2; // Phase 6.2: Full protocol implementation
 mod window;
 mod workspace;
 mod xwayland;
+mod renderer;
 
 use compositor::AxiomCompositor;
 use config::AxiomConfig;

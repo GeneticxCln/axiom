@@ -42,7 +42,7 @@ pub struct AxiomConfig {
 }
 
 /// Scrollable workspace configuration (niri-inspired)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkspaceConfig {
     /// Speed of workspace scrolling (1.0 = normal)
     pub scroll_speed: f64,
@@ -61,10 +61,22 @@ pub struct WorkspaceConfig {
 
     /// Enable smooth scrolling animations
     pub smooth_scrolling: bool,
+
+    /// Momentum friction factor (0.0-1.0, closer to 0 = fast decay, closer to 1 = slow decay)
+    #[serde(default = "WorkspaceConfig::default_momentum_friction")]
+    pub momentum_friction: f64,
+
+    /// Minimum velocity to keep momentum scrolling (px/s)
+    #[serde(default = "WorkspaceConfig::default_momentum_min_velocity")]
+    pub momentum_min_velocity: f64,
+
+    /// Snap-to-column distance threshold in pixels
+    #[serde(default = "WorkspaceConfig::default_snap_threshold")]
+    pub snap_threshold_px: f64,
 }
 
 /// Visual effects configuration (Hyprland-inspired)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EffectsConfig {
     /// Enable/disable all visual effects
     pub enabled: bool,
@@ -82,7 +94,7 @@ pub struct EffectsConfig {
     pub shadows: ShadowConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AnimationConfig {
     /// Enable animations
     pub enabled: bool,
@@ -100,7 +112,7 @@ pub struct AnimationConfig {
     pub window_animation: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlurConfig {
     /// Enable blur effects
     pub enabled: bool,
@@ -115,7 +127,7 @@ pub struct BlurConfig {
     pub window_backgrounds: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RoundedCornersConfig {
     /// Enable rounded corners
     pub enabled: bool,
@@ -127,7 +139,7 @@ pub struct RoundedCornersConfig {
     pub antialiasing: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ShadowConfig {
     /// Enable drop shadows
     pub enabled: bool,
@@ -146,7 +158,7 @@ pub struct ShadowConfig {
 }
 
 /// Window management configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WindowConfig {
     /// Default window placement algorithm
     pub placement: String, // "smart", "center", "mouse"
@@ -171,7 +183,7 @@ pub struct WindowConfig {
 }
 
 /// Input configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InputConfig {
     /// Keyboard repeat delay (milliseconds)
     pub keyboard_repeat_delay: u32,
@@ -190,7 +202,7 @@ pub struct InputConfig {
 }
 
 /// Key bindings configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BindingsConfig {
     /// Scroll workspace left
     pub scroll_left: String,
@@ -207,6 +219,9 @@ pub struct BindingsConfig {
     /// Close window
     pub close_window: String,
 
+    /// Toggle fullscreen for focused window
+    pub toggle_fullscreen: String,
+
     /// Launch terminal
     pub launch_terminal: String,
 
@@ -221,7 +236,7 @@ pub struct BindingsConfig {
 }
 
 /// XWayland configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct XWaylandConfig {
     /// Enable XWayland support
@@ -232,7 +247,7 @@ pub struct XWaylandConfig {
 }
 
 /// General compositor settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GeneralConfig {
     /// Enable debug logging
     pub debug: bool,
@@ -253,6 +268,9 @@ impl Default for WorkspaceConfig {
             workspace_width: 1920,
             gaps: 10,
             smooth_scrolling: true,
+            momentum_friction: Self::default_momentum_friction(),
+            momentum_min_velocity: Self::default_momentum_min_velocity(),
+            snap_threshold_px: Self::default_snap_threshold(),
         }
     }
 }
@@ -348,6 +366,7 @@ impl Default for BindingsConfig {
             move_window_left: "Super+Shift+Left".to_string(),
             move_window_right: "Super+Shift+Right".to_string(),
             close_window: "Super+q".to_string(),
+            toggle_fullscreen: "Super+f".to_string(),
             launch_terminal: "Super+Enter".to_string(),
             launch_launcher: "Super+Space".to_string(),
             toggle_effects: "Super+e".to_string(),
@@ -373,6 +392,12 @@ impl Default for GeneralConfig {
             vsync: true,
         }
     }
+}
+
+impl WorkspaceConfig {
+    fn default_momentum_friction() -> f64 { 0.95 }
+    fn default_momentum_min_velocity() -> f64 { 1.0 }
+    fn default_snap_threshold() -> f64 { 48.0 }
 }
 
 impl AxiomConfig {
@@ -437,24 +462,38 @@ impl AxiomConfig {
     /// Merge a partial configuration into this one
     /// Non-default values from the partial config will override this config
     pub fn merge_partial(mut self, partial: AxiomConfig) -> Self {
-        // Simple approach: replace entire workspace section if it's different from default
         let default_config = AxiomConfig::default();
 
-        // Check if any workspace field differs from default
-        let workspace_changed = partial.workspace.scroll_speed
-            != default_config.workspace.scroll_speed
-            || partial.workspace.infinite_scroll != default_config.workspace.infinite_scroll
-            || partial.workspace.auto_scroll != default_config.workspace.auto_scroll
-            || partial.workspace.workspace_width != default_config.workspace.workspace_width
-            || partial.workspace.gaps != default_config.workspace.gaps
-            || partial.workspace.smooth_scrolling != default_config.workspace.smooth_scrolling;
+        // Helper to decide if a section in partial differs from default (meaningfully provided)
+        let workspace_changed = partial.workspace != default_config.workspace;
+        let effects_changed = partial.effects != default_config.effects;
+        let window_changed = partial.window != default_config.window;
+        let input_changed = partial.input != default_config.input;
+        let bindings_changed = partial.bindings != default_config.bindings;
+        let xwayland_changed = partial.xwayland != default_config.xwayland;
+        let general_changed = partial.general != default_config.general;
 
         if workspace_changed {
             self.workspace = partial.workspace;
         }
-
-        // TODO: Merge other sections (effects, window, input, etc.) similarly
-        // For now, property tests only focus on workspace merging
+        if effects_changed {
+            self.effects = partial.effects;
+        }
+        if window_changed {
+            self.window = partial.window;
+        }
+        if input_changed {
+            self.input = partial.input;
+        }
+        if bindings_changed {
+            self.bindings = partial.bindings;
+        }
+        if xwayland_changed {
+            self.xwayland = partial.xwayland;
+        }
+        if general_changed {
+            self.general = partial.general;
+        }
 
         self
     }

@@ -126,6 +126,14 @@ impl InputManager {
             CompositorAction::MoveWindowRight,
         );
         key_bindings.insert(bindings_config.quit.clone(), CompositorAction::Quit);
+        key_bindings.insert(
+            bindings_config.toggle_fullscreen.clone(),
+            CompositorAction::ToggleFullscreen,
+        );
+        key_bindings.insert(
+            bindings_config.close_window.clone(),
+            CompositorAction::CloseWindow,
+        );
 
         debug!("🔑 Loaded {} key bindings", key_bindings.len());
 

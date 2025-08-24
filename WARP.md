@@ -96,6 +96,7 @@ cargo install cargo-audit cargo-tarpaulin cargo-expand cargo-outdated
 # Copy default configuration
 cp config/axiom.toml ~/.config/axiom/axiom.toml
 
+# IPC socket (runtime): $XDG_RUNTIME_DIR/axiom/axiom.sock (fallback /tmp/axiom-lazy-ui.sock)
 # Test IPC communication (after starting compositor)
 python3 test_ipc.py
 

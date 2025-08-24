@@ -402,3 +402,104 @@ impl AxiomSmithayBackend {
         self.state.handle_window_destroyed(window_id)
     }
 }
+
+// === Experimental real XDG shell backend (feature-gated) ===
+// Enable with: --features real-compositor
+#[cfg(feature = "real-compositor")]
+pub mod real_xdg_backend {
+    use super::*;
+    use anyhow::Result;
+    use log::{info, warn};
+
+    // Smithay imports (0.3.x)
+    use smithay::reexports::calloop::EventLoop;
+    use smithay::reexports::wayland_server::Display;
+    use smithay::wayland::{
+        compositor,
+        shell::xdg::xdg_shell,
+        shm,
+        seat,
+    };
+
+    /// Minimal compositor state for real XDG shell handling
+    pub struct State {
+        pub config: AxiomConfig,
+        pub window_manager: Arc<parking_lot::RwLock<WindowManager>>,
+        pub workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
+        pub effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
+        pub input_manager: Arc<parking_lot::RwLock<InputManager>>,
+        pub surfaces: HashMap<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface, u64>,
+        pub running: bool,
+    }
+
+    pub struct AxiomSmithayBackendReal {
+        pub display: Display<State>,
+        pub event_loop: EventLoop<State>,
+        pub socket_name: Option<String>,
+    }
+
+    impl AxiomSmithayBackendReal {
+        pub fn new(
+            config: AxiomConfig,
+            window_manager: Arc<parking_lot::RwLock<WindowManager>>,
+            workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
+            effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
+            input_manager: Arc<parking_lot::RwLock<InputManager>>,
+        ) -> Result<Self> {
+            let mut display = Display::new();
+            let event_loop = EventLoop::try_new()?;
+
+            // Init smithay globals
+            compositor::init_compositor::<State, _>(&mut display, |_, _state| {});
+            shm::init_shm_global::<State>(&mut display, vec![]);
+            xdg_shell::init_xdg_shell::<State, _>(&mut display, |_, _state| {});
+            seat::init_seat_global::<State>(&mut display, |_, _state| {});
+
+            // Build initial state
+            let state = State {
+                config,
+                window_manager,
+                workspace_manager,
+                effects_engine,
+                input_manager,
+                surfaces: HashMap::new(),
+                running: true,
+            };
+
+            // Insert state into event loop
+            event_loop.insert_source(
+                smithay::reexports::calloop::ping::make_ping().0,
+                |_event, _metadata, _state| {},
+            )?;
+
+            display.handle().insert_resource(state);
+
+            Ok(Self {
+                display,
+                event_loop,
+                socket_name: None,
+            })
+        }
+
+        pub fn initialize(&mut self) -> Result<()> {
+            let sock = self.display.add_socket_auto()?;
+            let name = sock.to_string_lossy().to_string();
+            std::env::set_var("WAYLAND_DISPLAY", &name);
+            self.socket_name = Some(name);
+            info!("✅ Real Smithay backend initialized (XDG shell global ready)");
+            Ok(())
+        }
+
+        pub fn run_one_cycle(&mut self) -> Result<()> {
+            // In a full implementation, dispatch events here and map surfaces to windows
+            self.display.dispatch_clients(&mut 0, |_| {})?;
+            self.display.flush_clients()?;
+            Ok(())
+        }
+
+        pub fn shutdown(&mut self) -> Result<()> {
+            info!("🔽 Shutting down real backend");
+            Ok(())
+        }
+    }
+}

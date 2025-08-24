@@ -73,6 +73,7 @@ pub mod ipc;
 pub mod window;
 pub mod workspace;
 pub mod xwayland;
+pub mod renderer;
 
 // Real backend modules
 pub mod axiom_real_compositor;
