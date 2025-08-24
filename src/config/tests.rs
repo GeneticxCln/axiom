@@ -269,11 +269,8 @@ fn test_xwayland_config() {
     config.enabled = true;
     assert!(config.enabled);
 
-    // Test scale_factor field
-    assert_eq!(config.scale_factor, 1.0);
-
-    config.scale_factor = 1.5;
-    assert_eq!(config.scale_factor, 1.5);
+// Test display field defaults
+    assert!(config.display.is_none());
 }
 
 // Helper function to validate keybinding format

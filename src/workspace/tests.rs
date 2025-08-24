@@ -148,13 +148,13 @@ fn test_focused_column_retrieval() -> Result<()> {
     workspaces.add_window_to_column(1002, 1);
 
     // Get focused column (should be first column initially)
-    let focused_column = workspaces.get_focused_column();
+let focused_column = workspaces.get_focused_column_opt().unwrap();
     assert_eq!(focused_column.windows.len(), 1);
     assert_eq!(focused_column.windows[0], 1001);
 
     // Move focus and check again
     workspaces.scroll_right();
-    let focused_column = workspaces.get_focused_column();
+let focused_column = workspaces.get_focused_column_opt().unwrap();
     assert_eq!(focused_column.windows.len(), 1);
     assert_eq!(focused_column.windows[0], 1002);
 
@@ -171,7 +171,7 @@ fn test_workspace_update_cycle() -> Result<()> {
     workspaces.add_window_to_column(1002, 1);
 
     // Test update cycle (should not crash)
-    workspaces.update()?;
+workspaces.update_animations()?;
 
     // Should still have the same number of columns
     assert_eq!(workspaces.active_column_count(), 2);

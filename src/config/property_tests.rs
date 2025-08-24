@@ -218,21 +218,11 @@ prop_compose! {
 prop_compose! {
     fn valid_xwayland_config()(
         enabled in any::<bool>(),
-        lazy_loading in any::<bool>(),
-        scale_factor in 0.5f64..3.0f64,
-        auto_restart in any::<bool>(),
-        max_windows in 1u32..200u32,
-        xwayland_path in Just("/usr/bin/Xwayland".to_string()),
-        extra_args in prop::collection::vec("[-A-Za-z0-9_.+/]{1,20}", 0..4),
+        display in prop::option::of(0u32..16u32),
     ) -> XWaylandConfig {
         XWaylandConfig {
             enabled,
-            lazy_loading,
-            scale_factor,
-            xwayland_path,
-            auto_restart,
-            extra_args,
-            max_windows,
+            display,
         }
     }
 }
@@ -240,27 +230,14 @@ prop_compose! {
 // Strategy for generating valid general configurations
 prop_compose! {
     fn valid_general_config()(
-        compositor_name in "[a-zA-Z][a-zA-Z0-9_-]{2,20}",
-        socket_name in "[a-zA-Z][a-zA-Z0-9_-]{2,20}",
-        log_level in prop_oneof![
-            Just("error".to_string()),
-            Just("warn".to_string()),
-            Just("info".to_string()),
-            Just("debug".to_string()),
-            Just("trace".to_string()),
-        ],
-        enable_debug_output in any::<bool>(),
-        max_clients in 1u32..1000u32,
-        startup_apps in prop::collection::vec("[a-zA-Z][a-zA-Z0-9_/.-]{2,50}", 0..5),
+        debug in any::<bool>(),
+        max_fps in 0u32..480u32,
+        vsync in any::<bool>(),
     ) -> GeneralConfig {
         GeneralConfig {
-            compositor_name,
-            socket_name,
-            log_level,
-            enable_debug_output,
-            max_clients,
-            config_path: "~/.config/axiom/config.toml".to_string(),
-            startup_apps,
+            debug,
+            max_fps,
+            vsync,
         }
     }
 }
@@ -306,7 +283,7 @@ proptest! {
         prop_assert_eq!(config.workspace.infinite_scroll, parsed_config.workspace.infinite_scroll);
         prop_assert_eq!(config.workspace.workspace_width, parsed_config.workspace.workspace_width);
         prop_assert_eq!(config.effects.enabled, parsed_config.effects.enabled);
-        prop_assert_eq!(config.general.compositor_name, parsed_config.general.compositor_name);
+        prop_assert_eq!(config.general.vsync, parsed_config.general.vsync);
 
         // Check floating point values with tolerance
         prop_assert!((config.workspace.scroll_speed - parsed_config.workspace.scroll_speed).abs() < 0.001);
@@ -323,7 +300,7 @@ proptest! {
         prop_assert!(config.effects.shadows.opacity >= 0.0 && config.effects.shadows.opacity <= 1.0);
         prop_assert!(config.input.keyboard_repeat_rate > 0);
         prop_assert!(config.input.mouse_accel > 0.0);
-        prop_assert!(config.general.max_clients > 0);
+        prop_assert!(config.general.max_fps >= 0);
     }
 
     /// Test that partial configuration merging works correctly
@@ -335,7 +312,7 @@ proptest! {
         let mut partial_config = AxiomConfig::default();
         partial_config.workspace = workspace_override.clone();
 
-        let base_compositor_name = base_config.general.compositor_name.clone();
+        let base_vsync = base_config.general.vsync;
         let merged = base_config.merge_partial(partial_config);
 
         // Merged config should have the overridden workspace config
@@ -343,7 +320,7 @@ proptest! {
         prop_assert_eq!(merged.workspace.infinite_scroll, workspace_override.infinite_scroll);
 
         // Other sections should remain from base config
-        prop_assert_eq!(merged.general.compositor_name, base_compositor_name);
+        prop_assert_eq!(merged.general.vsync, base_vsync);
     }
 
     /// Test edge cases for numeric values

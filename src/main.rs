@@ -14,13 +14,6 @@
 //! - `config`: Configuration parsing and management
 //! - `xwayland`: X11 compatibility layer
 
-// Use jemalloc for better memory profiling when enabled
-#[cfg(all(not(target_env = "msvc"), feature = "memory-profiling"))]
-use tikv_jemallocator::Jemalloc;
-
-#[cfg(all(not(target_env = "msvc"), feature = "memory-profiling"))]
-#[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
 
 use anyhow::Result;
 use clap::Parser;
