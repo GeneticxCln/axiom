@@ -40,6 +40,12 @@ pub struct CompositorState {
     pub windows: Vec<Window>,
     pub seat_name: String,
     pub output_info: OutputInfo,
+    // Input wiring (minimal): track created pointer/keyboard resources and focus
+    pub pointers: Vec<wl_pointer::WlPointer>,
+    pub keyboards: Vec<wl_keyboard::WlKeyboard>,
+    pub pointer_pos: (f64, f64),
+    pub focused_surface: Option<wl_surface::WlSurface>,
+    pub serial_counter: u32,
 }
 
 /// Real surface with actual data
@@ -87,6 +93,11 @@ impl Default for CompositorState {
                 refresh: 60000,
                 name: "AXIOM-1".to_string(),
             },
+            pointers: Vec::new(),
+            keyboards: Vec::new(),
+            pointer_pos: (0.0, 0.0),
+            focused_surface: None,
+            serial_counter: 1,
         }
     }
 }
@@ -319,6 +330,29 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for CompositorState {
 }
 
 // REAL wl_surface protocol implementation
+impl CompositorState {
+    // Helpers to send minimal input events
+    fn next_serial(&mut self) -> u32 { let s = self.serial_counter; self.serial_counter = self.serial_counter.wrapping_add(1); s }
+    fn send_pointer_enter_if_needed(&mut self, surface: &wl_surface::WlSurface) {
+        if self.focused_surface.as_ref() != Some(surface) {
+            self.focused_surface = Some(surface.clone());
+            let serial = self.next_serial();
+            for p in &self.pointers {
+                // Surface-local coords: use current pointer_pos
+                p.enter(serial, surface.clone(), self.pointer_pos.0 as f64, self.pointer_pos.1 as f64);
+            }
+        }
+    }
+    fn send_pointer_motion(&mut self, x: f64, y: f64) {
+        self.pointer_pos = (x, y);
+        let time_ms = 0u32; // placeholder
+        for p in &self.pointers {
+            p.motion(time_ms, x, y);
+        }
+    }
+}
+
+// REAL wl_surface protocol implementation
 impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
     fn request(
         state: &mut Self,
@@ -363,6 +397,8 @@ impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
                         info!("🗺️ Mapping window at ({}, {}) size {}x{}", win.x, win.y, win.width, win.height);
                         // Minimal mapping: nothing to render yet, but marked as mapped
                         win.pending_map = false;
+                        // Set pointer focus to this surface on first map
+                        state.send_pointer_enter_if_needed(resource);
                     }
                 }
             }
@@ -712,7 +748,7 @@ impl GlobalDispatch<wl_seat::WlSeat, ()> for CompositorState {
 
 impl Dispatch<wl_seat::WlSeat, ()> for CompositorState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         _resource: &wl_seat::WlSeat,
         request: wl_seat::Request,
@@ -722,11 +758,13 @@ impl Dispatch<wl_seat::WlSeat, ()> for CompositorState {
     ) {
         match request {
             wl_seat::Request::GetKeyboard { id } => {
-                data_init.init(id, ());
+                let kb = data_init.init(id, ());
+                state.keyboards.push(kb);
                 debug!("Keyboard requested");
             }
             wl_seat::Request::GetPointer { id } => {
-                data_init.init(id, ());
+                let ptr = data_init.init(id, ());
+                state.pointers.push(ptr);
                 debug!("Pointer requested");
             }
             _ => {}
