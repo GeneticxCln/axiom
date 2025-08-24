@@ -21,12 +21,13 @@ pub async fn demo_scrollable_workspaces(compositor: &mut AxiomCompositor) -> Res
     info!("📋 Demo 1: Adding windows to initial workspace");
     let _window1 = compositor.add_window("Terminal".to_string());
     let window2 = compositor.add_window("Browser".to_string());
-    let window3 = compositor.add_window("Editor".to_string());
+    let _window3 = compositor.add_window("Editor".to_string());
 
     time::sleep(Duration::from_millis(500)).await;
 
     // Show current workspace info
     let (column, position, count, scrolling) = compositor.get_workspace_info();
+
     info!(
         "🎯 Current: Column {}, Position {:.1}, {} active columns, Scrolling: {}",
         column, position, count, scrolling
@@ -69,7 +70,7 @@ pub async fn demo_scrollable_workspaces(compositor: &mut AxiomCompositor) -> Res
         compositor.scroll_workspace_left();
         time::sleep(Duration::from_millis(400)).await;
 
-        let (column, position, count, scrolling) = compositor.get_workspace_info();
+        let (column, position, count, _scrolling) = compositor.get_workspace_info();
         info!(
             "🎯 Scrolled to: Column {}, Position {:.1}, {} active columns",
             column, position, count
@@ -121,7 +122,7 @@ pub async fn demo_momentum_scrolling(compositor: &mut AxiomCompositor) -> Result
         // Shorter delays to simulate momentum
         time::sleep(Duration::from_millis(150)).await;
 
-        let (column, position, count, _) = compositor.get_workspace_info();
+        let (column, position, _count, _) = compositor.get_workspace_info();
         debug!(
             "📍 Momentum step {}: Column {}, Position {:.1}",
             i + 1,
