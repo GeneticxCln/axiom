@@ -40,6 +40,12 @@ pub struct CompositorState {
     pub windows: Vec<Window>,
     pub seat_name: String,
     pub output_info: OutputInfo,
+    // Input wiring (minimal): track created pointer/keyboard resources and focus
+    pub pointers: Vec<wl_pointer::WlPointer>,
+    pub keyboards: Vec<wl_keyboard::WlKeyboard>,
+    pub pointer_pos: (f64, f64),
+    pub focused_surface: Option<wl_surface::WlSurface>,
+    pub serial_counter: u32,
 }
 
 /// Real surface with actual data
@@ -57,12 +63,15 @@ pub struct Surface {
 pub struct Window {
     pub xdg_surface: xdg_surface::XdgSurface,
     pub xdg_toplevel: Option<xdg_toplevel::XdgToplevel>,
+    pub wl_surface: Option<wl_surface::WlSurface>,
     pub title: String,
     pub app_id: String,
     pub x: i32,
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    pub configured_serial: Option<u32>,
+    pub pending_map: bool,
 }
 
 pub struct OutputInfo {
@@ -84,6 +93,11 @@ impl Default for CompositorState {
                 refresh: 60000,
                 name: "AXIOM-1".to_string(),
             },
+            pointers: Vec::new(),
+            keyboards: Vec::new(),
+            pointer_pos: (0.0, 0.0),
+            focused_surface: None,
+            serial_counter: 1,
         }
     }
 }
@@ -316,6 +330,29 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for CompositorState {
 }
 
 // REAL wl_surface protocol implementation
+impl CompositorState {
+    // Helpers to send minimal input events
+    fn next_serial(&mut self) -> u32 { let s = self.serial_counter; self.serial_counter = self.serial_counter.wrapping_add(1); s }
+    fn send_pointer_enter_if_needed(&mut self, surface: &wl_surface::WlSurface) {
+        if self.focused_surface.as_ref() != Some(surface) {
+            self.focused_surface = Some(surface.clone());
+            let serial = self.next_serial();
+            for p in &self.pointers {
+                // Surface-local coords: use current pointer_pos
+                p.enter(serial, surface.clone(), self.pointer_pos.0 as f64, self.pointer_pos.1 as f64);
+            }
+        }
+    }
+    fn send_pointer_motion(&mut self, x: f64, y: f64) {
+        self.pointer_pos = (x, y);
+        let time_ms = 0u32; // placeholder
+        for p in &self.pointers {
+            p.motion(time_ms, x, y);
+        }
+    }
+}
+
+// REAL wl_surface protocol implementation
 impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
     fn request(
         state: &mut Self,
@@ -348,6 +385,21 @@ impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
                 {
                     surface.committed = true;
                     info!("✅ Surface committed and ready to render!");
+                }
+
+                // If there is a corresponding xdg_surface that has acked configure, map the window
+                if let Some(win) = state
+                    .windows
+                    .iter_mut()
+                    .find(|w| w.wl_surface.as_ref() == Some(resource))
+                {
+                    if win.pending_map {
+                        info!("🗺️ Mapping window at ({}, {}) size {}x{}", win.x, win.y, win.width, win.height);
+                        // Minimal mapping: nothing to render yet, but marked as mapped
+                        win.pending_map = false;
+                        // Set pointer focus to this surface on first map
+                        state.send_pointer_enter_if_needed(resource);
+                    }
                 }
             }
             wl_surface::Request::Damage {
@@ -509,9 +561,9 @@ impl GlobalDispatch<xdg_wm_base::XdgWmBase, ()> for CompositorState {
 
 impl Dispatch<xdg_wm_base::XdgWmBase, ()> for CompositorState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
-        resource: &xdg_wm_base::XdgWmBase,
+        _resource: &xdg_wm_base::XdgWmBase,
         request: xdg_wm_base::Request,
         _data: &(),
         _dhandle: &DisplayHandle,
@@ -521,6 +573,21 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for CompositorState {
             xdg_wm_base::Request::GetXdgSurface { id, surface } => {
                 let xdg_surface = data_init.init(id, ());
                 info!("🪟 XDG surface created for window!");
+
+                // Track association between wl_surface and xdg_surface by creating a placeholder window
+                state.windows.push(Window {
+                    xdg_surface: xdg_surface.clone(),
+                    xdg_toplevel: None,
+                    wl_surface: Some(surface.clone()),
+                    title: String::new(),
+                    app_id: String::new(),
+                    x: 100,
+                    y: 100,
+                    width: 800,
+                    height: 600,
+                    configured_serial: None,
+                    pending_map: false,
+                });
             }
             xdg_wm_base::Request::CreatePositioner { id } => {
                 data_init.init(id, ());
@@ -548,21 +615,37 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for CompositorState {
                 let toplevel = data_init.init(id, ());
                 info!("🎉 REAL WINDOW CREATED! XDG Toplevel ready!");
 
-                // Create a window entry
-                state.windows.push(Window {
-                    xdg_surface: resource.clone(),
-                    xdg_toplevel: Some(toplevel.clone()),
-                    title: String::new(),
-                    app_id: String::new(),
-                    x: 100,
-                    y: 100,
-                    width: 800,
-                    height: 600,
-                });
-
-                // Send initial configure with suggested size
-                toplevel.configure(800, 600, vec![]);
-                resource.configure(1);
+                // Find placeholder window created at GetXdgSurface and attach toplevel
+                if let Some(win) = state
+                    .windows
+                    .iter_mut()
+                    .rev()
+                    .find(|w| w.xdg_surface == *resource && w.xdg_toplevel.is_none())
+                {
+                    win.xdg_toplevel = Some(toplevel.clone());
+                    // Send initial configure with suggested size and remember serial
+                    toplevel.configure(800, 600, vec![]);
+                    let serial = 1u32; // minimal serial tracking; could be incremented per configure
+                    win.configured_serial = Some(serial);
+                    resource.configure(serial);
+                    win.pending_map = true;
+                } else {
+                    // If not found, create a new entry as fallback
+                    state.windows.push(Window {
+                        xdg_surface: resource.clone(),
+                        xdg_toplevel: Some(toplevel.clone()),
+                        wl_surface: None,
+                        title: String::new(),
+                        app_id: String::new(),
+                        x: 100,
+                        y: 100,
+                        width: 800,
+                        height: 600,
+                        configured_serial: Some(1),
+                        pending_map: true,
+                    });
+                    resource.configure(1);
+                }
             }
             xdg_surface::Request::GetPopup { id, .. } => {
                 data_init.init(id, ());
@@ -570,6 +653,15 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for CompositorState {
             }
             xdg_surface::Request::AckConfigure { serial } => {
                 info!("✅ Configure acknowledged: serial={}", serial);
+                // Mark window ready to map after commit
+                if let Some(win) = state
+                    .windows
+                    .iter_mut()
+                    .find(|w| w.xdg_surface == *resource)
+                {
+                    win.configured_serial = Some(serial);
+                    win.pending_map = true;
+                }
             }
             _ => {}
         }
@@ -578,9 +670,9 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for CompositorState {
 
 impl Dispatch<xdg_toplevel::XdgToplevel, ()> for CompositorState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
-        _resource: &xdg_toplevel::XdgToplevel,
+        resource: &xdg_toplevel::XdgToplevel,
         request: xdg_toplevel::Request,
         _data: &(),
         _dhandle: &DisplayHandle,
@@ -589,9 +681,23 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for CompositorState {
         match request {
             xdg_toplevel::Request::SetTitle { title } => {
                 info!("📝 Window title: '{}'", title);
+                if let Some(win) = state
+                    .windows
+                    .iter_mut()
+                    .find(|w| w.xdg_toplevel.as_ref() == Some(resource))
+                {
+                    win.title = title;
+                }
             }
             xdg_toplevel::Request::SetAppId { app_id } => {
                 info!("📦 Window app ID: '{}'", app_id);
+                if let Some(win) = state
+                    .windows
+                    .iter_mut()
+                    .find(|w| w.xdg_toplevel.as_ref() == Some(resource))
+                {
+                    win.app_id = app_id;
+                }
             }
             _ => {}
         }
@@ -642,7 +748,7 @@ impl GlobalDispatch<wl_seat::WlSeat, ()> for CompositorState {
 
 impl Dispatch<wl_seat::WlSeat, ()> for CompositorState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         _resource: &wl_seat::WlSeat,
         request: wl_seat::Request,
@@ -652,11 +758,13 @@ impl Dispatch<wl_seat::WlSeat, ()> for CompositorState {
     ) {
         match request {
             wl_seat::Request::GetKeyboard { id } => {
-                data_init.init(id, ());
+                let kb = data_init.init(id, ());
+                state.keyboards.push(kb);
                 debug!("Keyboard requested");
             }
             wl_seat::Request::GetPointer { id } => {
-                data_init.init(id, ());
+                let ptr = data_init.init(id, ());
+                state.pointers.push(ptr);
                 debug!("Pointer requested");
             }
             _ => {}
