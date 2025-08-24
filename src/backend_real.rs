@@ -30,7 +30,7 @@ use calloop::EventLoop;
 use crate::config::AxiomConfig;
 use crate::decoration::DecorationManager;
 use crate::effects::EffectsEngine;
-use crate::input::{CompositorAction, InputEvent, InputManager, MouseButton};
+use crate::input::{InputEvent, InputManager, MouseButton};
 use crate::window::{AxiomWindow, WindowManager};
 use crate::workspace::ScrollableWorkspaces;
 
@@ -247,7 +247,7 @@ impl RealBackend {
         loop {
             // Accept new clients
             if let Ok(Some(stream)) = self.listening_socket.accept() {
-                let client = self
+                let _client = self
                     .display
                     .handle()
                     .insert_client(stream, Arc::new(ClientDataImpl))
@@ -340,7 +340,7 @@ impl CompositorState {
             if let Some(prev) = self.focused_surface.take() {
                 let serial = self.next_serial();
                 for p in &self.pointers {
-                    p.leave(serial, prev.clone());
+p.leave(serial, &prev);
                 }
             }
             // set new focus and send enter
@@ -348,7 +348,7 @@ impl CompositorState {
             let serial = self.next_serial();
             for p in &self.pointers {
                 // Surface-local coords: use current pointer_pos
-                p.enter(serial, surface.clone(), self.pointer_pos.0 as f64, self.pointer_pos.1 as f64);
+p.enter(serial, surface, self.pointer_pos.0 as f64, self.pointer_pos.1 as f64);
             }
         }
     }
@@ -432,7 +432,14 @@ impl CompositorState {
             57 => "Space".to_string(),
             105 => "Left".to_string(),
             106 => "Right".to_string(),
-            _ => format!("Key{}
+            _ => format!("Key{}", keycode),
+        };
+
+        if let Some(im) = input_mgr.as_deref_mut() {
+            let _ = im.process_input_event(InputEvent::Keyboard { key: key_str, modifiers, pressed });
+        }
+    }
+}
 
 // REAL wl_surface protocol implementation
 impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
@@ -578,14 +585,14 @@ impl Dispatch<wl_shm_pool::WlShmPool, (RawFd, i32)> for CompositorState {
         _client: &Client,
         _resource: &wl_shm_pool::WlShmPool,
         request: wl_shm_pool::Request,
-        data: &(RawFd, i32),
+        _data: &(RawFd, i32),
         _dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
             wl_shm_pool::Request::CreateBuffer {
                 id,
-                offset,
+                offset: _,
                 width,
                 height,
                 stride,
@@ -762,7 +769,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for CompositorState {
     ) {
         match request {
             xdg_toplevel::Request::SetTitle { title } => {
-                info!("📝 Window title: '{}'", title);
+info!("📝 Window title: {}", title);
                 if let Some(win) = state
                     .windows
                     .iter_mut()
@@ -772,7 +779,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for CompositorState {
                 }
             }
             xdg_toplevel::Request::SetAppId { app_id } => {
-                info!("📦 Window app ID: '{}'", app_id);
+info!("📦 Window app ID: {}", app_id);
                 if let Some(win) = state
                     .windows
                     .iter_mut()

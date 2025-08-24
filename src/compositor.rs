@@ -3,8 +3,9 @@
 //! This module contains the main AxiomCompositor struct and event loop.
 //! It coordinates between all subsystems: workspaces, effects, input, etc.
 //!
-//! This implementation uses Smithay for proper Wayland compositor functionality
-//! with window management, surface handling, and protocol support.
+//! This implementation can optionally use Smithay for proper Wayland compositor functionality
+//! with window management, surface handling, and protocol support when the
+//! `experimental-smithay` feature is enabled.
 
 use anyhow::{Context, Result};
 use log::{debug, info, warn};
@@ -16,10 +17,13 @@ use crate::effects::EffectsEngine;
 use crate::input::InputManager;
 use crate::ipc::AxiomIPCServer;
 use crate::renderer::AxiomRenderer;
-use crate::smithay_backend_phase6::AxiomSmithayBackendPhase6;
 use crate::window::WindowManager;
 use crate::workspace::ScrollableWorkspaces;
 use crate::xwayland::XWaylandManager;
+
+// Import Smithay backend only when experimental feature is enabled
+#[cfg(feature = "experimental-smithay")]
+use crate::experimental::smithay::smithay_backend_phase6::AxiomSmithayBackendPhase6;
 
 /// Main compositor struct that orchestrates all subsystems
 pub struct AxiomCompositor {
@@ -35,7 +39,8 @@ pub struct AxiomCompositor {
     xwayland_manager: Option<XWaylandManager>,
     ipc_server: AxiomIPCServer,
 
-    // Smithay backend for Wayland compositor functionality
+    // Smithay backend for Wayland compositor functionality (when experimental feature is enabled)
+    #[cfg(feature = "experimental-smithay")]
     smithay_backend: AxiomSmithayBackendPhase6,
 
     // Renderer (headless for now, scaffolding real GPU path)
@@ -47,8 +52,9 @@ pub struct AxiomCompositor {
 
 impl AxiomCompositor {
     /// Create a new Axiom compositor instance
+    #[cfg(feature = "experimental-smithay")]
     pub async fn new(config: AxiomConfig, windowed: bool) -> Result<Self> {
-        info!("🏗️ Initializing Axiom compositor...");
+        info!("🏗️ Initializing Axiom compositor with Smithay backend...");
 
         // Initialize our custom subsystems
         debug!("📱 Initializing scrollable workspaces...");
@@ -144,6 +150,72 @@ impl AxiomCompositor {
         })
     }
 
+    /// Create a new Axiom compositor instance without Smithay backend
+    #[cfg(not(feature = "experimental-smithay"))]
+    pub async fn new(config: AxiomConfig, windowed: bool) -> Result<Self> {
+        info!("🏗️ Initializing Axiom compositor without Smithay backend...");
+
+        // Initialize our custom subsystems
+        debug!("📱 Initializing scrollable workspaces...");
+        let workspace_manager = ScrollableWorkspaces::new(&config.workspace)?;
+
+        debug!("✨ Initializing effects engine...");
+        let effects_engine = EffectsEngine::new(&config.effects)?;
+
+        debug!("🪟 Initializing window manager...");
+        let window_manager = WindowManager::new(&config.window)?;
+
+        debug!("🎨 Initializing decoration manager...");
+        let decoration_manager = DecorationManager::new(&config.window);
+
+        debug!("⌨️ Initializing input manager...");
+        let input_manager = InputManager::new(&config.input, &config.bindings)?;
+
+        // Initialize XWayland (if enabled)
+        let xwayland_manager = if config.xwayland.enabled {
+            debug!("🔗 Initializing XWayland...");
+            Some(XWaylandManager::new(&config.xwayland).await?)
+        } else {
+            warn!("🚫 XWayland disabled - X11 apps will not work");
+            None
+        };
+
+        // Initialize IPC server for Lazy UI integration
+        debug!("🔗 Initializing IPC server...");
+        let mut ipc_server = AxiomIPCServer::new();
+        ipc_server
+            .start()
+            .await
+            .context("Failed to start IPC server")?;
+
+        warn!("⚠️ Smithay backend disabled - running in simulation mode only");
+
+        // Initialize a headless renderer as scaffolding for real GPU rendering
+        let renderer = match AxiomRenderer::new_headless().await {
+            Ok(r) => Some(r),
+            Err(e) => {
+                warn!("⚠️ Failed to initialize headless renderer: {}", e);
+                None
+            }
+        };
+
+        info!("✅ All subsystems initialized successfully");
+
+        Ok(Self {
+            config,
+            windowed,
+            workspace_manager,
+            effects_engine,
+            window_manager,
+            decoration_manager,
+            input_manager,
+            xwayland_manager,
+            ipc_server,
+            renderer,
+            running: false,
+        })
+    }
+
     /// Start the compositor main event loop
     pub async fn run(mut self) -> Result<()> {
         info!("🎬 Starting Axiom compositor event loop");
@@ -177,10 +249,26 @@ impl AxiomCompositor {
     }
 
     /// Phase 3: Process all pending compositor events with real input handling
+    #[cfg(feature = "experimental-smithay")]
     async fn process_events(&mut self) -> Result<()> {
         // Process backend events (Wayland, input devices)
         self.smithay_backend.process_events().await?;
 
+        // Process IPC messages from Lazy UI
+        if let Err(e) = self.ipc_server.process_messages().await {
+            warn!("⚠️ Error processing IPC messages: {}", e);
+        }
+
+        // Phase 3: Simulate input processing for demonstration
+        // In a real implementation, this would receive events from Smithay
+        self.process_simulated_input_events().await?;
+
+        Ok(())
+    }
+
+    /// Phase 3: Process all pending compositor events without Smithay backend
+    #[cfg(not(feature = "experimental-smithay"))]
+    async fn process_events(&mut self) -> Result<()> {
         // Process IPC messages from Lazy UI
         if let Err(e) = self.ipc_server.process_messages().await {
             warn!("⚠️ Error processing IPC messages: {}", e);
@@ -390,7 +478,8 @@ impl AxiomCompositor {
         }
     }
 
-    /// Gracefully shutdown the compositor
+    /// Gracefully shutdown the compositor (with Smithay backend)
+    #[cfg(feature = "experimental-smithay")]
     async fn shutdown(&mut self) -> Result<()> {
         info!("🔽 Shutting down Axiom compositor...");
 
@@ -407,6 +496,30 @@ impl AxiomCompositor {
         self.smithay_backend.shutdown().await?;
 
         // Clean up other subsystems
+        debug!("🧩 Cleaning up compositor subsystems...");
+        self.input_manager.shutdown()?;
+        self.effects_engine.shutdown()?;
+        self.workspace_manager.shutdown()?;
+        self.window_manager.shutdown()?;
+
+        info!("✅ Axiom compositor shutdown complete");
+        Ok(())
+    }
+
+    /// Gracefully shutdown the compositor (without Smithay backend)
+    #[cfg(not(feature = "experimental-smithay"))]
+    async fn shutdown(&mut self) -> Result<()> {
+        info!("🔽 Shutting down Axiom compositor...");
+
+        self.running = false;
+
+        // Clean up XWayland first
+        if let Some(ref mut xwayland) = self.xwayland_manager {
+            debug!("🔗 Shutting down XWayland...");
+            xwayland.shutdown().await?;
+        }
+
+        // Clean up other subsystems (no Smithay backend)
         debug!("🧩 Cleaning up compositor subsystems...");
         self.input_manager.shutdown()?;
         self.effects_engine.shutdown()?;

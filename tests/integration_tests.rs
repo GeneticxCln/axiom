@@ -84,7 +84,7 @@ async fn test_configuration_system() -> Result<()> {
     // Test default configuration
     let default_config = AxiomConfig::default();
     assert!(default_config.effects.enabled);
-    assert!(default_config.workspace.column_width > 0.0);
+assert!(default_config.workspace.workspace_width > 0);
 
     // Test configuration serialization
     let toml_str = toml::to_string(&default_config)?;
@@ -238,8 +238,8 @@ async fn test_error_recovery() -> Result<()> {
     use axiom::effects::EffectsEngine;
 
     // Test effects engine with invalid configuration
-    let mut bad_config = EffectsConfig::default();
-    bad_config.blur_radius = -1.0; // Invalid value
+let mut bad_config = EffectsConfig::default();
+    bad_config.blur.intensity = -1.0; // Invalid value
 
     // Should handle gracefully or provide meaningful error
     let result = EffectsEngine::new(&bad_config);

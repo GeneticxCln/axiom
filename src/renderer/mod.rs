@@ -5,8 +5,10 @@
 
 use anyhow::Result;
 use log::{debug, info};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use wgpu::*;
+use std::time::Duration;
 
 /// Real GPU rendering pipeline
 pub struct AxiomRenderer {
@@ -45,6 +47,21 @@ pub struct RenderedWindow {
 struct Vertex {
     position: [f32; 3],
     tex_coords: [f32; 2],
+}
+
+static RENDER_STATE: OnceLock<Arc<Mutex<SharedRenderState>>> = OnceLock::new();
+
+#[derive(Default)]
+struct SharedRenderState {
+    placeholders: HashMap<u64, ((f32, f32), (f32, f32), f32)>,
+}
+
+pub fn push_placeholder_quad(id: u64, position: (f32, f32), size: (f32, f32), opacity: f32) {
+    if let Some(state) = RENDER_STATE.get() {
+        if let Ok(mut s) = state.lock() {
+            s.placeholders.insert(id, (position, size, opacity));
+        }
+    }
 }
 
 impl AxiomRenderer {
@@ -367,6 +384,34 @@ impl AxiomRenderer {
     /// Get number of rendered windows
     pub fn window_count(&self) -> usize {
         self.windows.len()
+    }
+
+    /// Start a simple headless render loop at ~60 FPS for development
+    pub async fn start_headless_loop() -> Result<tokio::task::JoinHandle<()>> {
+        let mut renderer = Self::new_headless().await?;
+        // Initialize shared render state if not already
+        let _ = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+        info!("🖥️ Starting headless render loop (~60 FPS)");
+
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_millis(16));
+            loop {
+                ticker.tick().await;
+                // Sync placeholders into renderer's window list
+                if let Some(state) = RENDER_STATE.get() {
+                    if let Ok(s) = state.lock() {
+                        for (id, (pos, size, opacity)) in s.placeholders.iter() {
+                            renderer.upsert_window_rect(*id, *pos, *size, *opacity);
+                        }
+                    }
+                }
+                if let Err(e) = renderer.render() {
+                    debug!("render error: {}", e);
+                }
+            }
+        });
+
+        Ok(handle)
     }
 }
 

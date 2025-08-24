@@ -358,8 +358,8 @@ async fn demo_advanced_features(compositor: &mut AxiomCompositor) -> Result<()> 
             .animate_window_open(window_id);
 
         // Add some movement for visual flair
-        let from = (i as f32 * 150.0, 50.0);
-        let to = (i as f32 * 150.0, 300.0);
+        let _from = (i as f32 * 150.0, 50.0);
+        let _to = (i as f32 * 150.0, 300.0);
 
         tokio::spawn(async move {
             sleep(Duration::from_millis(300)).await;

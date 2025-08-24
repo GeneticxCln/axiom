@@ -112,6 +112,20 @@ pub struct ScrollableWorkspaces {
 }
 
 impl ScrollableWorkspaces {
+    /// Backwards-compatible helper used by older tests: remove_window_* returning bool
+    pub fn remove_window_bool(&mut self, window_id: u64) -> bool {
+        self.remove_window(window_id).is_some()
+    }
+
+    /// Check if a window exists in any column
+    pub fn window_exists(&self, window_id: u64) -> bool {
+        self.columns.values().any(|c| c.windows.contains(&window_id))
+    }
+
+    /// Whether infinite scroll is enabled
+    pub fn is_infinite_scroll_enabled(&self) -> bool {
+        self.config.infinite_scroll
+    }
     pub fn new(config: &WorkspaceConfig) -> Result<Self> {
         let mut workspace_manager = Self {
             config: config.clone(),

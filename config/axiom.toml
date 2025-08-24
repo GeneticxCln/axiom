@@ -52,14 +52,16 @@ touchpad_tap = true
 natural_scrolling = true
 
 [bindings]
-scroll_left = "Super_L+Left"
-scroll_right = "Super_L+Right"
-move_window_left = "Super_L+Shift+Left"
-move_window_right = "Super_L+Shift+Right"
-close_window = "Super_L+q"
-launch_terminal = "Super_L+Return"
-launch_launcher = "Super_L+d"
-toggle_effects = "Super_L+e"
+scroll_left = "Super+Left"
+scroll_right = "Super+Right"
+move_window_left = "Super+Shift+Left"
+move_window_right = "Super+Shift+Right"
+close_window = "Super+q"
+toggle_fullscreen = "Super+f"
+launch_terminal = "Super+Enter"
+launch_launcher = "Super+Space"
+toggle_effects = "Super+e"
+quit = "Super+Shift+q"
 
 [xwayland]
 enabled = true

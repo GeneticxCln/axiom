@@ -149,7 +149,7 @@ async fn demonstrate_wayland_functionality() -> Result<()> {
 }
 
 /// Demonstrate integration between existing systems and new Wayland functionality
-async fn demonstrate_integration(compositor: &mut AxiomCompositor) -> Result<()> {
+async fn demonstrate_integration(_compositor: &mut AxiomCompositor) -> Result<()> {
     info!("🔗 Demo 3: System Integration");
     info!("=============================");
 

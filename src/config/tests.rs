@@ -122,6 +122,9 @@ move_window_left = 'Super+Shift+Left'
 move_window_right = 'Super+Shift+Right'
 close_window = 'Super+q'
 toggle_fullscreen = 'Super+f'
+launch_terminal = 'Super+Enter'
+launch_launcher = 'Super+Space'
+toggle_effects = 'Super+e'
 quit = 'Super+Shift+q'
 
 [xwayland]
@@ -130,6 +133,9 @@ lazy_loading = true
 scale_factor = 1.0
 
 [general]
+debug = false
+max_fps = 0
+vsync = true
 compositor_name = "axiom"
 socket_name = "axiom"
 log_level = "info"
@@ -269,11 +275,8 @@ fn test_xwayland_config() {
     config.enabled = true;
     assert!(config.enabled);
 
-    // Test scale_factor field
-    assert_eq!(config.scale_factor, 1.0);
-
-    config.scale_factor = 1.5;
-    assert_eq!(config.scale_factor, 1.5);
+// Test display field defaults
+    assert!(config.display.is_none());
 }
 
 // Helper function to validate keybinding format

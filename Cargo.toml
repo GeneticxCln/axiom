@@ -16,27 +16,38 @@ path = "src/main.rs"
 [[bin]]
 name = "test_real_backend"
 path = "src/test_real_backend.rs"
-required-features = ["real-compositor"]
+required-features = ["real-compositor", "experimental-smithay"]
+test = false
 
 [[bin]]
 name = "test_basic"
 path = "src/test_basic.rs"
 required-features = ["demo"]
+test = false
+
+# Gate examples by a feature so they don't break default builds/tests
+[[example]]
+name = "metrics_client"
+path = "examples/metrics_client.rs"
+required-features = ["examples"]
 
 [[bin]]
 name = "test_socket"
 path = "src/test_socket.rs"
 required-features = ["demo"]
+test = false
 
 [[bin]]
 name = "test_real"
 path = "src/test_real.rs"
-required-features = ["real-compositor"]
+required-features = ["real-compositor", "experimental-smithay"]
+test = false
 
 [[bin]]
 name = "run_real_backend"
 path = "src/bin/run_real_backend.rs"
-required-features = ["real-compositor"]
+required-features = ["real-compositor", "experimental-smithay"]
+test = false
 
 [dependencies]
 # Configuration and serialization
@@ -118,6 +129,8 @@ default = []
 demo = []
 real-compositor = []
 wgpu-present = []
+examples = []
+experimental-smithay = []
 
 # Development dependencies for testing
 [dev-dependencies]
