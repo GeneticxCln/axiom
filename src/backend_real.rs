@@ -439,6 +439,7 @@ impl CompositorState {
             let _ = im.process_input_event(InputEvent::Keyboard { key: key_str, modifiers, pressed });
         }
     }
+}
 
 // REAL wl_surface protocol implementation
 impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
