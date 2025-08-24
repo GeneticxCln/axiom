@@ -13,7 +13,8 @@ use log::{debug, info, warn};
 use std::os::unix::io::AsRawFd;
 use std::time::Instant;
 
-// WGPU
+// WGPU (optional)
+#[cfg(feature = "wgpu-present")]
 use wgpu::util::DeviceExt;
 
 use smithay::{
@@ -97,6 +98,7 @@ pub struct MinimalCompositorState {
     pub renderer: Option<Gles2Renderer>,
 
     // Optional WGPU state for presenting frames
+    #[cfg(feature = "wgpu-present")]
     pub wgpu: Option<WgpuState>,
 
     // Output
@@ -110,6 +112,7 @@ pub struct MinimalCompositorState {
 }
 
 // Minimal WGPU state to present frames
+#[cfg(feature = "wgpu-present")]
 pub struct WgpuState {
     pub instance: wgpu::Instance,
     pub surface: wgpu::Surface,
@@ -178,6 +181,7 @@ impl MinimalCompositorState {
             pointer,
             backend: None,
             renderer: None,
+            #[cfg(feature = "wgpu-present")]
             wgpu: None,
             output,
             windows: Vec::new(),
@@ -403,6 +407,8 @@ impl MinimalRealBackend {
             // Assuming smithay's WinitGraphicsBackend exposes a window() accessor
             let window = backend.window();
 
+            #[cfg(feature = "wgpu-present")]
+            {
             // Initialize WGPU
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::PRIMARY,
@@ -437,6 +443,7 @@ impl MinimalRealBackend {
             surface.configure(&device, &config);
 
             state.wgpu = Some(WgpuState { instance, surface, adapter, device, queue, config });
+            }
 
             state.backend = Some(backend);
             state.renderer = Some(renderer);
@@ -462,6 +469,7 @@ impl MinimalRealBackend {
                             None,
                         );
                         // Reconfigure WGPU surface
+                        #[cfg(feature = "wgpu-present")]
                         if let Some(wgpu) = state.wgpu.as_mut() {
                             wgpu.config.width = size.w.max(1);
                             wgpu.config.height = size.h.max(1);
@@ -508,6 +516,7 @@ impl MinimalRealBackend {
 
     fn render_frame(state: &mut MinimalCompositorState) -> Result<()> {
         // Prefer WGPU if available
+        #[cfg(feature = "wgpu-present")]
         if let Some(wgpu) = state.wgpu.as_mut() {
             let frame = match wgpu.surface.get_current_texture() {
                 Ok(frame) => frame,
@@ -539,7 +548,7 @@ impl MinimalRealBackend {
             return Ok(());
         }
 
-        // Fallback to GLES2 path if WGPU is not available
+        // Fallback to GLES2 path if WGPU is not available or feature disabled
         let renderer = state.renderer.as_mut().unwrap();
         let backend = state.backend.as_mut().unwrap();
 
