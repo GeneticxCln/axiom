@@ -30,7 +30,7 @@ use calloop::EventLoop;
 use crate::config::AxiomConfig;
 use crate::decoration::DecorationManager;
 use crate::effects::EffectsEngine;
-use crate::input::InputManager;
+use crate::input::{CompositorAction, InputEvent, InputManager, MouseButton};
 use crate::window::{AxiomWindow, WindowManager};
 use crate::workspace::ScrollableWorkspaces;
 
@@ -333,8 +333,17 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for CompositorState {
 impl CompositorState {
     // Helpers to send minimal input events
     fn next_serial(&mut self) -> u32 { let s = self.serial_counter; self.serial_counter = self.serial_counter.wrapping_add(1); s }
+
     fn send_pointer_enter_if_needed(&mut self, surface: &wl_surface::WlSurface) {
         if self.focused_surface.as_ref() != Some(surface) {
+            // send leave to previous
+            if let Some(prev) = self.focused_surface.take() {
+                let serial = self.next_serial();
+                for p in &self.pointers {
+                    p.leave(serial, prev.clone());
+                }
+            }
+            // set new focus and send enter
             self.focused_surface = Some(surface.clone());
             let serial = self.next_serial();
             for p in &self.pointers {
@@ -343,6 +352,7 @@ impl CompositorState {
             }
         }
     }
+
     fn send_pointer_motion(&mut self, x: f64, y: f64) {
         self.pointer_pos = (x, y);
         let time_ms = 0u32; // placeholder
@@ -350,7 +360,79 @@ impl CompositorState {
             p.motion(time_ms, x, y);
         }
     }
-}
+
+    fn send_pointer_button(&mut self, button: u32, pressed: bool) {
+        let serial = self.next_serial();
+        let time_ms = 0u32;
+        let state = if pressed { wl_pointer::ButtonState::Pressed } else { wl_pointer::ButtonState::Released };
+        for p in &self.pointers {
+            p.button(serial, time_ms, button, state);
+        }
+    }
+
+    fn surface_at(&self, x: f64, y: f64) -> Option<wl_surface::WlSurface> {
+        // Simple hit-test: first window whose rect contains point
+        for w in self.windows.iter() {
+            if w.pending_map { continue; }
+            let rx = w.x as f64;
+            let ry = w.y as f64;
+            let rw = w.width as f64;
+            let rh = w.height as f64;
+            if x >= rx && y >= ry && x < rx + rw && y < ry + rh {
+                if let Some(ref s) = w.wl_surface { return Some(s.clone()); }
+            }
+        }
+        None
+    }
+
+    pub fn handle_pointer_motion(&mut self, x: f64, y: f64, mut input_mgr: Option<&mut InputManager>) {
+        // Hit test and update focus if needed
+        if let Some(surface) = self.surface_at(x, y) {
+            self.send_pointer_enter_if_needed(&surface);
+        }
+        self.send_pointer_motion(x, y);
+
+        // Forward to InputManager as a MouseMove
+        if let Some(im) = input_mgr.as_deref_mut() {
+            let _ = im.process_input_event(InputEvent::MouseMove { x, y, delta_x: 0.0, delta_y: 0.0 });
+        }
+    }
+
+    pub fn handle_pointer_button(&mut self, button: u32, pressed: bool, mut input_mgr: Option<&mut InputManager>) {
+        self.send_pointer_button(button, pressed);
+        if let Some(im) = input_mgr.as_deref_mut() {
+            let btn = match button {
+                0x110 => MouseButton::Left,
+                0x111 => MouseButton::Right,
+                0x112 => MouseButton::Middle,
+                _ => MouseButton::Other((button & 0xFF) as u8),
+            };
+            let (x, y) = self.pointer_pos;
+            let _ = im.process_input_event(InputEvent::MouseButton { button: btn, pressed, x, y });
+        }
+    }
+
+    pub fn handle_key_event(&mut self, keycode: u32, pressed: bool, modifiers: Vec<String>, mut input_mgr: Option<&mut InputManager>) {
+        // Broadcast to all wl_keyboard resources
+        let serial = self.next_serial();
+        let time_ms = 0u32;
+        let state = if pressed { wl_keyboard::KeyState::Pressed } else { wl_keyboard::KeyState::Released };
+        for kb in &self.keyboards {
+            kb.key(serial, time_ms, keycode, state);
+        }
+
+        // Minimal mapping from keycode to key string (placeholder)
+        let key_str = match keycode {
+            1 => "Escape".to_string(),
+            16 => "Q".to_string(),
+            17 => "W".to_string(),
+            30 => "A".to_string(),
+            31 => "S".to_string(),
+            44 => "Z".to_string(),
+            57 => "Space".to_string(),
+            105 => "Left".to_string(),
+            106 => "Right".to_string(),
+            _ => format!("Key{}
 
 // REAL wl_surface protocol implementation
 impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {

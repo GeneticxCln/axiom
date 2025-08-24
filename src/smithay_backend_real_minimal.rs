@@ -13,6 +13,10 @@ use log::{debug, info, warn};
 use std::os::unix::io::AsRawFd;
 use std::time::Instant;
 
+// WGPU (optional)
+#[cfg(feature = "wgpu-present")]
+use wgpu::util::DeviceExt;
+
 use smithay::{
     backend::{
         allocator::{dmabuf::Dmabuf, Format, Fourcc, Modifier},
@@ -93,6 +97,10 @@ pub struct MinimalCompositorState {
     pub backend: Option<WinitGraphicsBackend>,
     pub renderer: Option<Gles2Renderer>,
 
+    // Optional WGPU state for presenting frames
+    #[cfg(feature = "wgpu-present")]
+    pub wgpu: Option<WgpuState>,
+
     // Output
     pub output: Output,
 
@@ -101,6 +109,17 @@ pub struct MinimalCompositorState {
 
     // Socket name
     pub socket_name: String,
+}
+
+// Minimal WGPU state to present frames
+#[cfg(feature = "wgpu-present")]
+pub struct WgpuState {
+    pub instance: wgpu::Instance,
+    pub surface: wgpu::Surface,
+    pub adapter: wgpu::Adapter,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub config: wgpu::SurfaceConfiguration,
 }
 
 impl MinimalCompositorState {
@@ -162,6 +181,8 @@ impl MinimalCompositorState {
             pointer,
             backend: None,
             renderer: None,
+            #[cfg(feature = "wgpu-present")]
+            wgpu: None,
             output,
             windows: Vec::new(),
             socket_name: String::new(),
@@ -382,6 +403,48 @@ impl MinimalRealBackend {
         // Store backend and renderer in state
         {
             let mut state = state_rc.borrow_mut();
+            // SAFETY: we need the window to create a WGPU surface
+            // Assuming smithay's WinitGraphicsBackend exposes a window() accessor
+            let window = backend.window();
+
+            #[cfg(feature = "wgpu-present")]
+            {
+            // Initialize WGPU
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::PRIMARY,
+                dx12_shader_compiler: Default::default(),
+                flags: wgpu::InstanceFlags::default(),
+                gles_minor_version: wgpu::Gles3MinorVersion::Automatic,
+            });
+            let surface = unsafe { instance.create_surface(window) }.expect("create_surface");
+            let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })).expect("request_adapter");
+            let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                features: wgpu::Features::empty(),
+                limits: wgpu::Limits::default(),
+                label: Some("axiom-device"),
+            }, None)).expect("request_device");
+
+            let size = window.inner_size();
+            let surface_caps = surface.get_capabilities(&adapter);
+            let format = surface_caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(surface_caps.formats[0]);
+            let config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format,
+                width: size.width.max(1),
+                height: size.height.max(1),
+                present_mode: surface_caps.present_modes[0],
+                alpha_mode: surface_caps.alpha_modes[0],
+                view_formats: vec![],
+            };
+            surface.configure(&device, &config);
+
+            state.wgpu = Some(WgpuState { instance, surface, adapter, device, queue, config });
+            }
+
             state.backend = Some(backend);
             state.renderer = Some(renderer);
 
@@ -405,6 +468,13 @@ impl MinimalRealBackend {
                             None,
                             None,
                         );
+                        // Reconfigure WGPU surface
+                        #[cfg(feature = "wgpu-present")]
+                        if let Some(wgpu) = state.wgpu.as_mut() {
+                            wgpu.config.width = size.w.max(1);
+                            wgpu.config.height = size.h.max(1);
+                            wgpu.surface.configure(&wgpu.device, &wgpu.config);
+                        }
                     }
                     WinitEvent::Input(event) => {
                         // Handle input event
@@ -445,33 +515,48 @@ impl MinimalRealBackend {
     }
 
     fn render_frame(state: &mut MinimalCompositorState) -> Result<()> {
+        // Prefer WGPU if available
+        #[cfg(feature = "wgpu-present")]
+        if let Some(wgpu) = state.wgpu.as_mut() {
+            let frame = match wgpu.surface.get_current_texture() {
+                Ok(frame) => frame,
+                Err(e) => {
+                    // Try to recover by reconfiguring
+                    wgpu.surface.configure(&wgpu.device, &wgpu.config);
+                    wgpu.surface.get_current_texture()?
+                }
+            };
+            let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = wgpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("axiom-render-encoder"),
+            });
+            {
+                let _rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("axiom-clear-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.08, g: 0.09, b: 0.11, a: 1.0 }), store: true },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+            }
+            wgpu.queue.submit(Some(encoder.finish()));
+            frame.present();
+            return Ok(());
+        }
+
+        // Fallback to GLES2 path if WGPU is not available or feature disabled
         let renderer = state.renderer.as_mut().unwrap();
         let backend = state.backend.as_mut().unwrap();
 
         // Bind the renderer to the backend
         backend.bind()?;
 
-        // Get output size
-        let output_size = state.output.current_mode().unwrap().size;
-
         // Clear the frame
         renderer.clear([0.1, 0.1, 0.1, 1.0])?;
-
-        // Render all windows in the space
-        let elements = state
-            .space
-            .elements()
-            .map(|window| {
-                let location = state.space.element_location(window).unwrap_or_default();
-                (window.clone(), location)
-            })
-            .collect::<Vec<_>>();
-
-        for (window, location) in elements {
-            // Render the window
-            debug!("Rendering window at {:?}", location);
-            // TODO: Actual rendering of window surfaces
-        }
 
         // Finish the frame
         backend.submit(None)?;

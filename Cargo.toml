@@ -117,6 +117,7 @@ path = "src/lib.rs"
 default = []
 demo = []
 real-compositor = []
+wgpu-present = []
 
 # Development dependencies for testing
 [dev-dependencies]
