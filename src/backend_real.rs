@@ -433,6 +433,12 @@ impl CompositorState {
             105 => "Left".to_string(),
             106 => "Right".to_string(),
             _ => format!("Key{}", keycode),
+        };
+
+        if let Some(im) = input_mgr.as_deref_mut() {
+            let _ = im.process_input_event(InputEvent::Keyboard { key: key_str, modifiers, pressed });
+        }
+    }
 
 // REAL wl_surface protocol implementation
 impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
