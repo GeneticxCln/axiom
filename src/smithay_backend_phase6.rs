@@ -142,7 +142,7 @@ impl AxiomSmithayBackendPhase6 {
         }
 
         // Process Wayland events (basic for now)
-        if let Some(ref mut display) = self.display {
+        if let Some(ref mut _display) = self.display {
             // For Phase 6.1, we don't need to flush yet as we have no protocols
             // display.flush_clients() requires state parameter in Smithay 0.3.0
         }
@@ -177,7 +177,7 @@ impl AxiomSmithayBackendPhase6 {
 
         // Your decoration system continues to work
         {
-            let decoration_manager = self.decoration_manager.read();
+            let _decoration_manager = self.decoration_manager.read();
             for _layout in workspace_layouts.values() {
                 // Decoration calculations continue as normal
             }
@@ -248,7 +248,7 @@ impl AxiomSmithayBackendPhase6 {
         self.running = false;
 
         // Clean up Wayland display
-        if let Some(display) = self.display.take() {
+        if let Some(_display) = self.display.take() {
             info!("🔌 Closing Wayland display");
             // Display will be dropped and cleaned up automatically
         }

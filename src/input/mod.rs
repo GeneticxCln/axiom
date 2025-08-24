@@ -1,5 +1,6 @@
 //! Phase 3: Enhanced input handling and key bindings
 //! Manages keyboard, mouse, and gesture input with real processing
+#![allow(missing_docs)]
 
 use crate::config::{BindingsConfig, InputConfig};
 use anyhow::Result;

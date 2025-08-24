@@ -247,7 +247,7 @@ impl RealBackend {
         loop {
             // Accept new clients
             if let Ok(Some(stream)) = self.listening_socket.accept() {
-                let client = self
+                let _client = self
                     .display
                     .handle()
                     .insert_client(stream, Arc::new(ClientDataImpl))
@@ -585,14 +585,14 @@ impl Dispatch<wl_shm_pool::WlShmPool, (RawFd, i32)> for CompositorState {
         _client: &Client,
         _resource: &wl_shm_pool::WlShmPool,
         request: wl_shm_pool::Request,
-        data: &(RawFd, i32),
+        _data: &(RawFd, i32),
         _dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
             wl_shm_pool::Request::CreateBuffer {
                 id,
-                offset,
+                offset: _,
                 width,
                 height,
                 stride,

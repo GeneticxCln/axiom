@@ -2,6 +2,7 @@
 //!
 //! This module handles all visual effects: animations, blur, shadows,
 //! rounded corners, and other eye candy that makes Axiom beautiful.
+#![allow(missing_docs)]
 
 use crate::config::EffectsConfig;
 use crate::effects::animations::AnimationStats;

@@ -438,7 +438,7 @@ impl DecorationManager {
     }
 
     /// Handle mouse button release
-    pub fn handle_button_release(&mut self, window_id: u64, x: i32, y: i32) {
+    pub fn handle_button_release(&mut self, window_id: u64, _x: i32, _y: i32) {
         if let Some(decoration) = self.decorations.get_mut(&window_id) {
             decoration.buttons.close.pressed = false;
             decoration.buttons.minimize.pressed = false;
@@ -459,7 +459,7 @@ impl DecorationManager {
     }
 
     /// Update button positions based on window size and theme
-    fn update_button_positions(&self, window_id: u64, decoration: &mut WindowDecoration) {
+    fn update_button_positions(&self, _window_id: u64, decoration: &mut WindowDecoration) {
         if decoration.mode != DecorationMode::ServerSide {
             return;
         }
