@@ -396,16 +396,23 @@ impl ScrollableWorkspaces {
                 velocity,
             } => {
                 let elapsed = now.duration_since(start_time).as_secs_f64();
-                let friction: f64 = 0.95; // Friction coefficient
+                let friction: f64 = self.config.momentum_friction.max(0.0).min(0.9999);
 
                 // Apply friction to velocity
                 let current_velocity = velocity * friction.powf(elapsed * 60.0);
 
-                if current_velocity.abs() < 1.0 {
-                    // Momentum has died down, snap to nearest column
+                if current_velocity.abs() < self.config.momentum_min_velocity {
+                    // Momentum has died down, snap to nearest column if close enough
                     let nearest_column =
                         (self.current_position / self.config.workspace_width as f64).round() as i32;
-                    self.scroll_to_column(nearest_column);
+                    let target_pos = nearest_column as f64 * self.config.workspace_width as f64;
+                    if (self.current_position - target_pos).abs() <= self.config.snap_threshold_px {
+                        self.scroll_to_column(nearest_column);
+                    } else {
+                        // If not close, continue gentle deceleration towards target
+                        self.current_position = start_position + velocity * elapsed;
+                        self.scroll_velocity = current_velocity;
+                    }
                 } else {
                     // Update position based on momentum
                     self.current_position = start_position + velocity * elapsed;

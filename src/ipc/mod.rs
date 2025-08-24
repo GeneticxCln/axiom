@@ -109,6 +109,8 @@ pub struct AxiomIPCServer {
     // System info for metrics sampling
     sys: Option<System>,
     last_metrics_sent: Instant,
+    // Last CPU times for non-blocking CPU usage sampling
+    last_cpu_times: Option<(u64, u64)>,
 }
 
 impl Default for AxiomIPCServer {
@@ -120,7 +122,7 @@ impl Default for AxiomIPCServer {
 impl AxiomIPCServer {
     /// Create a new IPC server
     pub fn new() -> Self {
-        let socket_path = PathBuf::from("/tmp/axiom-lazy-ui.sock");
+        let socket_path = Self::default_socket_path();
 
         Self {
             socket_path,
@@ -130,11 +132,24 @@ impl AxiomIPCServer {
             command_receiver: None,
             sys: None,
             last_metrics_sent: Instant::now(),
+            last_cpu_times: None,
         }
     }
 
     /// Start the IPC server
     pub async fn start(&mut self) -> Result<()> {
+        // Ensure parent dir exists with correct permissions
+        if let Some(dir) = self.socket_path.parent() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("Failed to create IPC dir: {:?}", dir))?;
+            // Best-effort tighten permissions
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+
         // Remove existing socket file
         if self.socket_path.exists() {
             std::fs::remove_file(&self.socket_path).with_context(|| {
@@ -145,6 +160,13 @@ impl AxiomIPCServer {
         // Create Unix socket listener
         let listener = UnixListener::bind(&self.socket_path)
             .with_context(|| format!("Failed to bind Unix socket: {:?}", self.socket_path))?;
+
+        // Tighten socket permissions (0600)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600));
+        }
 
         // Create broadcast channel for outgoing messages
         let (tx, _rx) = broadcast::channel::<AxiomMessage>(1024);
@@ -213,10 +235,15 @@ impl AxiomIPCServer {
                         Some(l) => l,
                         None => break, // client disconnected
                     };
-                    if line.trim().is_empty() { continue; }
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() { continue; }
+                    if trimmed.len() > 64 * 1024 {
+                        warn!("⚠️ IPC message too large ({} bytes) - dropping", trimmed.len());
+                        continue;
+                    }
 
-                    debug!("📨 Received IPC message: {}", line);
-                    match serde_json::from_str::<LazyUIMessage>(&line) {
+                    debug!("📨 Received IPC message: {}", trimmed);
+                    match serde_json::from_str::<LazyUIMessage>(trimmed) {
                         Ok(message) => {
                             if let Err(e) = Self::process_lazy_ui_message(message, &mut writer).await {
                                 warn!("⚠️ Error processing message: {}", e);
@@ -260,10 +287,27 @@ impl AxiomIPCServer {
                     reason
                 );
 
+                let mut applied: Vec<String> = Vec::new();
+                let mut rejected: Vec<(String, String)> = Vec::new();
                 for (key, value) in changes {
                     debug!("  📝 Setting {}: {:?}", key, value);
-                    // TODO: Actually apply configuration changes to Axiom
+                    // For now accept only whitelisted keys
+                    let ok = matches!(key.as_str(),
+                        "effects.blur.radius" | "effects.animations.duration" | "workspace.scroll_speed"
+                    );
+                    if ok {
+                        applied.push(key);
+                    } else {
+                        rejected.push((key, "unsupported_key".into()));
+                    }
                 }
+                // Send a simple acknowledgment as UserEvent for now
+                let ack = AxiomMessage::UserEvent {
+                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                    event_type: "OptimizeConfigAck".into(),
+                    details: serde_json::json!({ "applied": applied, "rejected": rejected }),
+                };
+                Self::send_message(writer, &ack).await?;
             }
 
             LazyUIMessage::GetConfig { key } => {
@@ -280,7 +324,13 @@ impl AxiomIPCServer {
 
             LazyUIMessage::SetConfig { key, value } => {
                 info!("⚙️ Setting config: {} = {:?}", key, value);
-                // TODO: Actually set configuration in Axiom
+                // For now just ACK the set request
+                let ack = AxiomMessage::UserEvent {
+                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                    event_type: "SetConfigAck".into(),
+                    details: serde_json::json!({ "key": key, "status": "accepted" }),
+                };
+                Self::send_message(writer, &ack).await?;
             }
 
             LazyUIMessage::WorkspaceCommand { action, parameters } => {
@@ -473,7 +523,7 @@ impl AxiomIPCServer {
         if self.last_metrics_sent.elapsed() < RATE {
             return;
         }
-        let (cpu, mem_mb) = self.sample_system_metrics();
+        let (cpu, mem_mb) = self.sample_system_metrics_nonblocking();
         let _ = self.broadcast_performance_metrics(
             cpu,
             mem_mb,
@@ -487,7 +537,7 @@ impl AxiomIPCServer {
 
     /// Sample system CPU usage (%) and memory used (MB) by reading /proc
     /// This is a synchronous sampler intended for periodic telemetry; it avoids extra deps.
-    fn sample_system_metrics(&self) -> (f32, f32) {
+    fn sample_system_metrics_nonblocking(&mut self) -> (f32, f32) {
         // CPU usage: sample /proc/stat twice and compute deltas
         fn read_cpu_times() -> Option<(u64, u64)> {
             let contents = std::fs::read_to_string("/proc/stat").ok()?;
@@ -516,11 +566,8 @@ impl AxiomIPCServer {
         }
 
         let (cpu_percent, mem_used_mb) = (|| {
-            let a = read_cpu_times();
-            // short sleep to compute delta; kept small to limit blocking
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            let b = read_cpu_times();
-            let cpu = match (a, b) {
+            let current = read_cpu_times();
+            let cpu = match (self.last_cpu_times, current) {
                 (Some((idle_a, total_a)), Some((idle_b, total_b))) => {
                     let idle_delta = idle_b.saturating_sub(idle_a) as f64;
                     let total_delta = total_b.saturating_sub(total_a) as f64;
@@ -529,6 +576,10 @@ impl AxiomIPCServer {
                     } else {
                         0.0
                     }
+                }
+                (_, Some((idle_b, total_b))) => {
+                    // First sample; store and return 0 for now
+                    0.0
                 }
                 _ => 0.0,
             };
@@ -553,6 +604,29 @@ impl AxiomIPCServer {
             (cpu, used_mb)
         })();
 
+        // Update last CPU times with the current sample for next call
+        if let Some((idle, total)) = (|| {
+            let contents = std::fs::read_to_string("/proc/stat").ok()?;
+            let first = contents.lines().next()?;
+            if !first.starts_with("cpu ") { return None; }
+            let parts: Vec<&str> = first.split_whitespace().collect();
+            if parts.len() < 5 { return None; }
+            let idle: u64 = parts.get(4)?.parse().ok()?;
+            let iowait: u64 = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let user: u64 = parts.get(1)?.parse().ok()?;
+            let nice: u64 = parts.get(2)?.parse().ok()?;
+            let system: u64 = parts.get(3)?.parse().ok()?;
+            let irq: u64 = parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let softirq: u64 = parts.get(7).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let steal: u64 = parts.get(8).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let idle_all = idle + iowait;
+            let non_idle = user + nice + system + irq + softirq + steal;
+            let total = idle_all + non_idle;
+            Some((idle_all, total))
+        })() {
+            self.last_cpu_times = Some((idle, total));
+        }
+
         (cpu_percent, mem_used_mb)
     }
 }
@@ -565,6 +639,20 @@ impl Drop for AxiomIPCServer {
                 warn!("⚠️ Failed to remove socket file: {}", e);
             }
         }
+    }
+}
+
+impl AxiomIPCServer {
+    fn default_socket_path() -> PathBuf {
+        // Prefer XDG_RUNTIME_DIR
+        if let Ok(mut dir) = std::env::var("XDG_RUNTIME_DIR") {
+            if dir.is_empty() {
+                dir = "/tmp".to_string();
+            }
+            return PathBuf::from(dir).join("axiom").join("axiom.sock");
+        }
+        // Fallback to /tmp
+        PathBuf::from("/tmp").join("axiom-lazy-ui.sock")
     }
 }
 

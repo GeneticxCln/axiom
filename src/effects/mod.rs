@@ -260,6 +260,13 @@ impl EffectsEngine {
 
     /// Update all animations and effects
     pub fn update(&mut self) -> Result<()> {
+        if !self.config.enabled {
+            // If globally disabled, keep minimal stats and return
+            self.frame_time = Duration::from_millis(16);
+            self.effects_quality = 0.0;
+            self.last_update = Instant::now();
+            return Ok(());
+        }
         let now = Instant::now();
         let delta_time = now.duration_since(self.last_update);
         self.last_update = now;
@@ -307,7 +314,7 @@ impl EffectsEngine {
 
     /// Start a window opening animation
     pub fn animate_window_open(&mut self, window_id: u64) {
-        if !self.animations_enabled {
+        if !self.animations_enabled || !self.config.enabled {
             return;
         }
 
@@ -331,7 +338,7 @@ impl EffectsEngine {
 
     /// Start a window closing animation
     pub fn animate_window_close(&mut self, window_id: u64) {
-        if !self.animations_enabled {
+        if !self.animations_enabled || !self.config.enabled {
             return;
         }
 
@@ -351,7 +358,7 @@ impl EffectsEngine {
 
     /// Start a window movement animation
     pub fn animate_window_move(&mut self, window_id: u64, from: (f32, f32), to: (f32, f32)) {
-        if !self.animations_enabled {
+        if !self.animations_enabled || !self.config.enabled {
             return;
         }
 
@@ -389,7 +396,7 @@ impl EffectsEngine {
 
     /// Apply blur effect to a window
     pub fn apply_blur_effect(&self, window_id: u64, _surface_data: &mut [u8]) {
-        if !self.blur_params.enabled {
+        if !self.blur_params.enabled || !self.config.enabled {
             return;
         }
 

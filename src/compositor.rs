@@ -15,6 +15,7 @@ use crate::decoration::DecorationManager;
 use crate::effects::EffectsEngine;
 use crate::input::InputManager;
 use crate::ipc::AxiomIPCServer;
+use crate::renderer::AxiomRenderer;
 use crate::smithay_backend_phase6::AxiomSmithayBackendPhase6;
 use crate::window::WindowManager;
 use crate::workspace::ScrollableWorkspaces;
@@ -36,6 +37,9 @@ pub struct AxiomCompositor {
 
     // Smithay backend for Wayland compositor functionality
     smithay_backend: AxiomSmithayBackendPhase6,
+
+    // Renderer (headless for now, scaffolding real GPU path)
+    renderer: Option<AxiomRenderer>,
 
     // Event loop state
     running: bool,
@@ -113,6 +117,15 @@ impl AxiomCompositor {
             .await
             .context("Failed to initialize Smithay backend")?;
 
+        // Initialize a headless renderer as scaffolding for real GPU rendering
+        let renderer = match AxiomRenderer::new_headless().await {
+            Ok(r) => Some(r),
+            Err(e) => {
+                warn!("⚠️ Failed to initialize headless renderer: {}", e);
+                None
+            }
+        };
+
         info!("✅ All subsystems initialized successfully");
 
         Ok(Self {
@@ -126,6 +139,7 @@ impl AxiomCompositor {
             xwayland_manager,
             ipc_server,
             smithay_backend,
+            renderer,
             running: false,
         })
     }
@@ -242,11 +256,16 @@ impl AxiomCompositor {
             }
             CompositorAction::CloseWindow => {
                 debug!("🎨 Input triggered: Close window");
-                // TODO: Close focused window
+                if let Some(focused_id) = self.window_manager.focused_window_id() {
+                    self.remove_window(focused_id);
+                    self.effects_engine.animate_window_close(focused_id);
+                }
             }
             CompositorAction::ToggleFullscreen => {
                 debug!("🎨 Input triggered: Toggle fullscreen");
-                // TODO: Toggle fullscreen for focused window
+                if let Some(focused_id) = self.window_manager.focused_window_id() {
+                    let _ = self.window_manager.toggle_fullscreen(focused_id);
+                }
             }
             CompositorAction::Quit => {
                 info!("💼 Input triggered: Quit compositor");
@@ -272,7 +291,7 @@ impl AxiomCompositor {
         // 3. Calculate workspace layouts for all visible windows
         let workspace_layouts = self.workspace_manager.calculate_workspace_layouts();
 
-        // 4. Update window positions and apply effects
+        // 4. Update window positions, apply effects, and push to renderer
         for (window_id, layout_rect) in workspace_layouts {
             if let Some(window) = self.window_manager.get_window_mut(window_id) {
                 // Check if window position changed (for move animations)
@@ -294,10 +313,15 @@ impl AxiomCompositor {
                     .window
                     .set_size(layout_rect.width, layout_rect.height);
 
-                // Apply visual effects if window has them
+                // Determine render-time transforms
+                let mut scale = 1.0_f32;
+                let mut opacity = 1.0_f32;
+                let mut offset = (0.0_f32, 0.0_f32);
+
                 if let Some(effect_state) = self.effects_engine.get_window_effects(window_id) {
-                    // Apply scale, opacity, and position offsets
-                    // In a real implementation, this would modify the rendering pipeline
+                    scale = effect_state.scale;
+                    opacity = effect_state.opacity;
+                    offset = effect_state.position_offset;
                     debug!(
                         "✨ Window {} effects: scale={:.2}, opacity={:.2}, corner_radius={:.1}",
                         window_id,
@@ -306,6 +330,22 @@ impl AxiomCompositor {
                         effect_state.corner_radius
                     );
                 }
+
+                // Feed to renderer (headless placeholder): apply scale and offset
+                if let Some(renderer) = self.renderer.as_mut() {
+                    let x = layout_rect.x as f32 + offset.0;
+                    let y = layout_rect.y as f32 + offset.1;
+                    let w = layout_rect.width as f32 * scale;
+                    let h = layout_rect.height as f32 * scale;
+                    renderer.upsert_window_rect(window_id, (x, y), (w, h), opacity);
+                }
+            }
+        }
+
+        // Render with headless renderer for now
+        if let Some(renderer) = self.renderer.as_mut() {
+            if let Err(e) = renderer.render() {
+                warn!("⚠️ Renderer error: {}", e);
             }
         }
 

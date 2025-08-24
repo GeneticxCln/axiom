@@ -180,6 +180,33 @@ impl AxiomRenderer {
         Ok(())
     }
 
+    /// Upsert a window rectangle without a texture (simple colored quad placeholder)
+    pub fn upsert_window_rect(
+        &mut self,
+        id: u64,
+        position: (f32, f32),
+        size: (f32, f32),
+        opacity: f32,
+    ) {
+        if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
+            w.position = position;
+            w.size = size;
+            w.opacity = opacity;
+            w.dirty = true;
+        } else {
+            let window = RenderedWindow {
+                id,
+                position,
+                size,
+                texture: None,
+                texture_view: None,
+                dirty: true,
+                opacity,
+            };
+            self.windows.push(window);
+        }
+    }
+
     /// Update window texture with actual pixel data
     pub fn update_window_texture(
         &mut self,
@@ -254,7 +281,10 @@ impl AxiomRenderer {
             if window.texture_view.is_some() {
                 debug!("✅ Would render window {} with texture", window.id);
             } else {
-                debug!("⚠️ Window {} has no texture to render", window.id);
+                debug!(
+                    "🟦 Rendering placeholder quad for window {} at ({:.1},{:.1}) size {:.1}x{:.1} opacity {:.2}",
+                    window.id, window.position.0, window.position.1, window.size.0, window.size.1, window.opacity
+                );
             }
         }
 
@@ -265,7 +295,7 @@ impl AxiomRenderer {
     /// Render all windows to a wgpu surface (real rendering)
     pub fn render_to_surface(
         &mut self,
-        _surface: &wgpu::Surface,
+        _surface: &wgpu::Surface<'_>,
         surface_texture: &wgpu::SurfaceTexture,
     ) -> Result<()> {
         debug!("🎨 Rendering {} windows to surface", self.windows.len());

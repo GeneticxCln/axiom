@@ -13,7 +13,9 @@ import sys
 
 def test_axiom_ipc():
     """Test communication with Axiom compositor via IPC."""
-    socket_path = "/tmp/axiom-lazy-ui.sock"
+    import os
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    socket_path = os.path.join(runtime_dir, "axiom", "axiom.sock")
     
     print("🔍 Testing Axiom IPC communication...")
     
@@ -89,7 +91,8 @@ def main():
     
     # Test if socket exists
     import os
-    socket_path = "/tmp/axiom-lazy-ui.sock"
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    socket_path = os.path.join(runtime_dir, "axiom", "axiom.sock")
     
     if not os.path.exists(socket_path):
         print(f"⚠️  Socket file not found: {socket_path}")

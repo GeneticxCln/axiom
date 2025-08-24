@@ -168,6 +168,11 @@ impl WindowManager {
         self.focused_window.and_then(|id| self.windows.get(&id))
     }
 
+    /// Get the currently focused window id
+    pub fn focused_window_id(&self) -> Option<u64> {
+        self.focused_window
+    }
+
     /// Calculate window layout for tiling
     #[allow(dead_code)]
     pub fn calculate_layout(&self, workspace_bounds: Rectangle) -> Vec<(u64, Rectangle)> {
@@ -235,6 +240,14 @@ impl WindowManager {
     pub fn set_window_properties(&mut self, id: u64, properties: WindowProperties) -> Result<()> {
         if let Some(window) = self.windows.get_mut(&id) {
             window.properties = properties;
+        }
+        Ok(())
+    }
+
+    /// Toggle fullscreen for a window
+    pub fn toggle_fullscreen(&mut self, id: u64) -> Result<()> {
+        if let Some(window) = self.windows.get_mut(&id) {
+            window.properties.fullscreen = !window.properties.fullscreen;
         }
         Ok(())
     }
