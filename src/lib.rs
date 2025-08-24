@@ -75,13 +75,11 @@ pub mod workspace;
 pub mod xwayland;
 pub mod renderer;
 
-// Real backend modules
-pub mod axiom_real_compositor;
+// Real backend modules (non-smithay)
 pub mod backend_real;
 
-// Backend modules
-pub mod smithay_backend_phase6;
-pub mod smithay_backend_simple;
+// Experimental features module
+pub mod experimental;
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

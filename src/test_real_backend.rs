@@ -5,8 +5,8 @@
 use anyhow::Result;
 use log::info;
 
-mod smithay_backend_real_minimal;
-use smithay_backend_real_minimal::MinimalRealBackend;
+// Import the experimental smithay backend
+use axiom::experimental::smithay::smithay_backend_real_minimal::MinimalRealBackend;
 
 fn main() -> Result<()> {
     // Initialize logging

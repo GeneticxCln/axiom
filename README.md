@@ -146,27 +146,81 @@ sudo dnf install rust cargo wayland-devel wayland-protocols-devel
 
 ## ⚙️ Configuration
 
-Axiom uses a single TOML configuration file combining the best of both worlds:
+Axiom uses a single TOML configuration file. Below is a minimal, valid example including all required sections/fields so it parses cleanly:
 
 ```toml
 # ~/.config/axiom/axiom.toml
 [workspace]
 scroll_speed = 1.0
 infinite_scroll = true
+auto_scroll = true
+workspace_width = 1920
+gaps = 10
+smooth_scrolling = true
 
-[animations] 
+[effects]
+enabled = true
+
+[effects.animations]
 enabled = true
 duration = 300
 curve = "ease-out"
+workspace_transition = 250
+window_animation = 200
 
-[effects]
-blur_radius = 10
-rounded_corners = 8
-shadow_size = 20
+[effects.blur]
+enabled = true
+radius = 10
+intensity = 0.8
+window_backgrounds = true
+
+[effects.rounded_corners]
+enabled = true
+radius = 8
+antialiasing = 2
+
+[effects.shadows]
+enabled = true
+size = 20
+blur_radius = 15
+opacity = 0.6
+color = "#000000"
+
+[window]
+placement = "smart"
+focus_follows_mouse = false
+border_width = 2
+active_border_color = "#7C3AED"
+inactive_border_color = "#374151"
+gap = 10
+default_layout = "horizontal"
+
+[input]
+keyboard_repeat_delay = 600
+keyboard_repeat_rate = 25
+mouse_accel = 0.0
+touchpad_tap = true
+natural_scrolling = true
 
 [bindings]
-scroll_left = "Super_L+Left"
-scroll_right = "Super_L+Right"
+scroll_left = "Super+Left"
+scroll_right = "Super+Right"
+move_window_left = "Super+Shift+Left"
+move_window_right = "Super+Shift+Right"
+close_window = "Super+q"
+toggle_fullscreen = "Super+f"
+launch_terminal = "Super+Enter"
+launch_launcher = "Super+Space"
+toggle_effects = "Super+e"
+quit = "Super+Shift+q"
+
+[xwayland]
+enabled = true
+
+[general]
+debug = false
+max_fps = 60
+vsync = true
 ```
 
 ## 🤖 AI Integration

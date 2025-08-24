@@ -21,9 +21,6 @@ use log::{error, info};
 
 mod compositor;
 mod decoration;
-mod smithay_backend_real;
-mod smithay_backend_simple; // Real Smithay implementation
-                            // mod smithay_backend_production;  // Phase 6: Production Smithay backend (disabled for now)
 mod config;
 mod demo_phase4_effects;
 mod demo_phase6_minimal;
@@ -32,13 +29,15 @@ mod demo_workspace;
 mod effects;
 mod input;
 mod ipc;
-mod smithay_backend_minimal; // Phase 6.1: Minimal working backend
-mod smithay_backend_phase6; // Phase 6.1: WORKING Smithay backend
-mod smithay_backend_phase6_2; // Phase 6.2: Full protocol implementation
 mod window;
 mod workspace;
 mod xwayland;
 mod renderer;
+mod experimental;
+
+// Smithay backend modules - only available with experimental-smithay feature
+#[cfg(feature = "experimental-smithay")]
+use experimental::smithay::*;
 
 use compositor::AxiomCompositor;
 use config::AxiomConfig;
@@ -153,11 +152,12 @@ async fn main() -> Result<()> {
 }
 
 /// Run Phase 6.2 Smithay backend demo with protocol simulation
+#[cfg(feature = "experimental-smithay")]
 async fn run_phase6_2_demo(config: AxiomConfig, windowed: bool) -> Result<()> {
     use crate::decoration::DecorationManager;
     use crate::effects::EffectsEngine;
     use crate::input::InputManager;
-    use crate::smithay_backend_phase6_2::AxiomSmithayBackendPhase6_2;
+    use crate::experimental::smithay::smithay_backend_phase6_2::AxiomSmithayBackendPhase6_2;
     use crate::window::WindowManager;
     use crate::workspace::ScrollableWorkspaces;
     use parking_lot::RwLock;
@@ -205,6 +205,12 @@ async fn run_phase6_2_demo(config: AxiomConfig, windowed: bool) -> Result<()> {
 
     info!("🎯 Phase 6.2 demo completed successfully!");
     Ok(())
+}
+
+/// Fallback version when experimental-smithay feature is not enabled
+#[cfg(not(feature = "experimental-smithay"))]
+async fn run_phase6_2_demo(_config: AxiomConfig, _windowed: bool) -> Result<()> {
+    anyhow::bail!("Phase 6.2 Smithay demo requires the 'experimental-smithay' feature to be enabled");
 }
 
 #[cfg(test)]
