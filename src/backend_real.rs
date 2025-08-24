@@ -432,7 +432,7 @@ impl CompositorState {
             57 => "Space".to_string(),
             105 => "Left".to_string(),
             106 => "Right".to_string(),
-            _ => format!("Key{}
+            _ => format!("Key{}", keycode),
 
 // REAL wl_surface protocol implementation
 impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
@@ -762,7 +762,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for CompositorState {
     ) {
         match request {
             xdg_toplevel::Request::SetTitle { title } => {
-                info!("📝 Window title: '{}'", title);
+info!("📝 Window title: {}", title);
                 if let Some(win) = state
                     .windows
                     .iter_mut()
@@ -772,7 +772,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for CompositorState {
                 }
             }
             xdg_toplevel::Request::SetAppId { app_id } => {
-                info!("📦 Window app ID: '{}'", app_id);
+info!("📦 Window app ID: {}", app_id);
                 if let Some(win) = state
                     .windows
                     .iter_mut()
