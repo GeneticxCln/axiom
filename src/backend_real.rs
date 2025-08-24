@@ -30,7 +30,7 @@ use calloop::EventLoop;
 use crate::config::AxiomConfig;
 use crate::decoration::DecorationManager;
 use crate::effects::EffectsEngine;
-use crate::input::{CompositorAction, InputEvent, InputManager, MouseButton};
+use crate::input::{InputEvent, InputManager, MouseButton};
 use crate::window::{AxiomWindow, WindowManager};
 use crate::workspace::ScrollableWorkspaces;
 
@@ -340,7 +340,7 @@ impl CompositorState {
             if let Some(prev) = self.focused_surface.take() {
                 let serial = self.next_serial();
                 for p in &self.pointers {
-                    p.leave(serial, prev.clone());
+p.leave(serial, &prev);
                 }
             }
             // set new focus and send enter
@@ -348,7 +348,7 @@ impl CompositorState {
             let serial = self.next_serial();
             for p in &self.pointers {
                 // Surface-local coords: use current pointer_pos
-                p.enter(serial, surface.clone(), self.pointer_pos.0 as f64, self.pointer_pos.1 as f64);
+p.enter(serial, surface, self.pointer_pos.0 as f64, self.pointer_pos.1 as f64);
             }
         }
     }
