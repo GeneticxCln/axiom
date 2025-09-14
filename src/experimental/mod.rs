@@ -8,5 +8,6 @@
 //!
 //! - `smithay`: Experimental Smithay-based Wayland compositor backends
 
-#[cfg(feature = "experimental-smithay")]
+// Enable smithay module if either experimental-smithay or smithay-minimal is on
+#[cfg(any(feature = "experimental-smithay", feature = "smithay-minimal"))]
 pub mod smithay;

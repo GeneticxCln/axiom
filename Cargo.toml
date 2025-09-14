@@ -131,7 +131,10 @@ demo = []
 real-compositor = []
 wgpu-present = ["pollster"]
 examples = []
+# Master switch for all experimental Smithay backends (many are scaffolding)
 experimental-smithay = []
+# Compile only the minimal real backend and protocol helpers (safe subset)
+smithay-minimal = []
 
 # Development dependencies for testing
 [dev-dependencies]

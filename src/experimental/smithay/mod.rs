@@ -26,28 +26,34 @@
 //! - `multi_output`: Multi-monitor support
 //! - `wayland_protocols`: Extended Wayland protocol implementations
 
-// Core smithay backend implementations
-pub mod smithay_backend;
-pub mod smithay_backend_minimal;
-pub mod smithay_backend_simple;
-pub mod smithay_backend_working;
-pub mod smithay_backend_real;
-pub mod smithay_backend_real_minimal;
-pub mod smithay_backend_production;
-pub mod smithay_backend_phase6;
-pub mod smithay_backend_phase6_2;
-pub mod smithay_enhanced;
-
-// Real compositor components
-pub mod axiom_real_compositor;
-pub mod real_smithay;
-pub mod real_input;
-pub mod real_window;
-pub mod multi_output;
+// Keep protocol helpers always available when smithay is enabled
 pub mod wayland_protocols;
 
-// Re-export commonly used types for convenience
-pub use smithay_backend::*;
-pub use smithay_backend_phase6_2::AxiomSmithayBackendPhase6_2;
-pub use axiom_real_compositor::*;
-pub use real_smithay::*;
+// Only compile the minimal backend in the safe subset feature
+#[cfg(feature = "smithay-minimal")]
+pub mod smithay_backend_real_minimal;
+
+// The rest of these backends are experimental and often non-compiling.
+// They remain available only under the broad experimental-smithay feature.
+#[cfg(all(feature = "experimental-smithay", not(feature = "smithay-minimal")))]
+pub mod smithay_backend;
+#[cfg(all(feature = "experimental-smithay", not(feature = "smithay-minimal")))]
+pub mod smithay_backend_minimal;
+#[cfg(all(feature = "experimental-smithay", not(feature = "smithay-minimal")))]
+pub mod smithay_backend_simple;
+#[cfg(all(feature = "experimental-smithay", not(feature = "smithay-minimal")))]
+pub mod smithay_backend_working;
+#[cfg(all(feature = "experimental-smithay", not(feature = "smithay-minimal")))]
+pub mod smithay_backend_real;
+#[cfg(all(feature = "experimental-smithay", not(feature = "smithay-minimal")))]
+pub mod smithay_backend_production;
+#[cfg(all(feature = "experimental-smithay", not(feature = "smithay-minimal")))]
+pub mod smithay_backend_phase6;
+#[cfg(all(feature = "experimental-smithay", not(feature = "smithay-minimal")))]
+pub mod smithay_backend_phase6_2;
+#[cfg(all(feature = "experimental-smithay", not(feature = "smithay-minimal")))]
+pub mod smithay_enhanced;
+
+// Minimal, conservative re-exports
+#[cfg(feature = "smithay-minimal")]
+pub use smithay_backend_real_minimal::*;
