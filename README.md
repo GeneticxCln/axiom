@@ -109,6 +109,25 @@ axiom/
 
 ## 🛠️ Building & Running
 
+### Minimal Wayland server (development)
+
+A bare Wayland server is available behind a narrow feature. It implements wl_compositor, wl_shm, wl_output and XDG toplevel lifecycle (configure/ack/commit map). No rendering yet.
+
+- Build
+
+```bash
+cargo build --features "smithay-minimal" --bin run_minimal_wayland
+```
+
+- Run
+
+```bash
+./target/debug/run_minimal_wayland
+# It prints WAYLAND_DISPLAY=... and accepts clients
+```
+
+Limitations: server-only; no rendering, no damage, minimal seat stubs.
+
 ### Quick Start
 
 ```bash
@@ -246,6 +265,13 @@ Axiom seamlessly integrates with the **Lazy UI** optimization system:
 # Test IPC communication in another terminal
 python3 test_ipc.py
 ```
+
+## Branch policy
+
+- main is the only active branch
+- Historical work is archived under tags:
+  - archive/phase5-dev
+  - archive/phase-6-real-smithay
 
 ## 🤝 Contributing
 

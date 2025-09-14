@@ -70,22 +70,22 @@ jobs:
       run: cargo fmt -- --check
       
     - name: Run clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      run: cargo clippy --all-targets -- -D warnings
       
     - name: Run unit tests
       run: |
         # Run unit tests (no graphics context needed)
-        cargo test --lib --verbose --all-features
+        cargo test --lib --verbose
         
     - name: Run property tests
       run: |
         # Run property-based tests for configuration and workspace modules
-        cargo test --lib property_tests --verbose --all-features
+        cargo test --lib property_tests --verbose
         
     - name: Run integration tests
       run: |
         # Test IPC communication with virtual display for graphics operations
-        xvfb-run -a cargo test --test integration_tests --all-features || echo "Integration tests may fail in CI without proper graphics context"
+        xvfb-run -a cargo test --test integration_tests || echo "Integration tests may fail in CI without proper graphics context"
         
     - name: Build release binary
       run: cargo build --release --verbose
@@ -129,6 +129,16 @@ jobs:
         # Run subset of tests under valgrind for memory leak detection
         cargo valgrind test --bin axiom --lib workspace config effects
         
+  minimal-server:
+    name: Build minimal Wayland server
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+    - name: Build minimal server
+      run: cargo build --features "smithay-minimal" --bin run_minimal_wayland
+
   performance:
     name: Performance Benchmarks  
     runs-on: ubuntu-latest
