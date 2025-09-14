@@ -47,7 +47,8 @@
 //! }
 //! ```
 
-#![warn(missing_docs, rust_2018_idioms)]
+#![allow(missing_docs)]
+#![warn(rust_2018_idioms)]
 #![allow(dead_code)] // Remove this once development is complete
 
 // Re-export main compositor

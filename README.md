@@ -165,6 +165,13 @@ sudo dnf install rust cargo wayland-devel wayland-protocols-devel
 
 ## ⚙️ Configuration
 
+Tip: you can start with the example configuration:
+
+```bash
+mkdir -p ~/.config/axiom
+cp examples/axiom.example.toml ~/.config/axiom/axiom.toml
+```
+
 Axiom uses a single TOML configuration file. Below is a minimal, valid example including all required sections/fields so it parses cleanly:
 
 ```toml
