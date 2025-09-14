@@ -98,6 +98,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Graphics and rendering
 wgpu = "0.19"
+pollster = { version = "0.3", optional = true }
 winit = "0.29"
 
 # IPC for Lazy UI integration
@@ -128,7 +129,7 @@ path = "src/lib.rs"
 default = []
 demo = []
 real-compositor = []
-wgpu-present = []
+wgpu-present = ["pollster"]
 examples = []
 experimental-smithay = []
 

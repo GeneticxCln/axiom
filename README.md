@@ -8,7 +8,7 @@
 [![Rust Version](https://img.shields.io/badge/rust-1.70%2B-orange)](#)
 [![License](https://img.shields.io/badge/license-GPLv3-blue)](#)
 [![AI Optimized](https://img.shields.io/badge/AI-optimized-purple)](#)
-[![Phase](https://img.shields.io/badge/phase-4%20complete-brightgreen)](#)
+[![Phase](https://img.shields.io/badge/phase-6%20in%20progress-yellow)](#)
 
 **Where productivity meets beauty.**
 
@@ -62,7 +62,7 @@ axiom/
 │   ├── xwayland/            # X11 compatibility layer
 │   └── ipc/                 # AI integration and IPC communication
 ├── Cargo.toml              # Dependencies and metadata
-├── axiom.toml              # Default configuration
+├── examples/axiom.example.toml   # Example config (copy to ~/.config/axiom/axiom.toml)
 ├── test_ipc.py             # IPC testing script
 └── STATUS.md               # Detailed development status
 ```
@@ -76,7 +76,7 @@ axiom/
 | **Phase 3** | ✅ **COMPLETE** | Enhanced protocols, input handling, real window integration |
 | **Phase 4** | ✅ **COMPLETE** | Visual effects system & polish |
 
-**Current Status**: 🎨 **Phase 4 Complete!** - Advanced visual effects system with GPU-accelerated animations, blur, shadows, and adaptive performance optimization. Ready for production polish!
+**Current Status**: 🌊 **Phase 6 In Progress** — Minimal real Smithay backend available (window creation and basic rendering; optional WGPU present). Protocol handlers and full integration are underway.
 
 ### ✅ What's Working Now (Phase 1)
 
