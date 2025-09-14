@@ -127,17 +127,15 @@ impl MinimalCompositorState {
         let display_handle = display.handle();
         let loop_handle = event_loop.handle();
 
-        // Initialize Wayland protocol states
-        let compositor_state = CompositorState::new::<Self>(&display_handle);
-        let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
-        let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
-        let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
+        // Initialize Wayland protocol states via helpers
+        let compositor_state = crate::experimental::smithay::wayland_protocols::register_compositor::<Self>(&display_handle);
+        let xdg_shell_state = crate::experimental::smithay::wayland_protocols::register_xdg_shell::<Self>(&display_handle);
+        let shm_state = crate::experimental::smithay::wayland_protocols::register_shm::<Self>(&display_handle);
+        let output_manager_state = crate::experimental::smithay::wayland_protocols::register_output_manager::<Self>(&display_handle);
         let mut seat_state = SeatState::new();
 
         // Create a seat with keyboard and pointer
-        let mut seat = seat_state.new_wl_seat(&display_handle, "seat0");
-        let keyboard = seat.add_keyboard(Default::default(), 200, 25)?;
-        let pointer = seat.add_pointer();
+        let (seat, keyboard, pointer) = crate::experimental::smithay::wayland_protocols::create_seat::<Self>(&display_handle, &mut seat_state, "seat0")?;
 
         // Create output
         let output = Output::new(
