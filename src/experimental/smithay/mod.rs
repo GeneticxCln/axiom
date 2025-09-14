@@ -26,12 +26,16 @@
 //! - `multi_output`: Multi-monitor support
 //! - `wayland_protocols`: Extended Wayland protocol implementations
 
-// Keep protocol helpers always available when smithay is enabled
+// Protocol helpers are only available with the full experimental Smithay feature
+#[cfg(feature = "experimental-smithay")]
 pub mod wayland_protocols;
 
 // Only compile the minimal backend in the safe subset feature
 #[cfg(feature = "smithay-minimal")]
-pub mod smithay_backend_real_minimal;
+pub mod minimal_server;
+
+#[cfg(feature = "smithay-minimal")]
+pub use minimal_server::*;
 
 // The rest of these backends are experimental and often non-compiling.
 // They remain available only under the broad experimental-smithay feature.
@@ -54,6 +58,4 @@ pub mod smithay_backend_phase6_2;
 #[cfg(all(feature = "experimental-smithay", not(feature = "smithay-minimal")))]
 pub mod smithay_enhanced;
 
-// Minimal, conservative re-exports
-#[cfg(feature = "smithay-minimal")]
-pub use smithay_backend_real_minimal::*;
+// Minimal, conservative re-exports handled above for smithay-minimal
