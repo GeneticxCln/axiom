@@ -577,7 +577,7 @@ impl AxiomIPCServer {
                         0.0
                     }
                 }
-                (_, Some((idle_b, total_b))) => {
+(_, Some((_idle_b, _total_b))) => {
                     // First sample; store and return 0 for now
                     0.0
                 }

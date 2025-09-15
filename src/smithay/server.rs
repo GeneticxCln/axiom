@@ -1,30 +1,33 @@
-//! Minimal Wayland server using wayland-server 0.31 and calloop
-//! This is a thin, compiling server that accepts clients and advertises
-//! wl_compositor, wl_shm, wl_output, and xdg_wm_base. No rendering.
+//! Unified Smithay compositor server
+//!
+//! This module provides a single, full compositor backend based on Wayland server
+//! primitives. It integrates with Axiom managers and the GPU renderer for texture
+//! updates and presentation.
 
 use anyhow::{Context, Result};
-use log::{info, debug};
-
-use wayland_protocols::xdg::shell::server::{xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base};
-use wayland_protocols::wp::presentation_time::server::{wp_presentation, wp_presentation_feedback};
-use wayland_protocols::wp::viewporter::server::{wp_viewporter, wp_viewport};
-use wayland_server::{
-    backend::ClientData,
-    protocol::{
-        wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_shm_pool, wl_surface,
-    },
-    Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, ListeningSocket, New,
-    Resource, WEnum,
-};
+use log::{debug, info};
 use memmap2::{Mmap, MmapOptions};
-use std::fs::File;
+use parking_lot::RwLock;
 use std::collections::HashMap;
+use wgpu;
+use std::fs::File;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+use wayland_protocols::wp::presentation_time::server::{wp_presentation, wp_presentation_feedback};
+use wayland_protocols::wp::viewporter::server::{wp_viewport, wp_viewporter};
+use wayland_protocols::xdg::shell::server::{xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_server::{
+    backend::ClientData,
+    protocol::{
+        wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_shm_pool,
+        wl_surface,
+    },
+    Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, ListeningSocket, New, Resource, WEnum,
+};
 
-/// Global compositor state for this minimal server
-pub struct MinimalState {
+/// Global compositor state for this server
+pub struct CompositorState {
     pub seat_name: String,
     pub windows: Vec<WindowEntry>,
     pub serial_counter: u32,
@@ -35,7 +38,7 @@ pub struct MinimalState {
     pub last_frame_time: Instant,
     pub last_ping_time: Instant,
     // Internal event bus queue (drained in run loop)
-    pub events: Vec<ServerEvent>,
+    events: Vec<ServerEvent>,
     // Focused Axiom window id (if any)
     pub focused_window_id: Option<u64>,
     // Pointer state
@@ -46,7 +49,7 @@ pub struct MinimalState {
     // Presentation feedbacks by wl_surface id
     pub presentation_feedbacks: HashMap<u32, Vec<wp_presentation_feedback::WpPresentationFeedback>>,
     // Viewporter state per surface id
-    pub viewport_map: HashMap<u32, ViewportState>,
+    viewport_map: HashMap<u32, ViewportState>,
 }
 
 #[derive(Clone)]
@@ -64,11 +67,10 @@ pub struct WindowEntry {
     pub attach_offset: (i32, i32),
 }
 
-/// A minimal Wayland server that runs a Display and accepts clients
-use parking_lot::RwLock;
-
-pub struct MinimalServer {
-    pub display: Display<MinimalState>,
+/// A single full compositor server that owns the Wayland display and integrates
+/// with Axiom managers and the renderer.
+pub struct CompositorServer {
+    pub display: Display<CompositorState>,
     pub listening: ListeningSocket,
     pub socket_name: String,
     // Axiom managers for integration
@@ -77,6 +79,10 @@ pub struct MinimalServer {
     pub input_manager: Arc<RwLock<crate::input::InputManager>>, 
     // Input channel from evdev thread
     input_rx: Option<Receiver<HwInputEvent>>,
+    // Whether to spawn the headless GPU render loop (disabled when doing on-screen present)
+    spawn_headless_renderer: bool,
+    // Selected WGPU backends for renderer creation
+    selected_backends: wgpu::Backends,
 }
 
 // Internal event bus messages produced by Wayland dispatch and handled in the run loop
@@ -96,23 +102,25 @@ enum HwInputEvent {
     PointerButton { button: u8, pressed: bool },
 }
 
-impl MinimalServer {
+impl CompositorServer {
     pub fn new(
         window_manager: Arc<RwLock<crate::window::WindowManager>>, 
         workspace_manager: Arc<RwLock<crate::workspace::ScrollableWorkspaces>>, 
         input_manager: Arc<RwLock<crate::input::InputManager>>, 
+        spawn_headless_renderer: bool,
+        selected_backends: wgpu::Backends,
     ) -> Result<Self> {
-        let display: Display<MinimalState> = Display::new().context("create display")?;
+        let display: Display<CompositorState> = Display::new().context("create display")?;
         let dh = display.handle();
 
         // Create core globals
-        dh.create_global::<MinimalState, wl_compositor::WlCompositor, _>(4, ());
-        dh.create_global::<MinimalState, wl_shm::WlShm, _>(1, ());
-        dh.create_global::<MinimalState, wl_output::WlOutput, _>(3, ());
-        dh.create_global::<MinimalState, wl_seat::WlSeat, _>(7, ());
-        dh.create_global::<MinimalState, xdg_wm_base::XdgWmBase, _>(3, ());
-        dh.create_global::<MinimalState, wp_presentation::WpPresentation, _>(1, ());
-        dh.create_global::<MinimalState, wp_viewporter::WpViewporter, _>(1, ());
+        dh.create_global::<CompositorState, wl_compositor::WlCompositor, _>(4, ());
+        dh.create_global::<CompositorState, wl_shm::WlShm, _>(1, ());
+        dh.create_global::<CompositorState, wl_output::WlOutput, _>(3, ());
+        dh.create_global::<CompositorState, wl_seat::WlSeat, _>(7, ());
+        dh.create_global::<CompositorState, xdg_wm_base::XdgWmBase, _>(3, ());
+        dh.create_global::<CompositorState, wp_presentation::WpPresentation, _>(1, ());
+        dh.create_global::<CompositorState, wp_viewporter::WpViewporter, _>(1, ());
         debug!("Globals: wl_compositor v4, wl_shm v1, wl_output v3, wl_seat v7, xdg_wm_base v3");
 
         // Bind an auto socket for Wayland
@@ -133,6 +141,8 @@ impl MinimalServer {
             workspace_manager,
             input_manager,
             input_rx,
+            spawn_headless_renderer,
+            selected_backends,
         })
     }
 
@@ -140,14 +150,17 @@ impl MinimalServer {
         std::env::set_var("WAYLAND_DISPLAY", &self.socket_name);
         info!("WAYLAND_DISPLAY={}", self.socket_name);
 
-        // Start headless GPU render loop in a background thread
-        std::thread::spawn(|| {
-            if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                let _ = rt.block_on(async {
-                    let _ = crate::renderer::AxiomRenderer::start_headless_loop().await;
-                });
-            }
-        });
+        // Start headless GPU render loop in a background thread (optional)
+        if self.spawn_headless_renderer {
+            let backends = self.selected_backends;
+            std::thread::spawn(move || {
+                if let Ok(rt) = tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+                    let _ = rt.block_on(async move {
+                        let _ = crate::renderer::AxiomRenderer::start_headless_loop_with_backends(backends).await;
+                    });
+                }
+            });
+        }
 
         // Initialize workspace viewport to match our single wl_output mode
         {
@@ -155,7 +168,7 @@ impl MinimalServer {
             ws.set_viewport_size(1920.0, 1080.0);
         }
 
-        let mut state = MinimalState {
+        let mut state = CompositorState {
             seat_name: "seat0".into(),
             windows: Vec::new(),
             serial_counter: 1,
@@ -221,18 +234,20 @@ impl MinimalServer {
 struct ServerClientData;
 impl ClientData for ServerClientData {}
 
-impl MinimalServer {
-    fn handle_hw_input(&mut self, state: &mut MinimalState) -> Result<()> {
+impl CompositorServer {
+    fn handle_hw_input(&mut self, state: &mut CompositorState) -> Result<()> {
         use crate::input::{CompositorAction, InputEvent as AxiomInputEvent};
         // Drain the channel if present
-        // Drain events to a buffer to avoid borrowing self immutably while mutating
         let mut buf: Vec<HwInputEvent> = Vec::new();
         if let Some(rx) = &self.input_rx {
             loop {
                 match rx.try_recv() {
                     Ok(ev) => buf.push(ev),
                     Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => { self.input_rx = None; break; }
+                    Err(TryRecvError::Disconnected) => {
+                        self.input_rx = None;
+                        break;
+                    }
                 }
             }
         }
@@ -276,7 +291,7 @@ impl MinimalServer {
                                     }
                                 }
                                 CompositorAction::Quit => {
-                                    // Graceful shutdown: currently ignored in minimal server loop
+                                    // Graceful shutdown: currently ignored in this server loop
                                 }
                                 _ => {}
                             }
@@ -297,7 +312,7 @@ impl MinimalServer {
         Ok(())
     }
 
-    fn handle_events(&mut self, state: &mut MinimalState) -> Result<()> {
+    fn handle_events(&mut self, state: &mut CompositorState) -> Result<()> {
         // Take events out to avoid borrow issues while mutating state
         let mut events = Vec::new();
         events.append(&mut state.events);
@@ -475,7 +490,7 @@ impl MinimalServer {
         Ok(())
     }
 
-    fn apply_layouts(&mut self, state: &mut MinimalState) -> Result<()> {
+    fn apply_layouts(&mut self, state: &mut CompositorState) -> Result<()> {
         // Compute layouts from workspace manager and push size configures to clients
         let layouts: HashMap<u64, crate::window::Rectangle> = {
             let ws = self.workspace_manager.read();
@@ -513,8 +528,8 @@ impl MinimalServer {
     }
 }
 
-impl MinimalServer {
-    fn update_pointer_focus_and_motion(&mut self, state: &mut MinimalState) -> Result<()> {
+impl CompositorServer {
+    fn update_pointer_focus_and_motion(&mut self, state: &mut CompositorState) -> Result<()> {
         // Determine which window is under the pointer
         let (px, py) = state.pointer_pos;
         let mut target: Option<(u64, (f64, f64))> = None;
@@ -590,7 +605,7 @@ impl MinimalServer {
         Ok(())
     }
 
-    fn handle_pointer_button(&mut self, state: &mut MinimalState, button: u8, pressed: bool) -> Result<()> {
+    fn handle_pointer_button(&mut self, state: &mut CompositorState, button: u8, pressed: bool) -> Result<()> {
         // Send to focused pointer surface if any
         if let Some(focus_id) = state.pointer_focus_window {
             if let Some(surface) = state
@@ -736,9 +751,8 @@ impl MinimalServer {
     }
 }
 
-
 // wl_compositor global
-impl GlobalDispatch<wl_compositor::WlCompositor, ()> for MinimalState {
+impl GlobalDispatch<wl_compositor::WlCompositor, ()> for CompositorState {
     fn bind(
         _state: &mut Self,
         _handle: &DisplayHandle,
@@ -750,7 +764,7 @@ impl GlobalDispatch<wl_compositor::WlCompositor, ()> for MinimalState {
         data_init.init(resource, ());
     }
 }
-impl Dispatch<wl_compositor::WlCompositor, ()> for MinimalState {
+impl Dispatch<wl_compositor::WlCompositor, ()> for CompositorState {
     fn request(
         _state: &mut Self,
         _client: &Client,
@@ -764,7 +778,7 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for MinimalState {
 }
 
 // wl_shm global
-impl GlobalDispatch<wl_shm::WlShm, ()> for MinimalState {
+impl GlobalDispatch<wl_shm::WlShm, ()> for CompositorState {
     fn bind(
         _state: &mut Self,
         _handle: &DisplayHandle,
@@ -778,9 +792,9 @@ impl GlobalDispatch<wl_shm::WlShm, ()> for MinimalState {
         shm.format(wl_shm::Format::Xrgb8888);
     }
 }
-impl Dispatch<wl_shm::WlShm, ()> for MinimalState {
+impl Dispatch<wl_shm::WlShm, ()> for CompositorState {
     fn request(
-        state: &mut Self,
+        _state: &mut Self,
         _client: &Client,
         _resource: &wl_shm::WlShm,
         request: wl_shm::Request,
@@ -799,7 +813,7 @@ impl Dispatch<wl_shm::WlShm, ()> for MinimalState {
                     }
                     Err(_e) => {
                         // Failed to map; still init to avoid protocol errors with a tiny anon map
-                        let anon = unsafe { MmapOptions::new().len(1).map_anon().unwrap() };
+                        let anon = MmapOptions::new().len(1).map_anon().unwrap();
                         let ro = anon.make_read_only().unwrap();
                         let pool_data = ShmPoolData { map: Arc::new(ro), size: 0 };
                         data_init.init(id, pool_data);
@@ -813,7 +827,7 @@ impl Dispatch<wl_shm::WlShm, ()> for MinimalState {
 }
 
 // wl_seat global
-impl GlobalDispatch<wl_seat::WlSeat, ()> for MinimalState {
+impl GlobalDispatch<wl_seat::WlSeat, ()> for CompositorState {
     fn bind(
         state: &mut Self,
         _handle: &DisplayHandle,
@@ -827,7 +841,7 @@ impl GlobalDispatch<wl_seat::WlSeat, ()> for MinimalState {
         seat.name(state.seat_name.clone());
     }
 }
-impl Dispatch<wl_seat::WlSeat, ()> for MinimalState {
+impl Dispatch<wl_seat::WlSeat, ()> for CompositorState {
     fn request(
         state: &mut Self,
         _client: &Client,
@@ -851,7 +865,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for MinimalState {
     }
 }
 
-impl Dispatch<wl_keyboard::WlKeyboard, ()> for MinimalState {
+impl Dispatch<wl_keyboard::WlKeyboard, ()> for CompositorState {
     fn request(
         _state: &mut Self,
         _client: &Client,
@@ -863,7 +877,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for MinimalState {
     ) { }
 }
 
-impl Dispatch<wl_pointer::WlPointer, ()> for MinimalState {
+impl Dispatch<wl_pointer::WlPointer, ()> for CompositorState {
     fn request(
         _state: &mut Self,
         _client: &Client,
@@ -875,7 +889,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for MinimalState {
     ) { }
 }
 
-impl Dispatch<wl_callback::WlCallback, ()> for MinimalState {
+impl Dispatch<wl_callback::WlCallback, ()> for CompositorState {
     fn request(
         _state: &mut Self,
         _client: &Client,
@@ -907,7 +921,7 @@ struct BufferRecord {
     map: Arc<Mmap>,
 }
 
-impl MinimalState {
+impl CompositorState {
     fn rid_buffer(buf: &wl_buffer::WlBuffer) -> u32 { buf.id().protocol_id() }
 }
 
@@ -1030,7 +1044,7 @@ fn process_with_viewport(rec: &BufferRecord, vp: Option<&ViewportState>) -> Opti
     }
 }
 
-impl Dispatch<wl_shm_pool::WlShmPool, ShmPoolData> for MinimalState {
+impl Dispatch<wl_shm_pool::WlShmPool, ShmPoolData> for CompositorState {
     fn request(
         state: &mut Self,
         _client: &Client,
@@ -1052,7 +1066,7 @@ impl Dispatch<wl_shm_pool::WlShmPool, ShmPoolData> for MinimalState {
                 state_buffers(state).insert(rec.id, rec);
             }
             wl_shm_pool::Request::Resize { size } => {
-                // Not supported in this minimal path
+                // Not supported in this path
                 let _ = size;
             }
             wl_shm_pool::Request::Destroy => {
@@ -1064,7 +1078,7 @@ impl Dispatch<wl_shm_pool::WlShmPool, ShmPoolData> for MinimalState {
     }
 }
 
-impl Dispatch<wl_buffer::WlBuffer, ()> for MinimalState {
+impl Dispatch<wl_buffer::WlBuffer, ()> for CompositorState {
     fn request(
         state: &mut Self,
         _client: &Client,
@@ -1085,13 +1099,13 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for MinimalState {
     }
 }
 
-fn state_buffers(state: &mut MinimalState) -> &mut HashMap<u32, BufferRecord> {
-    // Side storage keyed by MinimalState pointer value
+fn state_buffers(state: &mut CompositorState) -> &mut HashMap<u32, BufferRecord> {
+    // Side storage keyed by CompositorState pointer value
     BuffersStorageCell::get_or_init(BuffersStorage::default());
     BUFFERS_MAP.get().unwrap().fetch(state)
 }
 
-// Poor-man side storage associated with MinimalState pointer address
+// Poor-man side storage associated with CompositorState pointer address
 struct BuffersStorage {
     map: HashMap<usize, HashMap<u32, BufferRecord>>,
 }
@@ -1102,7 +1116,7 @@ impl BuffersStorageCell {
     fn get_or_init(default: BuffersStorage) {
         let _ = BUFFERS_MAP.get_or_init(|| BuffersStorageCell(std::sync::Mutex::new(default)));
     }
-    fn fetch<'a>(&'a self, state: &'a mut MinimalState) -> &'a mut HashMap<u32, BufferRecord> {
+    fn fetch<'a>(&'a self, state: &'a mut CompositorState) -> &'a mut HashMap<u32, BufferRecord> {
         let key = state as *mut _ as usize;
         let mut guard = self.0.lock().unwrap();
         guard.map.entry(key).or_insert_with(HashMap::new);
@@ -1114,7 +1128,7 @@ impl BuffersStorageCell {
 }
 
 // wp_presentation_time global
-impl GlobalDispatch<wp_presentation::WpPresentation, ()> for MinimalState {
+impl GlobalDispatch<wp_presentation::WpPresentation, ()> for CompositorState {
     fn bind(
         _state: &mut Self,
         _handle: &DisplayHandle,
@@ -1126,7 +1140,7 @@ impl GlobalDispatch<wp_presentation::WpPresentation, ()> for MinimalState {
         data_init.init(resource, ());
     }
 }
-impl Dispatch<wp_presentation::WpPresentation, ()> for MinimalState {
+impl Dispatch<wp_presentation::WpPresentation, ()> for CompositorState {
     fn request(
         state: &mut Self,
         _client: &Client,
@@ -1148,7 +1162,7 @@ impl Dispatch<wp_presentation::WpPresentation, ()> for MinimalState {
 }
 
 // wp_viewporter global
-impl GlobalDispatch<wp_viewporter::WpViewporter, ()> for MinimalState {
+impl GlobalDispatch<wp_viewporter::WpViewporter, ()> for CompositorState {
     fn bind(
         _state: &mut Self,
         _handle: &DisplayHandle,
@@ -1160,7 +1174,7 @@ impl GlobalDispatch<wp_viewporter::WpViewporter, ()> for MinimalState {
         data_init.init(resource, ());
     }
 }
-impl Dispatch<wp_viewporter::WpViewporter, ()> for MinimalState {
+impl Dispatch<wp_viewporter::WpViewporter, ()> for CompositorState {
     fn request(
         state: &mut Self,
         _client: &Client,
@@ -1181,7 +1195,7 @@ impl Dispatch<wp_viewporter::WpViewporter, ()> for MinimalState {
         }
     }
 }
-impl Dispatch<wp_viewport::WpViewport, ViewportData> for MinimalState {
+impl Dispatch<wp_viewport::WpViewport, ViewportData> for CompositorState {
     fn request(
         state: &mut Self,
         _client: &Client,
@@ -1193,9 +1207,9 @@ impl Dispatch<wp_viewport::WpViewport, ViewportData> for MinimalState {
     ) {
         let entry = state.viewport_map.entry(data.surface_id).or_insert_with(ViewportState::default);
         match request {
-            wp_viewport::Request::SetSource { x: _x, y: _y, width: _width, height: _height } => {
-                // Minimal stub: ignore cropping for now
-                entry.source = None;
+            wp_viewport::Request::SetSource { x, y, width, height } => {
+                // Note: protocol uses fixed-point; here values are f32/f64 in server crate
+                if width > 0.0 && height > 0.0 { entry.source = Some((x, y, width, height)); }
             }
             wp_viewport::Request::SetDestination { width, height } => {
                 if width > 0 && height > 0 { entry.destination = Some((width as u32, height as u32)); }
@@ -1208,7 +1222,7 @@ impl Dispatch<wp_viewport::WpViewport, ViewportData> for MinimalState {
     }
 }
 
-impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for MinimalState {
+impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for CompositorState {
     fn request(
         _state: &mut Self,
         _client: &Client,
@@ -1221,7 +1235,7 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for MinimalS
 }
 
 // wl_output global
-impl GlobalDispatch<wl_output::WlOutput, ()> for MinimalState {
+impl GlobalDispatch<wl_output::WlOutput, ()> for CompositorState {
     fn bind(
         _state: &mut Self,
         _handle: &DisplayHandle,
@@ -1238,7 +1252,7 @@ impl GlobalDispatch<wl_output::WlOutput, ()> for MinimalState {
             200,
             wl_output::Subpixel::Unknown,
             "Axiom".to_string(),
-            "Minimal".to_string(),
+            "Unified".to_string(),
             wl_output::Transform::Normal,
         );
         output.mode(wl_output::Mode::Current | wl_output::Mode::Preferred, 1920, 1080, 60000);
@@ -1246,7 +1260,7 @@ impl GlobalDispatch<wl_output::WlOutput, ()> for MinimalState {
         output.done();
     }
 }
-impl Dispatch<wl_output::WlOutput, ()> for MinimalState {
+impl Dispatch<wl_output::WlOutput, ()> for CompositorState {
     fn request(
         _state: &mut Self,
         _client: &Client,
@@ -1260,7 +1274,7 @@ impl Dispatch<wl_output::WlOutput, ()> for MinimalState {
 }
 
 // Helpers
-impl MinimalState {
+impl CompositorState {
     fn next_serial(&mut self) -> u32 {
         let s = self.serial_counter;
         self.serial_counter = self.serial_counter.wrapping_add(1);
@@ -1269,7 +1283,7 @@ impl MinimalState {
 }
 
 // xdg_wm_base global
-impl GlobalDispatch<xdg_wm_base::XdgWmBase, ()> for MinimalState {
+impl GlobalDispatch<xdg_wm_base::XdgWmBase, ()> for CompositorState {
     fn bind(
         state: &mut Self,
         _handle: &DisplayHandle,
@@ -1282,7 +1296,7 @@ impl GlobalDispatch<xdg_wm_base::XdgWmBase, ()> for MinimalState {
         state.xdg_bases.push(base);
     }
 }
-impl Dispatch<xdg_wm_base::XdgWmBase, ()> for MinimalState {
+impl Dispatch<xdg_wm_base::XdgWmBase, ()> for CompositorState {
     fn request(
         state: &mut Self,
         _client: &Client,
@@ -1316,7 +1330,7 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for MinimalState {
     }
 }
 
-impl Dispatch<xdg_positioner::XdgPositioner, ()> for MinimalState {
+impl Dispatch<xdg_positioner::XdgPositioner, ()> for CompositorState {
     fn request(
         _state: &mut Self,
         _client: &Client,
@@ -1328,7 +1342,7 @@ impl Dispatch<xdg_positioner::XdgPositioner, ()> for MinimalState {
     ) { }
 }
 
-impl Dispatch<xdg_surface::XdgSurface, ()> for MinimalState {
+impl Dispatch<xdg_surface::XdgSurface, ()> for CompositorState {
     fn request(
         state: &mut Self,
         _client: &Client,
@@ -1364,7 +1378,7 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for MinimalState {
     }
 }
 
-impl Dispatch<xdg_toplevel::XdgToplevel, ()> for MinimalState {
+impl Dispatch<xdg_toplevel::XdgToplevel, ()> for CompositorState {
     fn request(
         state: &mut Self,
         _client: &Client,
@@ -1398,7 +1412,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for MinimalState {
     }
 }
 
-impl Dispatch<wl_surface::WlSurface, ()> for MinimalState {
+impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
     fn request(
         state: &mut Self,
         _client: &Client,

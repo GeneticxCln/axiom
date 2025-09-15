@@ -8,16 +8,11 @@ repository = "https://github.com/GeneticxCln/axiom"
 license = "GPL-3.0"
 keywords = ["wayland", "compositor", "window-manager", "tiling", "effects"]
 categories = ["gui"]
+autobins = false
 
 [[bin]]
 name = "axiom"
 path = "src/main.rs"
-
-[[bin]]
-name = "test_real_backend"
-path = "src/test_real_backend.rs"
-required-features = ["real-compositor", "experimental-smithay"]
-test = false
 
 [[bin]]
 name = "test_basic"
@@ -35,18 +30,6 @@ required-features = ["examples"]
 name = "test_socket"
 path = "src/test_socket.rs"
 required-features = ["demo"]
-test = false
-
-[[bin]]
-name = "test_real"
-path = "src/test_real.rs"
-required-features = ["real-compositor", "experimental-smithay"]
-test = false
-
-[[bin]]
-name = "run_real_backend"
-path = "src/bin/run_real_backend.rs"
-required-features = ["real-compositor", "experimental-smithay"]
 test = false
 
 [dependencies]
@@ -88,9 +71,11 @@ xkbcommon = "0.7"
 libc = "0.2"
 calloop = "0.12"
 input = "0.9"
+evdev = "0.12"
 drm = "0.11"
-gbm = "0.14"
+ gbm = "0.14"
 gl = "0.14"
+memmap2 = "0.9"
 
 # Logging
 tracing = "0.1"
@@ -126,15 +111,12 @@ path = "src/lib.rs"
 
 # Features
 [features]
-default = []
+# Enable unified smithay backend by default
+default = ["smithay"]
 demo = []
-real-compositor = []
+smithay = []
 wgpu-present = ["pollster"]
 examples = []
-# Master switch for all experimental Smithay backends (many are scaffolding)
-experimental-smithay = []
-# Compile only the minimal real backend and protocol helpers (safe subset)
-smithay-minimal = []
 
 # Development dependencies for testing
 [dev-dependencies]

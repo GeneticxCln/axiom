@@ -463,7 +463,7 @@ impl AnimationController {
 
                     if !already_active {
                         // Start this event
-                        let window_id = event.target_window.unwrap_or(0); // 0 = global
+let _window_id = event.target_window.unwrap_or(0); // 0 = global
                                                                           // For now, just track that the event started
                                                                           // In a full implementation, we'd manage these animations properly
 

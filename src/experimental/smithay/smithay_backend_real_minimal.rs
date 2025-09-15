@@ -9,67 +9,24 @@
 //! Everything else is secondary until these work.
 
 use anyhow::{Context, Result};
-use log::{debug, info, warn};
-use std::os::unix::io::AsRawFd;
+use log::{debug, info, warn, error};
 use std::time::Instant;
 
-// WGPU (optional)
-#[cfg(feature = "wgpu-present")]
-use wgpu::util::DeviceExt;
-
 use smithay::{
-    backend::{
-        allocator::{dmabuf::Dmabuf, Format, Fourcc, Modifier},
-        renderer::{
-            element::surface::WaylandSurfaceRenderElement, gles2::Gles2Renderer, Bind, Frame,
-            Renderer, Unbind,
-        },
-        winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
-    },
-    desktop::{
-        space::{Space, SurfaceTree},
-        Window, WindowSurfaceType,
-    },
-    input::{
-        keyboard::{keysyms, FilterResult, KeyboardHandle, Keysym, ModifiersState},
-        pointer::{AxisFrame, ButtonEvent, MotionEvent, PointerHandle, RelativeMotionEvent},
-        Seat, SeatHandler, SeatState,
-    },
-    output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
-        calloop::{
-            generic::Generic, EventLoop, Interest, LoopHandle, Mode as CallMode, PostAction,
-        },
-        wayland_protocols::xdg::shell::server::xdg_toplevel,
-        wayland_server::{
-            backend::{ClientData, ClientId, DisconnectReason},
-            protocol::{wl_buffer, wl_shm, wl_surface},
-            Display, DisplayHandle, Resource,
-        },
+        calloop::{self, EventLoop},
+        wayland_server::{protocol::{wl_buffer, wl_surface}, Display, DisplayHandle},
     },
-    utils::{IsAlive, Logical, Physical, Point, Rectangle, Scale, Size, Transform},
     wayland::{
         buffer::BufferHandler,
-        compositor::{
-            get_parent, is_sync_subsurface, CompositorClientState, CompositorHandler,
-            CompositorState, SurfaceAttributes, TraversalAction,
-        },
-        dmabuf::DmabufHandler,
-        output::OutputManagerState,
-        shell::xdg::{
-            Configure, PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler,
-            XdgShellState, XdgToplevelSurfaceData,
-        },
+        compositor::{CompositorClientState, CompositorHandler, CompositorState},
+        shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
         shm::{ShmHandler, ShmState},
+        output::{Output, Mode, PhysicalProperties, Subpixel, OutputManagerState},
+        seat::{Seat, SeatHandler, SeatState},
         socket::ListeningSocketSource,
     },
 };
-
-use smithay::delegate_compositor;
-use smithay::delegate_output;
-use smithay::delegate_seat;
-use smithay::delegate_shm;
-use smithay::delegate_xdg_shell;
 
 /// Minimal state for real Wayland compositor
 pub struct MinimalCompositorState {
@@ -81,31 +38,14 @@ pub struct MinimalCompositorState {
     pub seat_state: SeatState<Self>,
 
     // Display and event loop
-    pub display_handle: DisplayHandle,
-    pub loop_handle: LoopHandle<'static, Self>,
+    pub display: Display<Self>,
     pub start_time: Instant,
-
-    // Space for window management
-    pub space: Space<Window>,
 
     // Seat and input
     pub seat: Seat<Self>,
-    pub keyboard: KeyboardHandle<Self>,
-    pub pointer: PointerHandle<Self>,
-
-    // Backend and renderer (will be set during initialization)
-    pub backend: Option<WinitGraphicsBackend>,
-    pub renderer: Option<Gles2Renderer>,
-
-    // Optional WGPU state for presenting frames
-    #[cfg(feature = "wgpu-present")]
-    pub wgpu: Option<WgpuState>,
 
     // Output
     pub output: Output,
-
-    // Window tracking
-    pub windows: Vec<Window>,
 
     // Socket name
     pub socket_name: String,
@@ -123,25 +63,23 @@ pub struct WgpuState {
 }
 
 impl MinimalCompositorState {
-    pub fn new(display: &mut Display<Self>, event_loop: &EventLoop<Self>) -> Result<Self> {
-        let display_handle = display.handle();
-        let loop_handle = event_loop.handle();
-
+    pub fn new(display: &mut Display<Self>, _event_loop: &EventLoop<Self>) -> Result<Self> {
         // Initialize Wayland protocol states via helpers
-        let compositor_state = crate::experimental::smithay::wayland_protocols::register_compositor::<Self>(&display_handle);
-        let xdg_shell_state = crate::experimental::smithay::wayland_protocols::register_xdg_shell::<Self>(&display_handle);
-        let shm_state = crate::experimental::smithay::wayland_protocols::register_shm::<Self>(&display_handle);
-        let output_manager_state = crate::experimental::smithay::wayland_protocols::register_output_manager::<Self>(&display_handle);
+        let compositor_state = crate::experimental::smithay::wayland::wayland_protocols::register_compositor::<Self>(display);
+        let xdg_shell_state = crate::experimental::smithay::wayland::wayland_protocols::register_xdg_shell::<Self>(display);
+        let shm_state = crate::experimental::smithay::wayland::wayland_protocols::register_shm::<Self>(display);
+        let output_manager_state = crate::experimental::smithay::wayland::wayland_protocols::register_output_manager::<Self>(display);
         let mut seat_state = SeatState::new();
 
         // Create a seat with keyboard and pointer
-        let (seat, keyboard, pointer) = crate::experimental::smithay::wayland_protocols::create_seat::<Self>(&display_handle, &mut seat_state, "seat0")?;
+        let (seat, _keyboard, _pointer) = crate::experimental::smithay::wayland::wayland_protocols::create_seat::<Self>(display, &mut seat_state, "seat0")?;
 
         // Create output
-        let output = Output::new(
-            "winit".to_string(),
+        let mut output = Output::new(
+            display,
+            "axiom-output".to_string(),
             PhysicalProperties {
-                size: (0, 0).into(),
+                size: (600, 340).into(),
                 subpixel: Subpixel::Unknown,
                 make: "Axiom".to_string(),
                 model: "Virtual".to_string(),
@@ -153,16 +91,10 @@ impl MinimalCompositorState {
             size: (1920, 1080).into(),
             refresh: 60_000,
         };
-        output.change_current_state(
-            Some(mode),
-            Some(Transform::Normal),
-            None,
-            Some((0, 0).into()),
-        );
+        output.change_current_state(Some(mode), None, None, None);
         output.set_preferred(mode);
-
-        // Create space for window management
-        let space = Space::default();
+        // Notify output manager
+        output_manager_state.output_created(&output);
 
         Ok(Self {
             compositor_state,
@@ -170,19 +102,10 @@ impl MinimalCompositorState {
             shm_state,
             output_manager_state,
             seat_state,
-            display_handle,
-            loop_handle,
+            display: display.clone(),
             start_time: Instant::now(),
-            space,
             seat,
-            keyboard,
-            pointer,
-            backend: None,
-            renderer: None,
-            #[cfg(feature = "wgpu-present")]
-            wgpu: None,
             output,
-            windows: Vec::new(),
             socket_name: String::new(),
         })
     }
@@ -320,15 +243,15 @@ impl SeatHandler for MinimalCompositorState {
 }
 
 // Smithay delegate macros for protocol handling
-delegate_compositor!(MinimalCompositorState);
-delegate_shm!(MinimalCompositorState);
-delegate_xdg_shell!(MinimalCompositorState);
-delegate_seat!(MinimalCompositorState);
-delegate_output!(MinimalCompositorState);
+smithay::delegate_compositor!(MinimalCompositorState);
+smithay::delegate_shm!(MinimalCompositorState);
+smithay::delegate_xdg_shell!(MinimalCompositorState);
+smithay::delegate_seat!(MinimalCompositorState);
+smithay::delegate_output!(MinimalCompositorState);
 
 /// Main backend structure
 pub struct MinimalRealBackend {
-    pub state: Option<Rc<RefCell<MinimalCompositorState>>>,
+    pub state: Option<MinimalCompositorState>,
     pub display: Option<Display<MinimalCompositorState>>,
     pub event_loop: Option<EventLoop<'static, MinimalCompositorState>>,
     pub running: bool,
@@ -348,40 +271,35 @@ impl MinimalRealBackend {
         info!("🚀 Initializing REAL minimal Wayland compositor...");
 
         // Create event loop
-        let mut event_loop = EventLoop::try_new().context("Failed to create event loop")?;
+        let mut event_loop: EventLoop<MinimalCompositorState> = EventLoop::try_new().context("Failed to create event loop")?;
 
         // Create display
-        let mut display = Display::new().context("Failed to create Wayland display")?;
+        let mut display: Display<MinimalCompositorState> = Display::new().context("Failed to create Wayland display")?;
 
         // Create compositor state
-        let state = MinimalCompositorState::new(&mut display, &event_loop)?;
+        let mut state = MinimalCompositorState::new(&mut display, &event_loop)?;
 
         // Add Wayland socket
-        let socket_name = display
-            .add_socket_auto()
-            .context("Failed to add Wayland socket")?;
-        let socket_name_str = socket_name.to_string_lossy().to_string();
+        let listening = ListeningSocketSource::new_auto().context("Failed to create Wayland listening socket")?;
+        let socket_name = listening.socket_name().to_string();
+        info!("✅ Wayland socket created: {}", socket_name);
+        std::env::set_var("WAYLAND_DISPLAY", &socket_name);
 
-        info!("✅ Wayland socket created: {}", socket_name_str);
-        std::env::set_var("WAYLAND_DISPLAY", &socket_name_str);
+        // Insert listening socket source into event loop
+        let dh = display.handle();
+        event_loop.handle().insert_source(listening, move |client, _, state| {
+            if let Err(e) = dh.insert_client(client, Arc::new(CompositorClientState::default())) {
+                error!("Failed to insert client: {}", e);
+            }
+        })?;
 
         // Store everything
-        let state_rc = Rc::new(RefCell::new(state));
-        state_rc.borrow_mut().socket_name = socket_name_str.clone();
-
-        self.state = Some(state_rc);
+        state.socket_name = socket_name.clone();
+        self.state = Some(state);
         self.display = Some(display);
         self.event_loop = Some(event_loop);
 
-        // Initialize winit backend
-        self.init_winit_backend()?;
-
-        info!("✅ Real Wayland compositor initialized!");
-        info!(
-            "   Clients can connect via WAYLAND_DISPLAY={}",
-            socket_name_str
-        );
-
+        info!("✅ Real Wayland compositor initialized! Clients: WAYLAND_DISPLAY={}", socket_name);
         Ok(())
     }
 
@@ -512,78 +430,26 @@ impl MinimalRealBackend {
         Ok(())
     }
 
-    fn render_frame(state: &mut MinimalCompositorState) -> Result<()> {
-        // Prefer WGPU if available
-        #[cfg(feature = "wgpu-present")]
-        if let Some(wgpu) = state.wgpu.as_mut() {
-            let frame = match wgpu.surface.get_current_texture() {
-                Ok(frame) => frame,
-                Err(e) => {
-                    // Try to recover by reconfiguring
-                    wgpu.surface.configure(&wgpu.device, &wgpu.config);
-                    wgpu.surface.get_current_texture()?
-                }
-            };
-            let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let mut encoder = wgpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("axiom-render-encoder"),
-            });
-            {
-                let _rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("axiom-clear-pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.08, g: 0.09, b: 0.11, a: 1.0 }), store: true },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-            }
-            wgpu.queue.submit(Some(encoder.finish()));
-            frame.present();
-            return Ok(());
-        }
-
-        // Fallback to GLES2 path if WGPU is not available or feature disabled
-        let renderer = state.renderer.as_mut().unwrap();
-        let backend = state.backend.as_mut().unwrap();
-
-        // Bind the renderer to the backend
-        backend.bind()?;
-
-        // Clear the frame
-        renderer.clear([0.1, 0.1, 0.1, 1.0])?;
-
-        // Finish the frame
-        backend.submit(None)?;
-        backend.unbind()?;
-
+    fn render_frame(_state: &mut MinimalCompositorState) -> Result<()> {
+        // No-op rendering in minimal backend
         Ok(())
     }
 
     pub fn run(&mut self) -> Result<()> {
         info!("🎬 Starting compositor main loop...");
 
-        let event_loop = self.event_loop.take().unwrap();
+        let mut event_loop = self.event_loop.take().unwrap();
         let mut display = self.display.take().unwrap();
-        let state = self.state.as_ref().unwrap().clone();
+        let mut state = self.state.take().unwrap();
 
         self.running = true;
 
         // Run the event loop
-        event_loop.run(None, &mut state.borrow_mut(), |state| {
-            // Dispatch clients
-            state.display_handle.dispatch_clients(state).unwrap();
-
-            // Check windows need redraw
-            if !state.windows.is_empty() {
-                if let Err(e) = Self::render_frame(state) {
-                    error!("Render error: {}", e);
-                }
-            }
-        })?;
+        loop {
+            event_loop.dispatch(std::time::Duration::from_millis(16), &mut state)?;
+            display.flush_clients()?;
+            Self::render_frame(&mut state)?;
+        }
 
         Ok(())
     }

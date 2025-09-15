@@ -18,6 +18,16 @@
 use anyhow::Result;
 use clap::Parser;
 use log::{error, info};
+#[cfg(feature = "smithay")]
+use parking_lot::RwLock;
+#[cfg(feature = "smithay")]
+use std::sync::Arc;
+#[cfg(all(feature = "smithay", feature = "wgpu-present"))]
+use winit::event::{Event, WindowEvent};
+#[cfg(all(feature = "smithay", feature = "wgpu-present"))]
+use winit::event_loop::EventLoop;
+#[cfg(all(feature = "smithay", feature = "wgpu-present"))]
+use pollster;
 
 mod compositor;
 mod decoration;
@@ -33,12 +43,12 @@ mod window;
 mod workspace;
 mod xwayland;
 mod renderer;
-mod experimental;
 
-// Smithay backend modules - only available with experimental-smithay feature
-#[cfg(feature = "experimental-smithay")]
-use experimental::smithay::*;
+// Unified Smithay backend
+#[cfg(feature = "smithay")]
+pub mod smithay;
 
+#[cfg(not(all(feature = "smithay", feature = "wgpu-present")))]
 use compositor::AxiomCompositor;
 use config::AxiomConfig;
 
@@ -60,6 +70,14 @@ struct Cli {
     /// Run in windowed mode (for development)
     #[arg(short, long)]
     windowed: bool,
+
+    /// Force headless mode (no on-screen window; headless rendering only)
+    #[arg(long, default_value_t = false)]
+    headless: bool,
+
+    /// Select GPU backend: auto, vulkan, gl
+    #[arg(long, default_value = "auto")]
+    backend: String,
 
     /// Disable visual effects (performance mode)
     #[arg(long)]
@@ -112,106 +130,149 @@ async fn main() -> Result<()> {
         info!("🚫 Visual effects disabled via CLI flag");
     }
 
-    // Initialize and run compositor
-    info!("🏗️  Initializing Axiom compositor...");
+    // === On-screen or headless presenter path (Smithay available) ===
+    #[cfg(all(feature = "smithay", feature = "wgpu-present"))]
+    {
+        use crate::input::InputManager;
+        use crate::smithay::server::CompositorServer;
+        use crate::window::WindowManager;
+        use crate::workspace::ScrollableWorkspaces;
 
-    let mut compositor = AxiomCompositor::new(config.clone(), cli.windowed).await?;
+        // Select backends based on CLI
+        let selected_backends = match cli.backend.as_str() {
+            "vulkan" => wgpu::Backends::VULKAN,
+            "gl" => wgpu::Backends::GL,
+            _ => wgpu::Backends::all(),
+        };
+        info!("🎛️ WGPU backend selection: {}", cli.backend);
 
-    info!("✨ Axiom is ready! Where productivity meets beauty.");
+        // If headless, run Smithay server in this thread with headless GPU loop
+        if cli.headless {
+            info!("🖥️ Headless mode enabled - no on-screen window will be created");
+            let wm = Arc::new(RwLock::new(WindowManager::new(&config.window)?));
+            let ws = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)?));
+            let im = Arc::new(RwLock::new(InputManager::new(&config.input, &config.bindings)?));
+            let server = CompositorServer::new(wm, ws, im, true, selected_backends)?; // spawn headless renderer
+            return server.run().map(|_| ());
+        }
 
-    // Run demos if requested
+        // Start Smithay server without headless renderer (we'll present on-screen)
+        let cfg_clone = config.clone();
+        std::thread::spawn(move || {
+            let _ = env_logger::try_init();
+            let wm = Arc::new(RwLock::new(WindowManager::new(&cfg_clone.window).expect("wm")));
+            let ws = Arc::new(RwLock::new(ScrollableWorkspaces::new(&cfg_clone.workspace).expect("ws")));
+            let im = Arc::new(RwLock::new(InputManager::new(&cfg_clone.input, &cfg_clone.bindings).expect("im")));
+            let server = CompositorServer::new(wm, ws, im, false, selected_backends).expect("server");
+            let _ = server.run();
+        });
+
+        // Create window and wgpu surface on the main thread
+        let event_loop = EventLoop::new()?;
+        let window = winit::window::WindowBuilder::new()
+            .with_title("Axiom Compositor")
+            .build(&event_loop)?;
+
+        // Create wgpu surface
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: selected_backends,
+            ..Default::default()
+        });
+        // Create surface for the window
+        let surface = instance.create_surface(&window)?;
+        let size = window.inner_size();
+
+        // Create renderer with the same instance as the surface
+        let mut renderer = pollster::block_on(crate::renderer::AxiomRenderer::new_with_instance(
+            &instance,
+            Some(&surface),
+            size.width,
+            size.height,
+        ))?;
+
+        // Run the event loop on the main thread
+        return Ok(event_loop.run(|event, elwt| {
+            match event {
+                Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
+                Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
+                    if new_size.width > 0 && new_size.height > 0 {
+                        renderer = pollster::block_on(crate::renderer::AxiomRenderer::new_with_instance(
+                            &instance,
+                            Some(&surface),
+                            new_size.width,
+                            new_size.height,
+                        ))
+                        .expect("recreate renderer");
+                        window.request_redraw();
+                    }
+                }
+                Event::AboutToWait => {
+                    window.request_redraw();
+                }
+                Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
+                    // Sync from shared render state and draw
+                    renderer.sync_from_shared();
+                    if renderer.can_present() {
+                        if let Ok(frame) = surface.get_current_texture() {
+                            if let Err(e) = renderer.render_to_surface(&surface, &frame) {
+                                eprintln!("render error: {}", e);
+                            }
+                            frame.present();
+                        }
+                    } else {
+                        // Headless fallback: no on-screen presentation
+                        let _ = renderer.render();
+                    }
+                }
+                _ => {}
+            }
+        })?);
+    }
+
+    // === Fallback path (no on-screen presenter): original async compositor ===
+    #[cfg(not(all(feature = "smithay", feature = "wgpu-present")))]
+    {
+        // Initialize and run compositor
+        info!("🏗️  Initializing Axiom compositor...");
+
+        let mut compositor = AxiomCompositor::new(config.clone(), cli.windowed).await?;
+
+        info!("✨ Axiom is ready! Where productivity meets beauty.");
+
+        // Run demos if requested
+    #[cfg(feature = "demo")]
     if cli.demo {
-        info!("🎭 Running Phase 3 scrollable workspace demo...");
-        demo_workspace::run_comprehensive_test(&mut compositor).await?;
-        info!("🎆 Phase 3 demo completed!");
-    }
+            info!("🎭 Running Phase 3 scrollable workspace demo...");
+            demo_workspace::run_comprehensive_test(&mut compositor).await?;
+            info!("🎆 Phase 3 demo completed!");
+        }
 
+    #[cfg(feature = "demo")]
     if cli.effects_demo {
-        info!("🎨 Running Phase 4 visual effects demo...");
-        demo_phase4_effects::display_effects_capabilities(&compositor);
-        demo_phase4_effects::run_phase4_effects_demo(&mut compositor).await?;
-        info!("🎆 Phase 4 effects demo completed!");
-    }
+            info!("🎨 Running Phase 4 visual effects demo...");
+            demo_phase4_effects::display_effects_capabilities(&compositor);
+            demo_phase4_effects::run_phase4_effects_demo(&mut compositor).await?;
+            info!("🎆 Phase 4 effects demo completed!");
+        }
 
-    if cli.phase6_2_demo {
-        info!("🌊 Running Phase 6.2 Smithay backend demo with protocol simulation...");
-        run_phase6_2_demo(config.clone(), cli.windowed).await?;
-        info!("🎆 Phase 6.2 demo completed!");
-        return Ok(()); // Exit after demo
-    }
+        if cli.phase6_2_demo {
+            info!("🌊 Phase 6.2 demo was removed during backend unification");
+        }
 
+    #[cfg(feature = "demo")]
     if cli.demo || cli.effects_demo || cli.phase6_2_demo {
-        info!("🎆 All demos completed! Continuing with normal compositor operation...");
+            info!("🎆 All demos completed! Continuing with normal compositor operation...");
+        }
+
+        // Main event loop
+        compositor.run().await?;
+
+        info!("👋 Axiom compositor shutting down");
+        return Ok(());
     }
 
-    // Main event loop
-    compositor.run().await?;
-
-    info!("👋 Axiom compositor shutting down");
-    Ok(())
 }
 
-/// Run Phase 6.2 Smithay backend demo with protocol simulation
-#[cfg(feature = "experimental-smithay")]
-async fn run_phase6_2_demo(config: AxiomConfig, windowed: bool) -> Result<()> {
-    use crate::decoration::DecorationManager;
-    use crate::effects::EffectsEngine;
-    use crate::input::InputManager;
-    use crate::experimental::smithay::smithay_backend_phase6_2::AxiomSmithayBackendPhase6_2;
-    use crate::window::WindowManager;
-    use crate::workspace::ScrollableWorkspaces;
-    use parking_lot::RwLock;
-    use std::sync::Arc;
-
-    info!("🌊 Initializing Phase 6.2 Enhanced Protocol Simulation Backend...");
-    info!("🔧 Creating required manager components...");
-
-    // Create all required manager components
-    let workspace_manager = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)?));
-    let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)?));
-    let effects_engine = Arc::new(RwLock::new(EffectsEngine::new(&config.effects)?));
-    let decoration_manager = Arc::new(RwLock::new(DecorationManager::new(&config.window)));
-    let input_manager = Arc::new(RwLock::new(InputManager::new(
-        &config.input,
-        &config.bindings,
-    )?));
-
-    let mut backend = AxiomSmithayBackendPhase6_2::new(
-        config,
-        windowed,
-        workspace_manager,
-        window_manager,
-        effects_engine,
-        decoration_manager,
-        input_manager,
-    )?;
-
-    backend.initialize().await?;
-
-    info!("✨ Phase 6.2 backend initialized successfully!");
-    info!("🔌 Socket: {:?}", backend.socket_name());
-
-    // Run the comprehensive demonstration
-    backend.demonstrate_protocol_simulation().await?;
-
-    // Clean up demonstration
-    backend.demonstrate_client_cleanup().await?;
-
-    info!("📊 Final status report:");
-    backend.report_status();
-
-    // Shutdown cleanly
-    backend.shutdown().await?;
-
-    info!("🎯 Phase 6.2 demo completed successfully!");
-    Ok(())
-}
-
-/// Fallback version when experimental-smithay feature is not enabled
-#[cfg(not(feature = "experimental-smithay"))]
-async fn run_phase6_2_demo(_config: AxiomConfig, _windowed: bool) -> Result<()> {
-    anyhow::bail!("Phase 6.2 Smithay demo requires the 'experimental-smithay' feature to be enabled");
-}
 
 #[cfg(test)]
 mod tests {

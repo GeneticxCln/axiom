@@ -1,3 +1,4 @@
+#![cfg(feature = "demo")]
 //! Phase 4: Visual Effects System Demo
 //!
 //! This demo showcases the complete visual effects system:
@@ -13,6 +14,7 @@ use tokio::time::{sleep, Duration, Instant};
 use crate::compositor::AxiomCompositor;
 
 /// Comprehensive Phase 4 visual effects demonstration
+#[cfg(feature = "demo")]
 pub async fn run_phase4_effects_demo(compositor: &mut AxiomCompositor) -> Result<()> {
     info!("🎨 Phase 4: Starting Visual Effects System Demo");
     info!("============================================");
@@ -36,6 +38,7 @@ pub async fn run_phase4_effects_demo(compositor: &mut AxiomCompositor) -> Result
 }
 
 /// Demonstrate different animation types and easing curves
+#[cfg(feature = "demo")]
 async fn demo_animation_showcase(compositor: &mut AxiomCompositor) -> Result<()> {
     info!("🎬 Phase 4.1: Animation Showcase");
     info!("----------------------------------");
@@ -123,6 +126,7 @@ async fn demo_animation_showcase(compositor: &mut AxiomCompositor) -> Result<()>
 }
 
 /// Demonstrate different effects quality levels and their impact
+#[cfg(feature = "demo")]
 async fn demo_effects_quality(compositor: &mut AxiomCompositor) -> Result<()> {
     info!("🌟 Phase 4.2: Effects Quality Demonstration");
     info!("-------------------------------------------");
@@ -177,6 +181,7 @@ async fn demo_effects_quality(compositor: &mut AxiomCompositor) -> Result<()> {
 }
 
 /// Test performance adaptation and automatic quality scaling
+#[cfg(feature = "demo")]
 async fn demo_performance_adaptation(compositor: &mut AxiomCompositor) -> Result<()> {
     info!("⚡ Phase 4.3: Performance Adaptation Test");
     info!("-----------------------------------------");
@@ -261,6 +266,7 @@ async fn demo_performance_adaptation(compositor: &mut AxiomCompositor) -> Result
 }
 
 /// Demonstrate advanced features like spring animations and complex effects
+#[cfg(feature = "demo")]
 async fn demo_advanced_features(compositor: &mut AxiomCompositor) -> Result<()> {
     info!("🌸 Phase 4.4: Advanced Features Demo");
     info!("------------------------------------");
@@ -379,6 +385,7 @@ async fn demo_advanced_features(compositor: &mut AxiomCompositor) -> Result<()> 
 }
 
 /// Helper function to create demo windows for testing
+#[cfg(feature = "demo")]
 async fn create_demo_windows(compositor: &mut AxiomCompositor) -> Result<Vec<u64>> {
     let mut window_ids = Vec::new();
 
@@ -408,6 +415,7 @@ async fn create_demo_windows(compositor: &mut AxiomCompositor) -> Result<Vec<u64
 }
 
 /// Display effects engine statistics and capabilities
+#[cfg(feature = "demo")]
 pub fn display_effects_capabilities(compositor: &AxiomCompositor) {
     info!("🎨 Phase 4: Visual Effects Engine Capabilities");
     info!("============================================");

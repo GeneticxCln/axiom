@@ -21,9 +21,6 @@ use crate::window::WindowManager;
 use crate::workspace::ScrollableWorkspaces;
 use crate::xwayland::XWaylandManager;
 
-// Import Smithay backend only when experimental feature is enabled
-#[cfg(feature = "experimental-smithay")]
-use crate::experimental::smithay::smithay_backend_phase6::AxiomSmithayBackendPhase6;
 
 /// Main compositor struct that orchestrates all subsystems
 pub struct AxiomCompositor {
@@ -39,10 +36,6 @@ pub struct AxiomCompositor {
     xwayland_manager: Option<XWaylandManager>,
     ipc_server: AxiomIPCServer,
 
-    // Smithay backend for Wayland compositor functionality (when experimental feature is enabled)
-    #[cfg(feature = "experimental-smithay")]
-    smithay_backend: AxiomSmithayBackendPhase6,
-
     // Renderer (headless for now, scaffolding real GPU path)
     renderer: Option<AxiomRenderer>,
 
@@ -51,10 +44,10 @@ pub struct AxiomCompositor {
 }
 
 impl AxiomCompositor {
+
     /// Create a new Axiom compositor instance
-    #[cfg(feature = "experimental-smithay")]
     pub async fn new(config: AxiomConfig, windowed: bool) -> Result<Self> {
-        info!("🏗️ Initializing Axiom compositor with Smithay backend...");
+        info!("🏗️ Initializing Axiom compositor...");
 
         // Initialize our custom subsystems
         debug!("📱 Initializing scrollable workspaces...");
@@ -89,106 +82,7 @@ impl AxiomCompositor {
             .await
             .context("Failed to start IPC server")?;
 
-        // Initialize Smithay backend
-        debug!("🚀 Initializing Smithay Wayland backend...");
-
-        // For now, create a simple Smithay backend that doesn't need shared managers
-        // In a real implementation, the backend would own the managers or use proper sharing
-        use parking_lot::RwLock;
-        use std::sync::Arc;
-
-        // Create dummy managers for the backend (they'll be empty)
-        let dummy_window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)?));
-        let dummy_workspace_manager =
-            Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)?));
-        let dummy_effects_engine = Arc::new(RwLock::new(EffectsEngine::new(&config.effects)?));
-        let dummy_decoration_manager =
-            Arc::new(RwLock::new(DecorationManager::new(&config.window)));
-        let dummy_input_manager = Arc::new(RwLock::new(InputManager::new(
-            &config.input,
-            &config.bindings,
-        )?));
-
-        let mut smithay_backend = AxiomSmithayBackendPhase6::new(
-            config.clone(),
-            windowed,
-            dummy_window_manager,
-            dummy_workspace_manager,
-            dummy_effects_engine,
-            dummy_decoration_manager,
-            dummy_input_manager,
-        )?;
-        smithay_backend
-            .initialize()
-            .await
-            .context("Failed to initialize Smithay backend")?;
-
-        // Initialize a headless renderer as scaffolding for real GPU rendering
-        let renderer = match AxiomRenderer::new_headless().await {
-            Ok(r) => Some(r),
-            Err(e) => {
-                warn!("⚠️ Failed to initialize headless renderer: {}", e);
-                None
-            }
-        };
-
-        info!("✅ All subsystems initialized successfully");
-
-        Ok(Self {
-            config,
-            windowed,
-            workspace_manager,
-            effects_engine,
-            window_manager,
-            decoration_manager,
-            input_manager,
-            xwayland_manager,
-            ipc_server,
-            smithay_backend,
-            renderer,
-            running: false,
-        })
-    }
-
-    /// Create a new Axiom compositor instance without Smithay backend
-    #[cfg(not(feature = "experimental-smithay"))]
-    pub async fn new(config: AxiomConfig, windowed: bool) -> Result<Self> {
-        info!("🏗️ Initializing Axiom compositor without Smithay backend...");
-
-        // Initialize our custom subsystems
-        debug!("📱 Initializing scrollable workspaces...");
-        let workspace_manager = ScrollableWorkspaces::new(&config.workspace)?;
-
-        debug!("✨ Initializing effects engine...");
-        let effects_engine = EffectsEngine::new(&config.effects)?;
-
-        debug!("🪟 Initializing window manager...");
-        let window_manager = WindowManager::new(&config.window)?;
-
-        debug!("🎨 Initializing decoration manager...");
-        let decoration_manager = DecorationManager::new(&config.window);
-
-        debug!("⌨️ Initializing input manager...");
-        let input_manager = InputManager::new(&config.input, &config.bindings)?;
-
-        // Initialize XWayland (if enabled)
-        let xwayland_manager = if config.xwayland.enabled {
-            debug!("🔗 Initializing XWayland...");
-            Some(XWaylandManager::new(&config.xwayland).await?)
-        } else {
-            warn!("🚫 XWayland disabled - X11 apps will not work");
-            None
-        };
-
-        // Initialize IPC server for Lazy UI integration
-        debug!("🔗 Initializing IPC server...");
-        let mut ipc_server = AxiomIPCServer::new();
-        ipc_server
-            .start()
-            .await
-            .context("Failed to start IPC server")?;
-
-        warn!("⚠️ Smithay backend disabled - running in simulation mode only");
+        warn!("⚠️ Running in simulation mode (Smithay window server is handled by main when enabled)");
 
         // Initialize a headless renderer as scaffolding for real GPU rendering
         let renderer = match AxiomRenderer::new_headless().await {
@@ -248,26 +142,8 @@ impl AxiomCompositor {
         Ok(())
     }
 
-    /// Phase 3: Process all pending compositor events with real input handling
-    #[cfg(feature = "experimental-smithay")]
-    async fn process_events(&mut self) -> Result<()> {
-        // Process backend events (Wayland, input devices)
-        self.smithay_backend.process_events().await?;
 
-        // Process IPC messages from Lazy UI
-        if let Err(e) = self.ipc_server.process_messages().await {
-            warn!("⚠️ Error processing IPC messages: {}", e);
-        }
-
-        // Phase 3: Simulate input processing for demonstration
-        // In a real implementation, this would receive events from Smithay
-        self.process_simulated_input_events().await?;
-
-        Ok(())
-    }
-
-    /// Phase 3: Process all pending compositor events without Smithay backend
-    #[cfg(not(feature = "experimental-smithay"))]
+    /// Phase 3: Process all pending compositor events
     async fn process_events(&mut self) -> Result<()> {
         // Process IPC messages from Lazy UI
         if let Err(e) = self.ipc_server.process_messages().await {
@@ -478,8 +354,8 @@ impl AxiomCompositor {
         }
     }
 
-    /// Gracefully shutdown the compositor (with Smithay backend)
-    #[cfg(feature = "experimental-smithay")]
+
+    /// Gracefully shutdown the compositor
     async fn shutdown(&mut self) -> Result<()> {
         info!("🔽 Shutting down Axiom compositor...");
 
@@ -491,35 +367,7 @@ impl AxiomCompositor {
             xwayland.shutdown().await?;
         }
 
-        // Clean up Smithay backend
-        debug!("🚀 Shutting down Smithay backend...");
-        self.smithay_backend.shutdown().await?;
-
-        // Clean up other subsystems
-        debug!("🧩 Cleaning up compositor subsystems...");
-        self.input_manager.shutdown()?;
-        self.effects_engine.shutdown()?;
-        self.workspace_manager.shutdown()?;
-        self.window_manager.shutdown()?;
-
-        info!("✅ Axiom compositor shutdown complete");
-        Ok(())
-    }
-
-    /// Gracefully shutdown the compositor (without Smithay backend)
-    #[cfg(not(feature = "experimental-smithay"))]
-    async fn shutdown(&mut self) -> Result<()> {
-        info!("🔽 Shutting down Axiom compositor...");
-
-        self.running = false;
-
-        // Clean up XWayland first
-        if let Some(ref mut xwayland) = self.xwayland_manager {
-            debug!("🔗 Shutting down XWayland...");
-            xwayland.shutdown().await?;
-        }
-
-        // Clean up other subsystems (no Smithay backend)
+        // Clean up other subsystems (no direct Smithay backend owned here)
         debug!("🧩 Cleaning up compositor subsystems...");
         self.input_manager.shutdown()?;
         self.effects_engine.shutdown()?;

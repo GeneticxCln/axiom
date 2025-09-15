@@ -3,6 +3,7 @@
 //! This module handles drawing window decorations (titlebars, borders, buttons)
 //! when clients request server-side decorations (SSD).
 
+#![allow(dead_code)]
 use anyhow::Result;
 use log::{debug, info};
 use std::collections::HashMap;

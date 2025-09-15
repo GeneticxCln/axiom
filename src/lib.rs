@@ -79,8 +79,9 @@ pub mod renderer;
 // Real backend modules (non-smithay)
 pub mod backend_real;
 
-// Experimental features module
-pub mod experimental;
+// Unified Smithay backend
+#[cfg(feature = "smithay")]
+pub mod smithay;
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

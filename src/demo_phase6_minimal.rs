@@ -1,3 +1,4 @@
+#![cfg(feature = "demo")]
 //! # Phase 6.1: Minimal Smithay Integration Demo
 //!
 //! This demo showcases the minimal Smithay backend integration while
@@ -10,6 +11,7 @@ use std::time::Duration;
 use tokio::time;
 
 /// Run Phase 6.1 minimal Smithay integration demo
+#[cfg(feature = "demo")]
 pub async fn run_phase6_minimal_demo() -> Result<()> {
     info!("🚀 Phase 6.1: Minimal Smithay Integration Demo");
     info!("==============================================");
@@ -48,6 +50,7 @@ pub async fn run_phase6_minimal_demo() -> Result<()> {
 }
 
 /// Display Phase 6.1 status and progress toward real Wayland
+#[cfg(feature = "demo")]
 pub fn display_phase6_status() {
     info!("📊 Phase 6.1: Minimal Smithay Backend Status");
     info!("==========================================");
@@ -88,6 +91,7 @@ pub fn display_phase6_status() {
 }
 
 /// Demonstrate preserved functionality in Phase 6.1
+#[cfg(feature = "demo")]
 pub async fn demonstrate_preserved_functionality() -> Result<()> {
     info!("🎭 Demonstrating Preserved Axiom Functionality");
     info!("-------------------------------------------");
@@ -130,6 +134,7 @@ pub async fn demonstrate_preserved_functionality() -> Result<()> {
 }
 
 /// Show the roadmap from Phase 6.1 to production
+#[cfg(feature = "demo")]
 pub fn show_development_roadmap() {
     info!("🗺️  Phase 6 Development Roadmap");
     info!("==============================");
@@ -178,6 +183,7 @@ pub fn show_development_roadmap() {
 }
 
 /// Phase 6.1 summary and next steps
+#[cfg(feature = "demo")]
 pub fn summarize_phase6_1() {
     info!("📋 Phase 6.1 Summary: Foundation for Real Wayland");
     info!("==============================================");

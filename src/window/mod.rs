@@ -6,11 +6,8 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 // Backend window type
-#[cfg(feature = "experimental-smithay")]
-pub use crate::experimental::smithay::smithay_backend_simple::BackendWindow;
 
 // Minimal fallback backend window when experimental-smithay is disabled
-#[cfg(not(feature = "experimental-smithay"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct BackendWindow {
     pub id: u64,
@@ -19,7 +16,6 @@ pub struct BackendWindow {
     pub size: (u32, u32),
 }
 
-#[cfg(not(feature = "experimental-smithay"))]
 impl BackendWindow {
     pub fn new(id: u64, title: String) -> Self {
         Self { id, title, position: (0, 0), size: (800, 600) }

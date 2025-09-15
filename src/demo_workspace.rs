@@ -1,3 +1,4 @@
+#![cfg(feature = "demo")]
 //! Demo/test module for scrollable workspaces
 //!
 //! This module provides functionality to demonstrate and test
@@ -11,6 +12,7 @@ use tokio::time;
 use crate::compositor::AxiomCompositor;
 
 /// Demo the scrollable workspace functionality
+#[cfg(feature = "demo")]
 pub async fn demo_scrollable_workspaces(compositor: &mut AxiomCompositor) -> Result<()> {
     info!("🎭 Starting scrollable workspace demonstration...");
 
@@ -96,6 +98,7 @@ pub async fn demo_scrollable_workspaces(compositor: &mut AxiomCompositor) -> Res
 }
 
 /// Demo momentum scrolling (simulated)
+#[cfg(feature = "demo")]
 pub async fn demo_momentum_scrolling(compositor: &mut AxiomCompositor) -> Result<()> {
     info!("🎭 Demonstrating momentum scrolling simulation...");
 
@@ -137,6 +140,7 @@ pub async fn demo_momentum_scrolling(compositor: &mut AxiomCompositor) -> Result
 }
 
 /// Phase 3: Enhanced comprehensive test with input processing
+#[cfg(feature = "demo")]
 pub async fn run_comprehensive_test(compositor: &mut AxiomCompositor) -> Result<()> {
     info!("🧪 Phase 3: Running comprehensive scrollable workspace test with input processing...");
 
@@ -164,6 +168,7 @@ pub async fn run_comprehensive_test(compositor: &mut AxiomCompositor) -> Result<
 }
 
 /// Phase 3: Demo input processing capabilities
+#[cfg(feature = "demo")]
 pub async fn demo_input_processing(compositor: &mut AxiomCompositor) -> Result<()> {
     info!("🎭 Phase 3: Demonstrating input processing...");
 
@@ -207,6 +212,7 @@ pub async fn demo_input_processing(compositor: &mut AxiomCompositor) -> Result<(
 }
 
 /// Phase 3: Demo enhanced workspace features
+#[cfg(feature = "demo")]
 pub async fn demo_enhanced_workspace_features(compositor: &mut AxiomCompositor) -> Result<()> {
     info!("🎭 Phase 3: Demonstrating enhanced workspace features...");
 

@@ -3,11 +3,13 @@
 //! This module implements actual GPU rendering using wgpu to composite
 //! windows and effects to the screen - not just stubs.
 
+#![allow(dead_code)]
 use anyhow::Result;
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use wgpu::*;
+use wgpu::util::DeviceExt;
 use std::time::Duration;
 
 /// Real GPU rendering pipeline
@@ -20,6 +22,16 @@ pub struct AxiomRenderer {
     size: (u32, u32),
     /// Rendered windows
     windows: Vec<RenderedWindow>,
+    /// Whether this renderer was created with an adapter compatible with the given surface
+    surface_compatible: bool,
+    /// Pipeline for textured quad rendering (present when surface-backed)
+    pipeline: Option<RenderPipeline>,
+    /// Bind group layout for sampled textures
+    bind_group_layout: Option<BindGroupLayout>,
+    /// Default sampler
+    sampler: Option<Sampler>,
+    /// Surface format in use
+    surface_format: Option<TextureFormat>,
 }
 
 /// Represents a rendered window surface
@@ -35,6 +47,8 @@ pub struct RenderedWindow {
     pub texture: Option<Texture>,
     /// Window texture view for rendering
     pub texture_view: Option<TextureView>,
+    /// Bind group for sampling the texture
+    pub bind_group: Option<BindGroup>,
     /// Whether window needs redraw
     pub dirty: bool,
     /// Window opacity
@@ -54,93 +68,260 @@ static RENDER_STATE: OnceLock<Arc<Mutex<SharedRenderState>>> = OnceLock::new();
 #[derive(Default)]
 struct SharedRenderState {
     placeholders: HashMap<u64, ((f32, f32), (f32, f32), f32)>,
+    pending_textures: Vec<(u64, Vec<u8>, u32, u32)>,
 }
 
 pub fn push_placeholder_quad(id: u64, position: (f32, f32), size: (f32, f32), opacity: f32) {
-    if let Some(state) = RENDER_STATE.get() {
-        if let Ok(mut s) = state.lock() {
-            s.placeholders.insert(id, (position, size, opacity));
-        }
+    let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+    if let Ok(mut s) = state.lock() {
+        s.placeholders.insert(id, (position, size, opacity));
+    }
+}
+
+pub fn remove_placeholder_quad(id: u64) {
+    let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+    if let Ok(mut s) = state.lock() {
+        s.placeholders.remove(&id);
+    }
+}
+
+pub fn queue_texture_update(id: u64, data: Vec<u8>, width: u32, height: u32) {
+    let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+    if let Ok(mut s) = state.lock() {
+        s.pending_textures.push((id, data, width, height));
     }
 }
 
 impl AxiomRenderer {
-    /// Create a new real GPU renderer with an actual surface
-    pub async fn new(surface: wgpu::Surface<'static>, width: u32, height: u32) -> Result<Self> {
-        info!(
-            "🎨 Creating real GPU renderer with surface ({}x{})",
-            width, height
-        );
+    /// Create a new real GPU renderer with an actual surface using the provided instance.
+    /// If no compatible adapter is found, gracefully falls back to a headless renderer and
+    /// marks `surface_compatible = false` so on-screen rendering can be skipped without crashing.
+    pub async fn new_with_instance(
+        instance: &wgpu::Instance,
+        surface: Option<&wgpu::Surface<'_>>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
+        if surface.is_some() {
+            info!(
+                "🎨 Creating real GPU renderer with surface ({}x{})",
+                width, height
+            );
+        } else {
+            info!("🎨 Creating real GPU renderer (no surface) width={} height={}", width, height);
+        }
 
-        // Create wgpu instance
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
+        // Try to find an adapter compatible with the surface
+        let mut chosen_adapter: Option<wgpu::Adapter> = None;
+        let surface_for_opts = surface;
 
-        // Get adapter (GPU)
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Failed to find suitable GPU adapter"))?;
+        for power in [wgpu::PowerPreference::HighPerformance, wgpu::PowerPreference::LowPower] {
+            for fallback in [false, true] {
+                if let Some(adapter) = instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: power,
+                        compatible_surface: surface_for_opts,
+                        force_fallback_adapter: fallback,
+                    })
+                    .await
+                {
+                    chosen_adapter = Some(adapter);
+                    break;
+                }
+            }
+            if chosen_adapter.is_some() { break; }
+        }
 
-        info!("🖥️ Using GPU: {}", adapter.get_info().name);
+        // If we couldn't find a surface-compatible adapter, fall back to headless mode
+        let (device, queue, surface_compatible, pipeline, bgl, sampler, surface_format) = if let Some(adapter) = chosen_adapter {
+            info!("🖥️ Using GPU: {}", adapter.get_info().name);
 
-        // Create device and queue
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    label: None,
-                },
-                None,
-            )
-            .await?;
+            let (device, queue) = adapter
+                .request_device(
+                    &wgpu::DeviceDescriptor {
+                        required_features: wgpu::Features::empty(),
+                        required_limits: wgpu::Limits::default(),
+                        label: None,
+                    },
+                    None,
+                )
+                .await?;
 
-        // Configure surface
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
+            let mut out_pipeline = None;
+            let mut out_bgl = None;
+            let mut out_sampler = None;
+            let mut out_format = None;
 
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width,
-            height,
-            present_mode: surface_caps.present_modes[0],
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            if let Some(s) = surface {
+                // Configure surface with robust defaults
+                let caps = s.get_capabilities(&adapter);
+                let fmts: Vec<String> = caps.formats.iter().map(|f| format!("{:?}", f)).collect();
+                let pmods: Vec<String> = caps.present_modes.iter().map(|m| format!("{:?}", m)).collect();
+                let amods: Vec<String> = caps.alpha_modes.iter().map(|a| format!("{:?}", a)).collect();
+                info!(
+                    "🧩 Surface capabilities: formats={:?}, present_modes={:?}, alpha_modes={:?}",
+                    fmts, pmods, amods
+                );
+
+                let format = caps
+                    .formats
+                    .iter()
+                    .copied()
+                    .find(|f| f.is_srgb())
+                    .unwrap_or(caps.formats[0]);
+                let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+                    wgpu::PresentMode::Mailbox
+                } else if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
+                    wgpu::PresentMode::Fifo
+                } else {
+                    caps.present_modes[0]
+                };
+                let alpha_mode = caps
+                    .alpha_modes
+                    .iter()
+                    .copied()
+                    .find(|m| matches!(m, wgpu::CompositeAlphaMode::Auto | wgpu::CompositeAlphaMode::Opaque))
+                    .unwrap_or(caps.alpha_modes[0]);
+
+                info!(
+                    "🔧 Using format={:?}, present_mode={:?}, alpha_mode={:?}",
+                    format, present_mode, alpha_mode
+                );
+
+                let config = wgpu::SurfaceConfiguration {
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    format,
+                    width,
+                    height,
+                    present_mode,
+                    alpha_mode,
+                    view_formats: vec![],
+                    desired_maximum_frame_latency: 2,
+                };
+                s.configure(&device, &config);
+
+                // Create bind group layout and pipeline for textured quad
+                let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Axiom Texture BGL"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
+
+                let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Axiom Pipeline Layout"),
+                    bind_group_layouts: &[&bind_group_layout],
+                    push_constant_ranges: &[],
+                });
+
+                let shader_src = include_str!("./textured_quad.wgsl");
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Axiom Textured Quad Shader"),
+                    source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+                });
+
+                let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Axiom Textured Quad Pipeline"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: "vs_main",
+                        buffers: &[Vertex::desc()],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: "fs_main",
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
+                });
+
+                let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                    label: Some("Axiom Default Sampler"),
+                    address_mode_u: wgpu::AddressMode::ClampToEdge,
+                    address_mode_v: wgpu::AddressMode::ClampToEdge,
+                    address_mode_w: wgpu::AddressMode::ClampToEdge,
+                    mag_filter: wgpu::FilterMode::Linear,
+                    min_filter: wgpu::FilterMode::Linear,
+                    mipmap_filter: wgpu::FilterMode::Linear,
+                    ..Default::default()
+                });
+
+                out_pipeline = Some(pipeline);
+                out_bgl = Some(bind_group_layout);
+                out_sampler = Some(sampler);
+                out_format = Some(format);
+            }
+
+            (device, queue, surface.is_some(), out_pipeline, out_bgl, out_sampler, out_format)
+        } else {
+            warn!(
+                "⚠️ No surface-compatible GPU adapter found. Falling back to headless renderer; on-screen presentation will be disabled."
+            );
+            let headless = Self::new_headless().await?;
+            return Ok(Self {
+                device: headless.device,
+                queue: headless.queue,
+                size: (width, height),
+                windows: Vec::new(),
+                surface_compatible: false,
+                pipeline: None,
+                bind_group_layout: None,
+                sampler: None,
+                surface_format: None,
+            });
         };
 
-        surface.configure(&device, &config);
-
         info!("✅ GPU renderer initialized successfully");
-
         Ok(Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
             size: (width, height),
             windows: Vec::new(),
+            surface_compatible,
+            pipeline,
+            bind_group_layout: bgl,
+            sampler,
+            surface_format,
         })
     }
 
-    /// Create a headless renderer for testing
-    pub async fn new_headless() -> Result<Self> {
-        info!("🎨 Creating headless GPU renderer for testing");
+    /// Backward-compatible constructor; may fall back to headless if given surface was created
+    /// from a different Instance and no compatible adapter is found.
+    pub async fn new(surface: &wgpu::Surface<'_>, width: u32, height: u32) -> Result<Self> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::all(), ..Default::default() });
+        Self::new_with_instance(&instance, Some(surface), width, height).await
+    }
+
+    /// Create a headless renderer for testing with specified backends
+    pub async fn new_headless_with_backends(backends: wgpu::Backends) -> Result<Self> {
+        info!("🎨 Creating headless GPU renderer for testing (backends={:?})", backends);
 
         // Create wgpu instance
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends,
             ..Default::default()
         });
 
@@ -173,7 +354,17 @@ impl AxiomRenderer {
             queue: Arc::new(queue),
             size: (1920, 1080), // Default size for headless
             windows: Vec::new(),
+            surface_compatible: false,
+            pipeline: None,
+            bind_group_layout: None,
+            sampler: None,
+            surface_format: None,
         })
+    }
+
+    /// Create a headless renderer with default backends (all)
+    pub async fn new_headless() -> Result<Self> {
+        Self::new_headless_with_backends(wgpu::Backends::all()).await
     }
 
     /// Add a window to be rendered
@@ -189,6 +380,7 @@ impl AxiomRenderer {
             size,
             texture: None,
             texture_view: None,
+            bind_group: None,
             dirty: true,
             opacity: 1.0,
         };
@@ -217,6 +409,7 @@ impl AxiomRenderer {
                 size,
                 texture: None,
                 texture_view: None,
+                bind_group: None,
                 dirty: true,
                 opacity,
             };
@@ -279,6 +472,7 @@ impl AxiomRenderer {
 
             window.texture = Some(texture);
             window.texture_view = Some(texture_view);
+            window.bind_group = None;
             window.dirty = true;
 
             info!("✅ Updated texture for window {}", window_id);
@@ -315,6 +509,11 @@ impl AxiomRenderer {
         _surface: &wgpu::Surface<'_>,
         surface_texture: &wgpu::SurfaceTexture,
     ) -> Result<()> {
+        if !self.surface_compatible {
+            // Graceful no-op: we don't have a surface-compatible device, skip rendering
+            debug!("🚫 Skipping surface render (no compatible adapter); presenting empty frame");
+            return Ok(());
+        }
         debug!("🎨 Rendering {} windows to surface", self.windows.len());
 
         // Create render pass
@@ -328,38 +527,86 @@ impl AxiomRenderer {
                 label: Some("Render Encoder"),
             });
 
-        {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Axiom Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
+        if let (Some(pipeline), Some(bgl), Some(sampler)) = (&self.pipeline, &self.bind_group_layout, &self.sampler) {
+            // Pre-allocate buffers once per frame for all windows and draw
+            // Flatten all quads into a single draw list
+            let mut all_vertices: Vec<Vertex> = Vec::new();
+            let mut all_indices: Vec<u16> = Vec::new();
+            let mut draw_bind_groups: Vec<&BindGroup> = Vec::new();
 
-            // Render each window
-            for window in &self.windows {
-                if window.texture_view.is_some() {
-                    // In a real implementation, we would:
-                    // 1. Set up vertex/index buffers for the window quad
-                    // 2. Set the window texture as shader input
-                    // 3. Apply transformations (position, scale, rotation)
-                    // 4. Apply effects (opacity, blur, shadows)
-                    // 5. Draw the quad
+            for window in &mut self.windows {
+                if let Some(tex_view) = &window.texture_view {
+                    if window.bind_group.is_none() {
+                        window.bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Axiom Window BindGroup"),
+                            layout: bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(tex_view) },
+                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+                            ],
+                        }));
+                    }
+                    let bind_group = window.bind_group.as_ref().unwrap();
 
-                    debug!("✅ Rendering window {} to surface", window.id);
+                    // Build quad vertices in clip space for this window
+                    let (x, y) = window.position;
+                    let (w, h) = window.size;
+                    let fw = self.size.0 as f32;
+                    let fh = self.size.1 as f32;
+                    let x0 = (x / fw) * 2.0 - 1.0;
+                    let y0 = 1.0 - (y / fh) * 2.0;
+                    let x1 = ((x + w) / fw) * 2.0 - 1.0;
+                    let y1 = 1.0 - ((y + h) / fh) * 2.0;
+
+                    let base_index = all_vertices.len() as u16;
+                    all_vertices.extend_from_slice(&[
+                        Vertex { position: [x0, y1, 0.0], tex_coords: [0.0, 1.0] },
+                        Vertex { position: [x1, y1, 0.0], tex_coords: [1.0, 1.0] },
+                        Vertex { position: [x0, y0, 0.0], tex_coords: [0.0, 0.0] },
+                        Vertex { position: [x1, y0, 0.0], tex_coords: [1.0, 0.0] },
+                    ]);
+                    all_indices.extend_from_slice(&[base_index, base_index + 1, base_index + 2, base_index + 2, base_index + 1, base_index + 3]);
+                    draw_bind_groups.push(bind_group);
+                }
+            }
+
+            if !all_vertices.is_empty() {
+                let vbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Axiom Quad Verts Batch"),
+                    contents: bytemuck::cast_slice(&all_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let ibuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Axiom Quad Indices Batch"),
+                    contents: bytemuck::cast_slice(&all_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+                {
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Axiom Render Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.06, a: 1.0 }),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                    });
+
+                    rpass.set_pipeline(pipeline);
+                    rpass.set_vertex_buffer(0, vbuf.slice(..));
+                    rpass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint16);
+
+                    for (i, bind_group) in draw_bind_groups.iter().enumerate() {
+                        rpass.set_bind_group(0, bind_group, &[]);
+                        let first_index = (i as u32) * 6;
+                        rpass.draw_indexed(first_index..first_index + 6, 0, 0..1);
+                    }
                 }
             }
         }
@@ -386,9 +633,30 @@ impl AxiomRenderer {
         self.windows.len()
     }
 
+    /// Whether this renderer can present to the given surface
+    pub fn can_present(&self) -> bool {
+        self.surface_compatible
+    }
+
+    /// Sync renderer state from shared placeholders and pending textures
+    pub fn sync_from_shared(&mut self) {
+        if let Some(state) = RENDER_STATE.get() {
+            if let Ok(mut s) = state.lock() {
+                for (id, (pos, size, opacity)) in s.placeholders.iter() {
+                    self.upsert_window_rect(*id, *pos, *size, *opacity);
+                }
+                let updates: Vec<_> = s.pending_textures.drain(..).collect();
+                drop(s);
+                for (id, data, w, h) in updates {
+                    let _ = self.update_window_texture(id, &data, w, h);
+                }
+            }
+        }
+    }
+
     /// Start a simple headless render loop at ~60 FPS for development
-    pub async fn start_headless_loop() -> Result<tokio::task::JoinHandle<()>> {
-        let mut renderer = Self::new_headless().await?;
+    pub async fn start_headless_loop_with_backends(backends: wgpu::Backends) -> Result<tokio::task::JoinHandle<()>> {
+        let mut renderer = Self::new_headless_with_backends(backends).await?;
         // Initialize shared render state if not already
         let _ = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
         info!("🖥️ Starting headless render loop (~60 FPS)");
@@ -399,9 +667,15 @@ impl AxiomRenderer {
                 ticker.tick().await;
                 // Sync placeholders into renderer's window list
                 if let Some(state) = RENDER_STATE.get() {
-                    if let Ok(s) = state.lock() {
+                    if let Ok(mut s) = state.lock() {
                         for (id, (pos, size, opacity)) in s.placeholders.iter() {
                             renderer.upsert_window_rect(*id, *pos, *size, *opacity);
+                        }
+                        // Drain pending textures into renderer
+                        let updates: Vec<_> = s.pending_textures.drain(..).collect();
+                        drop(s);
+                        for (id, data, w, h) in updates {
+                            let _ = renderer.update_window_texture(id, &data, w, h);
                         }
                     }
                 }
@@ -412,6 +686,11 @@ impl AxiomRenderer {
         });
 
         Ok(handle)
+    }
+
+    /// Backwards-compatible headless loop using all backends
+    pub async fn start_headless_loop() -> Result<tokio::task::JoinHandle<()>> {
+        Self::start_headless_loop_with_backends(wgpu::Backends::all()).await
     }
 }
 

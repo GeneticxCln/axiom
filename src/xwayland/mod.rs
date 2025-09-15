@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! XWayland integration for X11 app compatibility
 //! Provides seamless integration of X11 applications in Wayland
 

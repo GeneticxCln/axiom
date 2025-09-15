@@ -1,3 +1,4 @@
+#![cfg(feature = "demo")]
 //! # Phase 6.1: Working Smithay Backend Demo
 //!
 //! This demo showcases the first real Smithay integration that actually works.
@@ -11,6 +12,7 @@ use tokio::time;
 use crate::compositor::AxiomCompositor;
 
 /// Run the Phase 6.1 Working Smithay Backend demonstration
+#[cfg(feature = "demo")]
 pub async fn run_phase6_working_demo(compositor: &mut AxiomCompositor) -> Result<()> {
     info!("🎉 Phase 6.1: Working Smithay Backend Demo");
     info!("============================================");
@@ -39,6 +41,7 @@ pub async fn run_phase6_working_demo(compositor: &mut AxiomCompositor) -> Result
 }
 
 /// Show what Phase 6.1 has achieved
+#[cfg(feature = "demo")]
 async fn show_phase6_achievements() -> Result<()> {
     info!("🏆 Phase 6.1 Achievements:");
     info!("=========================");
@@ -62,6 +65,7 @@ async fn show_phase6_achievements() -> Result<()> {
 }
 
 /// Demonstrate that all existing Axiom systems are preserved and working
+#[cfg(feature = "demo")]
 async fn demonstrate_preserved_systems(compositor: &mut AxiomCompositor) -> Result<()> {
     info!("🎭 Demo 1: All Your Systems Still Work");
     info!("======================================");
@@ -114,6 +118,7 @@ async fn demonstrate_preserved_systems(compositor: &mut AxiomCompositor) -> Resu
 }
 
 /// Demonstrate real Wayland functionality
+#[cfg(feature = "demo")]
 async fn demonstrate_wayland_functionality() -> Result<()> {
     info!("🔌 Demo 2: Real Wayland Infrastructure");
     info!("=====================================");
@@ -149,6 +154,7 @@ async fn demonstrate_wayland_functionality() -> Result<()> {
 }
 
 /// Demonstrate integration between existing systems and new Wayland functionality
+#[cfg(feature = "demo")]
 async fn demonstrate_integration(_compositor: &mut AxiomCompositor) -> Result<()> {
     info!("🔗 Demo 3: System Integration");
     info!("=============================");
@@ -192,6 +198,7 @@ async fn demonstrate_integration(_compositor: &mut AxiomCompositor) -> Result<()
 }
 
 /// Show the roadmap from Phase 6.1 to working with real applications
+#[cfg(feature = "demo")]
 pub fn show_phase6_roadmap() {
     info!("🗺️ Phase 6 Development Roadmap");
     info!("==============================");
@@ -234,6 +241,7 @@ pub fn show_phase6_roadmap() {
 }
 
 /// Provide immediate next steps for Phase 6.2
+#[cfg(feature = "demo")]
 pub fn show_immediate_next_steps() {
     info!("🎯 Immediate Next Steps for Phase 6.2");
     info!("=====================================");

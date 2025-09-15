@@ -4,17 +4,18 @@
 //! single place to register globals on a given DisplayHandle.
 
 use anyhow::Result;
-use smithay::reexports::wayland_server::DisplayHandle;
+use smithay::reexports::wayland_server::Display;
 use smithay::wayland::{
     compositor::CompositorState,
     output::OutputManagerState,
     shell::xdg::XdgShellState,
     shm::ShmState,
+    seat::{Seat, SeatState},
 };
-use smithay::input::{Seat, SeatState, keyboard::KeyboardHandle, pointer::PointerHandle};
+use smithay::input::{keyboard::KeyboardHandle, pointer::PointerHandle};
 
 /// Register wl_compositor global and return its state
-pub fn register_compositor<S>(display: &DisplayHandle) -> CompositorState
+pub fn register_compositor<S>(display: &mut Display<S>) -> CompositorState
 where
     S: smithay::wayland::compositor::CompositorHandler + 'static,
 {
@@ -22,7 +23,7 @@ where
 }
 
 /// Register wl_shm global and return its state
-pub fn register_shm<S>(display: &DisplayHandle) -> ShmState
+pub fn register_shm<S>(display: &mut Display<S>) -> ShmState
 where
     S: smithay::wayland::shm::ShmHandler + 'static,
 {
@@ -30,7 +31,7 @@ where
 }
 
 /// Register xdg_wm_base global and return its state
-pub fn register_xdg_shell<S>(display: &DisplayHandle) -> XdgShellState
+pub fn register_xdg_shell<S>(display: &mut Display<S>) -> XdgShellState
 where
     S: smithay::wayland::shell::xdg::XdgShellHandler + 'static,
 {
@@ -38,21 +39,22 @@ where
 }
 
 /// Register wl_output/xdg_output globals and return the output manager state
-pub fn register_output_manager<S>(display: &DisplayHandle) -> OutputManagerState
+pub fn register_output_manager<S>(display: &mut Display<S>) -> OutputManagerState
 where
     S: 'static,
 {
-    OutputManagerState::new_with_xdg_output::<S>(display)
+    // Smithay 0.3 uses OutputManagerState::new()
+    OutputManagerState::new::<S>(display)
 }
 
 /// Create a wl_seat with keyboard and pointer and return handles
 pub fn create_seat<S>(
-    display: &DisplayHandle,
+    display: &mut Display<S>,
     seat_state: &mut SeatState<S>,
     name: &str,
 ) -> Result<(Seat<S>, KeyboardHandle<S>, PointerHandle<S>)>
 where
-    S: smithay::input::SeatHandler + 'static,
+    S: smithay::wayland::seat::SeatHandler + 'static,
 {
     let mut seat = seat_state.new_wl_seat(display, name);
     let keyboard = seat.add_keyboard(Default::default(), 200, 25)?;

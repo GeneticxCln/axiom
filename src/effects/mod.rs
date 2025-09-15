@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Phase 4: Visual Effects Engine (Hyprland-inspired)
 //!
 //! This module handles all visual effects: animations, blur, shadows,
