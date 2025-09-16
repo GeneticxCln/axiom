@@ -102,6 +102,7 @@ ctrlc = "3.4"  # For graceful shutdown
 rand = "0.8"  # For input simulation in Phase 3
 bytemuck = { version = "1.14", features = ["derive"] }  # For GPU buffer data
 parking_lot = "0.12"  # For RwLock synchronization
+nvml-wrapper = { version = "0.10", optional = true }
 
 # TODO: Add features when compositor dependencies are ready
 # [features]
@@ -125,6 +126,9 @@ demo = []
 smithay = []
 # Enable on-screen presentation via wgpu + winit path
 wgpu-present = ["pollster"]
+# Enable NVIDIA NVML GPU metrics support (requires libnvidia-ml)
+# Usage: cargo build --features gpu-nvml
+gpu-nvml = ["nvml-wrapper"]
 # Example builds (no-op)
 examples = []
 # Minimal Wayland server feature (no-op shim to align with README/CI)

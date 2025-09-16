@@ -15,7 +15,8 @@ use crate::config::AxiomConfig;
 use crate::decoration::DecorationManager;
 use crate::effects::EffectsEngine;
 use crate::input::InputManager;
-use crate::ipc::AxiomIPCServer;
+use crate::ipc::{AxiomIPCServer, RuntimeCommand};
+use tokio::sync::mpsc;
 use crate::renderer::AxiomRenderer;
 use crate::window::WindowManager;
 use crate::workspace::ScrollableWorkspaces;
@@ -38,6 +39,9 @@ pub struct AxiomCompositor {
     input_manager: InputManager,
     xwayland_manager: Option<XWaylandManager>,
     ipc_server: AxiomIPCServer,
+
+    // Runtime command receiver from IPC
+    runtime_cmd_rx: mpsc::UnboundedReceiver<RuntimeCommand>,
 
     // Renderer (headless for now, scaffolding real GPU path)
     renderer: Option<AxiomRenderer>,
@@ -81,6 +85,11 @@ impl AxiomCompositor {
         // Initialize IPC server for Lazy UI integration
         debug!("🔗 Initializing IPC server...");
         let mut ipc_server = AxiomIPCServer::new();
+        // Provide IPC with a read-only snapshot of the current configuration
+        AxiomIPCServer::set_config_snapshot(config.clone());
+        // Create runtime command channel and register sender with IPC module
+        let (runtime_tx, runtime_rx) = mpsc::unbounded_channel();
+        AxiomIPCServer::register_runtime_command_sender(runtime_tx);
         ipc_server
             .start()
             .await
@@ -110,6 +119,7 @@ impl AxiomCompositor {
             xwayland_manager,
             ipc_server,
             renderer,
+            runtime_cmd_rx: runtime_rx,
             running: false,
         })
     }
@@ -154,6 +164,11 @@ impl AxiomCompositor {
             warn!("⚠️ Error processing IPC messages: {}", e);
         }
 
+        // Drain runtime commands from IPC and apply changes
+        while let Ok(cmd) = self.runtime_cmd_rx.try_recv() {
+            self.apply_runtime_command(cmd);
+        }
+
         // Phase 3: Simulate input processing for demonstration
         // In a real implementation, this would receive events from Smithay
         self.process_simulated_input_events().await?;
@@ -185,6 +200,136 @@ impl AxiomCompositor {
         }
 
         Ok(())
+    }
+
+    /// Apply runtime command received from IPC
+    fn apply_runtime_command(&mut self, cmd: RuntimeCommand) {
+        match cmd {
+            RuntimeCommand::SetConfig { key, value } => {
+                // Only support a safe subset of keys for live updates
+                match key.as_str() {
+                    "effects.enabled" => {
+                        if let Some(b) = value.as_bool() {
+                            self.effects_engine.set_effects_enabled(b);
+                            self.config.effects.enabled = b;
+                            AxiomIPCServer::set_config_snapshot(self.config.clone());
+                        }
+                    }
+                    "effects.blur.radius" => {
+                        if let Some(r) = value.as_f64() {
+                            let r = r as f32;
+                            self.effects_engine.set_blur_radius(r);
+                            self.config.effects.blur.radius = r as u32;
+                            AxiomIPCServer::set_config_snapshot(self.config.clone());
+                        }
+                    }
+                    "effects.animations.duration" => {
+                        if let Some(ms) = value.as_u64() {
+                            let ms = ms as u32;
+                            self.effects_engine.set_animation_duration(ms);
+                            // config updated inside setter
+                            AxiomIPCServer::set_config_snapshot(self.config.clone());
+                        } else if let Some(f) = value.as_f64() { // allow float too
+                            let ms = f.max(0.0) as u32;
+                            self.effects_engine.set_animation_duration(ms);
+                            AxiomIPCServer::set_config_snapshot(self.config.clone());
+                        }
+                    }
+                    "workspace.scroll_speed" => {
+                        if let Some(s) = value.as_f64() {
+                            let s = s.clamp(0.01, 10.0);
+                            self.workspace_manager.set_scroll_speed(s);
+                            self.config.workspace.scroll_speed = s;
+                            if let Err(e) = self.config.validate() {
+                                warn!("Invalid runtime config for workspace.scroll_speed: {}", e);
+                            }
+                            AxiomIPCServer::set_config_snapshot(self.config.clone());
+                        }
+                    }
+                    "input.pan_threshold" => {
+                        if let Some(v) = value.as_f64() {
+                            let v = v.max(0.0).min(1000.0);
+                            self.input_manager.update_thresholds(Some(v), None, None);
+                            self.config.input.pan_threshold = v;
+                            AxiomIPCServer::set_config_snapshot(self.config.clone());
+                        }
+                    }
+                    "input.scroll_threshold" => {
+                        if let Some(v) = value.as_f64() {
+                            let v = v.max(0.0).min(1000.0);
+                            self.input_manager.update_thresholds(None, Some(v), None);
+                            self.config.input.scroll_threshold = v;
+                            AxiomIPCServer::set_config_snapshot(self.config.clone());
+                        }
+                    }
+                    "input.swipe_threshold" => {
+                        if let Some(v) = value.as_f64() {
+                            let v = v.max(0.0).min(5000.0);
+                            self.input_manager.update_thresholds(None, None, Some(v));
+                            self.config.input.swipe_threshold = v;
+                            AxiomIPCServer::set_config_snapshot(self.config.clone());
+                        }
+                    }
+                    _ => {
+                        debug!("Unsupported live SetConfig key: {}", key);
+                    }
+                }
+            }
+            RuntimeCommand::EffectsControl { enabled, blur_radius, animation_speed } => {
+                if let Some(b) = enabled { self.effects_engine.set_effects_enabled(b); self.config.effects.enabled = b; }
+                if let Some(r) = blur_radius { self.effects_engine.set_blur_radius(r); self.config.effects.blur.radius = r as u32; }
+                if let Some(speed) = animation_speed { self.effects_engine.set_animation_speed(speed); }
+                AxiomIPCServer::set_config_snapshot(self.config.clone());
+            }
+            RuntimeCommand::ClipboardSet { .. } | RuntimeCommand::ClipboardGet => {
+                // Clipboard handled directly in IPC layer for now
+            }
+            RuntimeCommand::Workspace { action, parameters } => {
+                let act = action.as_str();
+                match act {
+                    "scroll_left" => self.scroll_workspace_left(),
+                    "scroll_right" => self.scroll_workspace_right(),
+                    "scroll_to_column" => {
+                        if let Some(idx) = parameters.get("index").and_then(|v| v.as_i64()) {
+                            self.workspace_manager.scroll_to_column(idx as i32);
+                        }
+                    }
+                    "move_focused_left" => {
+                        if let Some((&window_id)) = self.workspace_manager.get_focused_column_windows().first() {
+                            self.move_window_left(window_id);
+                        }
+                    }
+                    "move_focused_right" => {
+                        if let Some((&window_id)) = self.workspace_manager.get_focused_column_windows().first() {
+                            self.move_window_right(window_id);
+                        }
+                    }
+                    "close_focused" => {
+                        if let Some(focused_id) = self.window_manager.focused_window_id() {
+                            self.remove_window(focused_id);
+                            self.effects_engine.animate_window_close(focused_id);
+                        }
+                    }
+                    "toggle_fullscreen" => {
+                        if let Some(focused_id) = self.window_manager.focused_window_id() {
+                            let _ = self.window_manager.toggle_fullscreen(focused_id);
+                        }
+                    }
+                    "add_window" => {
+                        let title = parameters.get("title").and_then(|v| v.as_str()).unwrap_or("IPC Window").to_string();
+                        self.add_window(title);
+                    }
+                    "set_viewport_size" => {
+                        if let (Some(w), Some(h)) = (parameters.get("width").and_then(|v| v.as_u64()), parameters.get("height").and_then(|v| v.as_u64())) {
+                            self.set_viewport_size(w as u32, h as u32);
+                        }
+                    }
+                    _ => {
+                        debug!("Unsupported workspace action: {}", action);
+                    }
+                }
+            }
+        }
     }
 
     /// Phase 3: Handle compositor actions triggered by input events

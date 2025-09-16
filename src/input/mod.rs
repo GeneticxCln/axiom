@@ -46,8 +46,7 @@ pub enum InputEvent {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MouseButton {
     Left,
     Right,
@@ -89,6 +88,9 @@ pub struct InputManager {
     /// Key binding mappings
     key_bindings: HashMap<String, CompositorAction>,
 
+    /// Mouse button bindings
+    mouse_bindings: HashMap<MouseButton, CompositorAction>,
+
     /// Current modifier state
     active_modifiers: Vec<String>,
 
@@ -98,6 +100,10 @@ pub struct InputManager {
     /// Gesture state for momentum scrolling
     #[allow(dead_code)]
     gesture_state: Option<GestureState>,
+
+    /// Drag mode state
+    drag_mode: Option<DragMode>,
+    drag_start: Option<(f64, f64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +113,9 @@ struct GestureState {
     start_position: (f64, f64),
     current_velocity: (f64, f64),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DragMode { Move, Resize }
 
 impl InputManager {
     pub fn new(input_config: &InputConfig, bindings_config: &BindingsConfig) -> Result<Self> {
@@ -140,15 +149,36 @@ impl InputManager {
             CompositorAction::CloseWindow,
         );
 
+        // Parse mouse button bindings from config (optional)
+        let mut mouse_bindings: HashMap<MouseButton, CompositorAction> = HashMap::new();
+        if !bindings_config.mouse_left.trim().is_empty() {
+if let Some(action) = Self::parse_action_name(&bindings_config.mouse_left) {
+                mouse_bindings.insert(MouseButton::Left, action);
+            }
+        }
+        if !bindings_config.mouse_right.trim().is_empty() {
+if let Some(action) = Self::parse_action_name(&bindings_config.mouse_right) {
+                mouse_bindings.insert(MouseButton::Right, action);
+            }
+        }
+        if !bindings_config.mouse_middle.trim().is_empty() {
+if let Some(action) = Self::parse_action_name(&bindings_config.mouse_middle) {
+                mouse_bindings.insert(MouseButton::Middle, action);
+            }
+        }
+
         debug!("🔑 Loaded {} key bindings", key_bindings.len());
 
         Ok(Self {
             input_config: input_config.clone(),
             bindings_config: bindings_config.clone(),
             key_bindings,
+            mouse_bindings,
             active_modifiers: Vec::new(),
             mouse_position: (0.0, 0.0),
             gesture_state: None,
+            drag_mode: None,
+            drag_start: None,
         })
     }
 
@@ -169,11 +199,33 @@ impl InputManager {
             InputEvent::MouseMove {
                 x,
                 y,
-                delta_x: _,
-                delta_y: _,
+                delta_x,
+                delta_y,
             } => {
+                let mut actions = Vec::new();
+                // Handle drag motion if active
+                if let Some(mode) = self.drag_mode {
+                    if let Some((sx, sy)) = self.drag_start {
+                        let dx = x - sx;
+                        let dy = y - sy;
+                        if dx.abs() + dy.abs() > self.input_config.drag_threshold {
+                            match mode {
+                                DragMode::Move => {
+                                    // Map to move window left/right based on sign; fine-grained movement is TBD
+                                    if dx > 0.0 { actions.push(CompositorAction::MoveWindowRight); }
+                                    else { actions.push(CompositorAction::MoveWindowLeft); }
+                                }
+                                DragMode::Resize => {
+                                    // Reuse move actions as placeholder for resize
+                                    if dx > 0.0 { actions.push(CompositorAction::MoveWindowRight); }
+                                    else { actions.push(CompositorAction::MoveWindowLeft); }
+                                }
+                            }
+                        }
+                    }
+                }
                 self.mouse_position = (x, y);
-                Vec::new() // No actions for simple mouse movement
+                actions
             }
             InputEvent::Scroll {
                 x,
@@ -242,7 +294,30 @@ impl InputManager {
                 "🐁 Mouse button {:?} pressed at ({:.1}, {:.1})",
                 button, x, y
             );
-            // TODO: Add mouse button bindings
+            // Detect drag chords
+            let mods = self.active_modifiers.join("+");
+            let drag_move_mod = self.bindings_config.drag_move_modifier.trim();
+            let drag_resize_mod = self.bindings_config.drag_resize_modifier.trim();
+            if !drag_move_mod.is_empty() && mods.contains(drag_move_mod) && button == MouseButton::Left {
+                self.drag_mode = Some(DragMode::Move);
+                self.drag_start = Some((x, y));
+                info!("🚚 Drag move started at ({:.1},{:.1})", x, y);
+            } else if !drag_resize_mod.is_empty() && mods.contains(drag_resize_mod) && button == MouseButton::Right {
+                self.drag_mode = Some(DragMode::Resize);
+                self.drag_start = Some((x, y));
+                info!("📐 Drag resize started at ({:.1},{:.1})", x, y);
+            }
+            if let Some(action) = self.mouse_bindings.get(&button) {
+                info!("🚀 Triggered action via mouse: {:?}", action);
+                return vec![action.clone()];
+            }
+        } else {
+            // Release ends any ongoing drag
+            if self.drag_mode.is_some() {
+                info!("🛑 Drag ended");
+                self.drag_mode = None;
+                self.drag_start = None;
+            }
         }
 
         Vec::new()
@@ -257,7 +332,7 @@ impl InputManager {
         delta_y: f64,
     ) -> Vec<CompositorAction> {
         // Horizontal scrolling for workspace navigation
-        if delta_x.abs() > delta_y.abs() && delta_x.abs() > 5.0 {
+        if delta_x.abs() > delta_y.abs() && delta_x.abs() > self.input_config.scroll_threshold {
             debug!("📜 Horizontal scroll: {:.1}", delta_x);
 
             if delta_x > 0.0 {
@@ -286,7 +361,7 @@ impl InputManager {
                 );
 
                 // Horizontal swipes for workspace navigation
-                if delta_x.abs() > 20.0 {
+                if delta_x.abs() > self.input_config.swipe_threshold {
                     if delta_x > 0.0 {
                         return vec![CompositorAction::ScrollWorkspaceRight];
                     } else {
@@ -295,8 +370,15 @@ impl InputManager {
                 }
             }
             GestureType::Pan => {
-                // TODO: Implement smooth scrolling with pan gestures
+                // Basic horizontal pan mapping to workspace navigation
                 debug!("🤏 Pan gesture: ({:.1}, {:.1})", delta_x, delta_y);
+                if delta_x.abs() > self.input_config.pan_threshold {
+                    if delta_x > 0.0 {
+                        return vec![CompositorAction::ScrollWorkspaceRight];
+                    } else {
+                        return vec![CompositorAction::ScrollWorkspaceLeft];
+                    }
+                }
             }
             GestureType::Pinch => {
                 // TODO: Implement workspace overview with pinch
@@ -332,5 +414,31 @@ impl InputManager {
     pub fn shutdown(&mut self) -> Result<()> {
         info!("🔌 Input manager shutting down");
         Ok(())
+    }
+
+    pub fn update_thresholds(&mut self, pan: Option<f64>, scroll: Option<f64>, swipe: Option<f64>) {
+        if let Some(p) = pan { self.input_config.pan_threshold = p.max(0.0).min(1000.0); }
+        if let Some(s) = scroll { self.input_config.scroll_threshold = s.max(0.0).min(1000.0); }
+        if let Some(sw) = swipe { self.input_config.swipe_threshold = sw.max(0.0).min(5000.0); }
+        debug!(
+            "Updated thresholds: pan={:.1}, scroll={:.1}, swipe={:.1}",
+            self.input_config.pan_threshold,
+            self.input_config.scroll_threshold,
+            self.input_config.swipe_threshold
+        );
+    }
+
+fn parse_action_name(name: &str) -> Option<CompositorAction> {
+        match name.trim().to_lowercase().as_str() {
+            "scroll_left" => Some(CompositorAction::ScrollWorkspaceLeft),
+            "scroll_right" => Some(CompositorAction::ScrollWorkspaceRight),
+            "move_window_left" => Some(CompositorAction::MoveWindowLeft),
+            "move_window_right" => Some(CompositorAction::MoveWindowRight),
+            "close_window" => Some(CompositorAction::CloseWindow),
+            "toggle_fullscreen" => Some(CompositorAction::ToggleFullscreen),
+            "quit" => Some(CompositorAction::Quit),
+            s if !s.is_empty() => Some(CompositorAction::Custom(s.to_string())),
+            _ => None,
+        }
     }
 }

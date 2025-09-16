@@ -43,6 +43,7 @@ mod window;
 mod workspace;
 mod xwayland;
 mod renderer;
+mod clipboard;
 
 // Unified Smithay backend
 #[cfg(feature = "smithay")]

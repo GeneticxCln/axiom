@@ -199,6 +199,22 @@ pub struct InputConfig {
 
     /// Natural scrolling
     pub natural_scrolling: bool,
+
+    /// Gesture threshold for horizontal pan (px)
+    #[serde(default = "InputConfig::default_pan_threshold")]
+    pub pan_threshold: f64,
+
+    /// Scroll threshold for horizontal scroll (px)
+    #[serde(default = "InputConfig::default_scroll_threshold")]
+    pub scroll_threshold: f64,
+
+    /// Swipe threshold (px)
+    #[serde(default = "InputConfig::default_swipe_threshold")]
+    pub swipe_threshold: f64,
+
+    /// Drag threshold (px) for chorded drag actions
+    #[serde(default = "InputConfig::default_drag_threshold")]
+    pub drag_threshold: f64,
 }
 
 /// Key bindings configuration
@@ -233,6 +249,23 @@ pub struct BindingsConfig {
 
     /// Quit compositor
     pub quit: String,
+
+    /// Mouse bindings: left button action name (e.g., "toggle_fullscreen")
+    #[serde(default)]
+    pub mouse_left: String,
+    /// Mouse bindings: right button action name
+    #[serde(default)]
+    pub mouse_right: String,
+    /// Mouse bindings: middle button action name
+    #[serde(default)]
+    pub mouse_middle: String,
+
+    /// Drag move chord modifier(s), e.g., "Super" or "Super+Shift"
+    #[serde(default)]
+    pub drag_move_modifier: String,
+    /// Drag resize chord modifier(s)
+    #[serde(default)]
+    pub drag_resize_modifier: String,
 }
 
 /// XWayland configuration
@@ -354,6 +387,10 @@ impl Default for InputConfig {
             mouse_accel: 0.0,
             touchpad_tap: true,
             natural_scrolling: true,
+            pan_threshold: Self::default_pan_threshold(),
+            scroll_threshold: Self::default_scroll_threshold(),
+            swipe_threshold: Self::default_swipe_threshold(),
+            drag_threshold: Self::default_drag_threshold(),
         }
     }
 }
@@ -371,8 +408,20 @@ impl Default for BindingsConfig {
             launch_launcher: "Super+Space".to_string(),
             toggle_effects: "Super+e".to_string(),
             quit: "Super+Shift+q".to_string(),
+            mouse_left: String::new(),
+            mouse_right: String::new(),
+            mouse_middle: String::new(),
+            drag_move_modifier: String::from("Super"),
+            drag_resize_modifier: String::new(),
         }
     }
+}
+
+impl InputConfig {
+    fn default_pan_threshold() -> f64 { 10.0 }
+    fn default_scroll_threshold() -> f64 { 5.0 }
+    fn default_swipe_threshold() -> f64 { 20.0 }
+    fn default_drag_threshold() -> f64 { 12.0 }
 }
 
 impl Default for XWaylandConfig {

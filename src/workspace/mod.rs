@@ -117,6 +117,13 @@ impl ScrollableWorkspaces {
         self.remove_window(window_id).is_some()
     }
 
+    /// Update workspace scroll speed at runtime (validated/clamped)
+    pub fn set_scroll_speed(&mut self, speed: f64) {
+        let clamped = speed.clamp(0.01, 10.0);
+        self.config.scroll_speed = clamped;
+        info!("⚙️ Updated workspace scroll_speed to {:.2}", clamped);
+    }
+
     /// Check if a window exists in any column
     pub fn window_exists(&self, window_id: u64) -> bool {
         self.columns.values().any(|c| c.windows.contains(&window_id))

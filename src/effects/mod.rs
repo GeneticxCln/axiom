@@ -758,6 +758,13 @@ impl EffectsEngine {
         )
     }
 
+    /// Adjust default animation duration (ms) for future animations
+    pub fn set_animation_duration(&mut self, duration_ms: u32) {
+        self.default_animation_duration = Duration::from_millis(duration_ms as u64);
+        self.config.animations.duration = duration_ms;
+        info!("🎬 Default animation duration set to {} ms", duration_ms);
+    }
+
     pub fn shutdown(&mut self) -> Result<()> {
         info!("🎨 Shutting down Visual Effects Engine...");
         self.window_effects.clear();
@@ -765,9 +772,36 @@ impl EffectsEngine {
         Ok(())
     }
 
+    /// Enable or disable all visual effects at runtime
+    pub fn set_effects_enabled(&mut self, enabled: bool) {
+        self.config.enabled = enabled;
+        info!("🎛️ Effects {}", if enabled { "enabled" } else { "disabled" });
+    }
+
     /// Toggle effects on/off
     pub fn toggle_effects(&mut self) {
-        self.config.enabled = !self.config.enabled;
+        self.set_effects_enabled(!self.config.enabled);
+    }
+
+    /// Adjust global blur radius (and update GPU blur renderer if active)
+    pub fn set_blur_radius(&mut self, radius: f32) {
+        self.blur_params.radius = radius;
+        if let Some(renderer) = self.blur_renderer.as_mut() {
+            let new_params = blur::BlurParams {
+                blur_type: blur::BlurType::Gaussian { radius, intensity: self.blur_params.intensity },
+                enabled: self.blur_params.enabled,
+                adaptive_quality: true,
+                performance_scale: self.effects_quality,
+            };
+            renderer.update_blur_params(new_params);
+        }
+        info!("🌊 Blur radius set to {:.1}", radius);
+    }
+
+    /// Adjust animation speed multiplier (via animation controller)
+    pub fn set_animation_speed(&mut self, speed: f32) {
+        let speed = speed.max(0.1);
+        self.animation_controller.set_global_speed(speed);
     }
 
     // Temporary no-op to satisfy benches that call this API. In future, wire to actual blur control per window.
