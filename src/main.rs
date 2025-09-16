@@ -18,9 +18,9 @@
 use anyhow::Result;
 use clap::Parser;
 use log::{error, info};
-#[cfg(feature = "smithay")]
+#[cfg(all(feature = "smithay", feature = "wgpu-present"))]
 use parking_lot::RwLock;
-#[cfg(feature = "smithay")]
+#[cfg(all(feature = "smithay", feature = "wgpu-present"))]
 use std::sync::Arc;
 #[cfg(all(feature = "smithay", feature = "wgpu-present"))]
 use winit::event::{Event, WindowEvent};
@@ -235,7 +235,7 @@ async fn main() -> Result<()> {
         // Initialize and run compositor
         info!("🏗️  Initializing Axiom compositor...");
 
-        let mut compositor = AxiomCompositor::new(config.clone(), cli.windowed).await?;
+        let compositor = AxiomCompositor::new(config.clone(), cli.windowed).await?;
 
         info!("✨ Axiom is ready! Where productivity meets beauty.");
 
@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn test_cli_parsing() {
         // Test basic CLI parsing
-        let cli = Cli::try_parse_from(&["axiom"]).unwrap();
+let cli = Cli::try_parse_from(["axiom"]).unwrap();
         assert!(!cli.debug);
         assert!(!cli.windowed);
         assert!(!cli.no_effects);
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_cli_flags() {
-        let cli = Cli::try_parse_from(&["axiom", "--debug", "--windowed", "--no-effects"]).unwrap();
+let cli = Cli::try_parse_from(["axiom", "--debug", "--windowed", "--no-effects"]).unwrap();
         assert!(cli.debug);
         assert!(cli.windowed);
         assert!(cli.no_effects);

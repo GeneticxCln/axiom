@@ -24,21 +24,21 @@ use super::ShadowParams;
 #[derive(Debug, Clone)]
 pub enum ShadowType {
     /// Standard drop shadow
-    DropShadow {
+    Drop {
         offset: Vector2<f32>,
         blur_radius: f32,
         opacity: f32,
         color: Vector4<f32>,
     },
     /// Inner shadow for depth
-    InnerShadow {
+    Inner {
         offset: Vector2<f32>,
         blur_radius: f32,
         opacity: f32,
         color: Vector4<f32>,
     },
     /// Dynamic lighting shadow
-    DynamicShadow {
+    Dynamic {
         light_position: Vector3<f32>,
         blur_radius: f32,
         opacity: f32,

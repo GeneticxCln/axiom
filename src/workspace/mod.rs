@@ -410,7 +410,7 @@ impl ScrollableWorkspaces {
                 velocity,
             } => {
                 let elapsed = now.duration_since(start_time).as_secs_f64();
-                let friction: f64 = self.config.momentum_friction.max(0.0).min(0.9999);
+                let friction: f64 = self.config.momentum_friction.clamp(0.0, 0.9999);
 
                 // Apply friction to velocity
                 let current_velocity = velocity * friction.powf(elapsed * 60.0);
@@ -493,6 +493,11 @@ impl ScrollableWorkspaces {
     /// Get current focused column index
     pub fn focused_column_index(&self) -> i32 {
         self.focused_column
+    }
+
+    /// Get total number of active windows across all columns
+    pub fn active_window_count(&self) -> usize {
+        self.columns.values().map(|c| c.windows.len()).sum()
     }
 
     /// Get total number of active columns

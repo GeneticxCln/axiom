@@ -348,7 +348,7 @@ p.leave(serial, &prev);
             let serial = self.next_serial();
             for p in &self.pointers {
                 // Surface-local coords: use current pointer_pos
-p.enter(serial, surface, self.pointer_pos.0 as f64, self.pointer_pos.1 as f64);
+p.enter(serial, surface, self.pointer_pos.0, self.pointer_pos.1);
             }
         }
     }
@@ -385,7 +385,7 @@ p.enter(serial, surface, self.pointer_pos.0 as f64, self.pointer_pos.1 as f64);
         None
     }
 
-    pub fn handle_pointer_motion(&mut self, x: f64, y: f64, mut input_mgr: Option<&mut InputManager>) {
+pub fn handle_pointer_motion(&mut self, x: f64, y: f64, input_mgr: Option<&mut InputManager>) {
         // Hit test and update focus if needed
         if let Some(surface) = self.surface_at(x, y) {
             self.send_pointer_enter_if_needed(&surface);
@@ -393,14 +393,14 @@ p.enter(serial, surface, self.pointer_pos.0 as f64, self.pointer_pos.1 as f64);
         self.send_pointer_motion(x, y);
 
         // Forward to InputManager as a MouseMove
-        if let Some(im) = input_mgr.as_deref_mut() {
+        if let Some(im) = input_mgr {
             let _ = im.process_input_event(InputEvent::MouseMove { x, y, delta_x: 0.0, delta_y: 0.0 });
         }
     }
 
-    pub fn handle_pointer_button(&mut self, button: u32, pressed: bool, mut input_mgr: Option<&mut InputManager>) {
+pub fn handle_pointer_button(&mut self, button: u32, pressed: bool, input_mgr: Option<&mut InputManager>) {
         self.send_pointer_button(button, pressed);
-        if let Some(im) = input_mgr.as_deref_mut() {
+        if let Some(im) = input_mgr {
             let btn = match button {
                 0x110 => MouseButton::Left,
                 0x111 => MouseButton::Right,
@@ -412,7 +412,7 @@ p.enter(serial, surface, self.pointer_pos.0 as f64, self.pointer_pos.1 as f64);
         }
     }
 
-    pub fn handle_key_event(&mut self, keycode: u32, pressed: bool, modifiers: Vec<String>, mut input_mgr: Option<&mut InputManager>) {
+pub fn handle_key_event(&mut self, keycode: u32, pressed: bool, modifiers: Vec<String>, input_mgr: Option<&mut InputManager>) {
         // Broadcast to all wl_keyboard resources
         let serial = self.next_serial();
         let time_ms = 0u32;
@@ -435,7 +435,7 @@ p.enter(serial, surface, self.pointer_pos.0 as f64, self.pointer_pos.1 as f64);
             _ => format!("Key{}", keycode),
         };
 
-        if let Some(im) = input_mgr.as_deref_mut() {
+        if let Some(im) = input_mgr {
             let _ = im.process_input_event(InputEvent::Keyboard { key: key_str, modifiers, pressed });
         }
     }
@@ -569,12 +569,9 @@ impl Dispatch<wl_shm::WlShm, ()> for CompositorState {
         _dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wl_shm::Request::CreatePool { id, fd, size } => {
-                data_init.init(id, (fd.as_raw_fd(), size));
-                debug!("SHM pool created with size: {}", size);
-            }
-            _ => {}
+        if let wl_shm::Request::CreatePool { id, fd, size } = request {
+            data_init.init(id, (fd.as_raw_fd(), size));
+            debug!("SHM pool created with size: {}", size);
         }
     }
 }
@@ -625,11 +622,8 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for CompositorState {
         _dhandle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wl_buffer::Request::Destroy => {
-                debug!("Buffer destroyed");
-            }
-            _ => {}
+        if let wl_buffer::Request::Destroy = request {
+            debug!("Buffer destroyed");
         }
     }
 }
@@ -965,11 +959,8 @@ impl Dispatch<wl_subcompositor::WlSubcompositor, ()> for CompositorState {
         _dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wl_subcompositor::Request::GetSubsurface { id, .. } => {
-                data_init.init(id, ());
-            }
-            _ => {}
+        if let wl_subcompositor::Request::GetSubsurface { id, .. } = request {
+            data_init.init(id, ());
         }
     }
 }

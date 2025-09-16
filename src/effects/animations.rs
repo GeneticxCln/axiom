@@ -396,7 +396,7 @@ impl AnimationController {
     fn update_timelines(
         &mut self,
         now: Instant,
-        _updates: &mut Vec<AnimationUpdate>,
+        _updates: &mut [AnimationUpdate],
     ) -> Result<()> {
         let timeline_names: Vec<String> = self.active_timelines.keys().cloned().collect();
 

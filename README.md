@@ -128,6 +128,29 @@ cargo build --features "smithay-minimal" --bin run_minimal_wayland
 
 Limitations: server-only; no rendering, no damage, minimal seat stubs.
 
+### Run the real server (unified backend)
+
+You can run the unified compositor with an on-screen window (present) or headless mode. Headless is ideal for testing clients.
+
+- Headless server (Wayland socket only, GPU loop offscreen):
+
+```bash
+cargo run -F wgpu-present -- --headless
+# Observe the printed WAYLAND_DISPLAY, export it in another terminal
+# e.g., export WAYLAND_DISPLAY=wayland-1 && weston-info
+```
+
+- On-screen presenter (winit window + wgpu surface):
+
+```bash
+cargo run -F wgpu-present -- --backend auto
+# A window titled "Axiom Compositor" opens; the Smithay server runs in a background thread
+```
+
+Notes:
+- If hardware input via evdev is not accessible (permissions), keybindings may be limited. Consider adding appropriate udev rules or run with sufficient permissions during development.
+- The default feature set enables the Smithay backend but disables on-screen presentation; enabling `wgpu-present` turns on the presenter path.
+
 ### Quick Start
 
 ```bash

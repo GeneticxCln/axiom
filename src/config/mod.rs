@@ -451,6 +451,7 @@ impl AxiomConfig {
     }
 
     /// Save configuration to a TOML file
+    #[allow(dead_code)]
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let contents = toml::to_string_pretty(self).context("Failed to serialize configuration")?;
 
@@ -461,6 +462,7 @@ impl AxiomConfig {
 
     /// Merge a partial configuration into this one
     /// Non-default values from the partial config will override this config
+    #[allow(dead_code)]
     pub fn merge_partial(mut self, partial: AxiomConfig) -> Self {
         let default_config = AxiomConfig::default();
 

@@ -15,6 +15,11 @@ name = "axiom"
 path = "src/main.rs"
 
 [[bin]]
+name = "run_minimal_wayland"
+path = "src/bin/run_minimal_wayland.rs"
+required-features = ["smithay-minimal"]
+
+[[bin]]
 name = "test_basic"
 path = "src/test_basic.rs"
 required-features = ["demo"]
@@ -70,6 +75,7 @@ cgmath = "0.18"
 xkbcommon = "0.7"
 libc = "0.2"
 calloop = "0.12"
+calloop-wayland-source = "0.2"
 input = "0.9"
 evdev = "0.12"
 drm = "0.11"
@@ -113,10 +119,16 @@ path = "src/lib.rs"
 [features]
 # Enable unified smithay backend by default
 default = ["smithay"]
+# Demos (no-op gate for example/test bins)
 demo = []
+# Main backend unification
 smithay = []
+# Enable on-screen presentation via wgpu + winit path
 wgpu-present = ["pollster"]
+# Example builds (no-op)
 examples = []
+# Minimal Wayland server feature (no-op shim to align with README/CI)
+smithay-minimal = ["smithay"]
 
 # Development dependencies for testing
 [dev-dependencies]

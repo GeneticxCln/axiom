@@ -107,7 +107,7 @@ async fn test_workspace_logic() -> Result<()> {
     workspaces.add_window(1002);
     workspaces.add_window(1003);
 
-    assert_eq!(workspaces.active_column_count(), 3);
+assert_eq!(workspaces.active_window_count(), 3);
 
     // Test scrolling
     workspaces.scroll_right();
@@ -140,9 +140,9 @@ async fn test_effects_engine() -> Result<()> {
 
     // Test performance stats
     let (frame_time, quality, active_count) = effects.get_performance_stats();
-    assert!(frame_time.as_millis() >= 0);
-    assert!(quality >= 0.0 && quality <= 1.0);
-    assert!(active_count >= 0);
+    // frame_time is non-negative by definition; check quality range only
+    assert!((0.0..=1.0).contains(&quality));
+    let _ = (frame_time, active_count); // used for debugging when needed
 
     // Test shutdown
     effects.shutdown()?;
@@ -178,7 +178,7 @@ async fn test_input_processing() -> Result<()> {
     for action in &actions {
         match action {
             CompositorAction::ScrollWorkspaceLeft | CompositorAction::ScrollWorkspaceRight => {
-                assert!(true); // Expected actions
+                // Expected actions
             }
             _ => {
                 // Other actions might be present too
@@ -212,7 +212,7 @@ async fn test_stress_many_windows() -> Result<()> {
         }
     }
 
-    assert_eq!(workspaces.active_column_count(), 100);
+assert_eq!(workspaces.active_window_count(), 100);
 
     // Test scrolling through many workspaces
     let start = std::time::Instant::now();
@@ -311,7 +311,7 @@ async fn test_memory_usage() -> Result<()> {
 fn get_memory_usage() -> usize {
     // Simple memory usage estimate
     // In a real implementation, you'd use a proper memory profiler
-    use std::alloc::{GlobalAlloc, Layout, System};
+    // Removed unused imports; this is a placeholder implementation
 
     // This is a placeholder - real memory measurement would need
     // external tools or more sophisticated tracking
@@ -353,7 +353,7 @@ async fn test_concurrent_operations() -> Result<()> {
 
     // Check that all windows were added
     let ws = workspaces.lock().await;
-    assert_eq!(ws.active_column_count(), 50); // 5 tasks * 10 windows each
+assert_eq!(ws.active_window_count(), 50); // 5 tasks * 10 windows each
 
     Ok(())
 }

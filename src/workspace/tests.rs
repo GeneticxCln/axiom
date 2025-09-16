@@ -93,8 +93,7 @@ fn test_workspace_scrolling() -> Result<()> {
 
 #[test]
 fn test_infinite_scrolling_bounds() -> Result<()> {
-    let mut config = WorkspaceConfig::default();
-    config.infinite_scroll = true;
+let config = WorkspaceConfig { infinite_scroll: true, ..Default::default() };
 
     let mut workspaces = ScrollableWorkspaces::new(&config)?;
 
@@ -181,8 +180,7 @@ workspaces.update_animations()?;
 
 #[test]
 fn test_smooth_scrolling_state() -> Result<()> {
-    let mut config = WorkspaceConfig::default();
-    config.smooth_scrolling = true;
+let config = WorkspaceConfig { smooth_scrolling: true, ..Default::default() };
 
     let mut workspaces = ScrollableWorkspaces::new(&config)?;
 
@@ -203,8 +201,7 @@ fn test_smooth_scrolling_state() -> Result<()> {
 
 #[test]
 fn test_workspace_configuration_effects() -> Result<()> {
-    let mut config = WorkspaceConfig::default();
-
+let mut config = WorkspaceConfig { scroll_speed: 2.0, ..Default::default() };
     // Test with different scroll speeds
     config.scroll_speed = 2.0;
     let workspaces_fast = ScrollableWorkspaces::new(&config)?;

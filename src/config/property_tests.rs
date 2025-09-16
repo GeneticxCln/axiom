@@ -306,7 +306,6 @@ proptest! {
         prop_assert!(config.effects.shadows.opacity >= 0.0 && config.effects.shadows.opacity <= 1.0);
         prop_assert!(config.input.keyboard_repeat_rate > 0);
         prop_assert!(config.input.mouse_accel > 0.0);
-        prop_assert!(config.general.max_fps >= 0);
     }
 
     /// Test that partial configuration merging works correctly
@@ -315,8 +314,7 @@ proptest! {
         base_config in valid_axiom_config(),
         workspace_override in valid_workspace_config()
     ) {
-        let mut partial_config = AxiomConfig::default();
-        partial_config.workspace = workspace_override.clone();
+        let partial_config = AxiomConfig { workspace: workspace_override.clone(), ..Default::default() };
 
         let base_vsync = base_config.general.vsync;
         let merged = base_config.merge_partial(partial_config);
@@ -417,7 +415,7 @@ mod stress_tests {
 
     #[test]
     fn test_large_config_serialization() {
-        let mut config = AxiomConfig::default();
+        let config = AxiomConfig::default();
 
         // Should handle large configs gracefully
         let toml_result = toml::to_string(&config);
@@ -438,12 +436,8 @@ mod stress_tests {
             let config = AxiomConfig::default();
             let toml_str = toml::to_string(&config).unwrap();
             let _parsed: AxiomConfig = toml::from_str(&toml_str).unwrap();
-
             // Force drop to test cleanup
             drop(config);
         }
-
-        // If we get here without running out of memory, test passes
-        assert!(true);
     }
 }

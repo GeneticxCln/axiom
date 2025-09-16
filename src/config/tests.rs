@@ -266,10 +266,8 @@ fn test_bindings_config_validation() {
 
 #[test]
 fn test_xwayland_config() {
-    let mut config = XWaylandConfig::default();
-
     // Test enabling/disabling XWayland
-    config.enabled = false;
+    let mut config = XWaylandConfig { enabled: false, ..Default::default() };
     assert!(!config.enabled);
 
     config.enabled = true;
@@ -329,7 +327,7 @@ mod property_tests {
 
             // Validation should handle bounds
             let result = config.validate();
-            if intensity >= 0.0 && intensity <= 1.0 {
+if (0.0..=1.0).contains(&intensity) {
                 prop_assert!(result.is_ok());
             } else {
                 prop_assert!(result.is_err());

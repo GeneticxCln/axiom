@@ -81,7 +81,9 @@ pub enum CompositorAction {
 /// Phase 3: Enhanced input manager with real processing
 #[derive(Debug)]
 pub struct InputManager {
+    #[allow(dead_code)]
     input_config: InputConfig,
+    #[allow(dead_code)]
     bindings_config: BindingsConfig,
 
     /// Key binding mappings
@@ -94,10 +96,12 @@ pub struct InputManager {
     mouse_position: (f64, f64),
 
     /// Gesture state for momentum scrolling
+    #[allow(dead_code)]
     gesture_state: Option<GestureState>,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct GestureState {
     start_time: std::time::Instant,
     start_position: (f64, f64),

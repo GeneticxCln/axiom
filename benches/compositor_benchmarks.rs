@@ -34,8 +34,9 @@ fn bench_workspace_scrolling(c: &mut Criterion) {
                     |mut workspaces| {
                         // Benchmark scrolling operations
                         for _ in 0..10 {
-                            black_box(workspaces.scroll_right());
-                            black_box(workspaces.scroll_left());
+                            workspaces.scroll_right();
+                            workspaces.scroll_left();
+                            black_box(());
                         }
                     },
                     BatchSize::SmallInput,
@@ -103,7 +104,8 @@ fn bench_effects_engine(c: &mut Criterion) {
             },
             |mut effects| {
                 // Benchmark one update cycle
-                black_box(effects.update().unwrap());
+                effects.update().unwrap();
+                black_box(());
             },
             BatchSize::SmallInput,
         );
@@ -123,7 +125,8 @@ fn bench_effects_engine(c: &mut Criterion) {
                 effects
             },
             |mut effects| {
-                black_box(effects.update().unwrap());
+                effects.update().unwrap();
+                black_box(());
             },
             BatchSize::SmallInput,
         );

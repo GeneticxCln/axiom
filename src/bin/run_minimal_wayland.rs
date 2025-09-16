@@ -1,0 +1,38 @@
+//! Minimal Wayland server entrypoint (smithay-minimal)
+//! Starts a bare server that accepts clients and prints WAYLAND_DISPLAY.
+
+use anyhow::Result;
+use log::info;
+use parking_lot::RwLock;
+use std::sync::Arc;
+
+// Import reexports from the axiom library crate
+use axiom::{AxiomConfig, InputManager, ScrollableWorkspaces, WindowManager};
+#[cfg(feature = "smithay")]
+use axiom::smithay::server::CompositorServer;
+
+fn main() -> Result<()> {
+    // Initialize logging (best-effort)
+    let _ = env_logger::try_init();
+
+    // Use default configuration for minimal server
+    let config = AxiomConfig::default();
+
+    // Initialize core managers
+    let wm = Arc::new(RwLock::new(WindowManager::new(&config.window)?));
+    let ws = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)?));
+    let im = Arc::new(RwLock::new(InputManager::new(&config.input, &config.bindings)?));
+
+    // Create compositor server without on-screen presenter or headless renderer
+    let server = CompositorServer::new(
+        wm,
+        ws,
+        im,
+        /* spawn_headless_renderer: */ false,
+        wgpu::Backends::all(),
+    )?;
+
+    info!("Starting minimal Wayland server (smithay-minimal)");
+    // Run until interrupted; prints WAYLAND_DISPLAY on startup
+    server.run().map(|_| ())
+}

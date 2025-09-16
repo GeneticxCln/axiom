@@ -13,7 +13,9 @@ use wgpu;
 use std::fs::File;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use calloop::EventLoop;
+use calloop::timer::{Timer, TimeoutAction};
 use wayland_protocols::wp::presentation_time::server::{wp_presentation, wp_presentation_feedback};
 use wayland_protocols::wp::viewporter::server::{wp_viewport, wp_viewporter};
 use wayland_protocols::xdg::shell::server::{xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -126,8 +128,7 @@ impl CompositorServer {
         // Bind an auto socket for Wayland
         let listening = ListeningSocket::bind_auto("wayland", 1..32).context("bind socket")?;
         let socket_name = listening
-            .socket_name()
-            .and_then(|s| Some(s.to_string_lossy().to_string()))
+.socket_name().map(|s| s.to_string_lossy().to_string())
             .ok_or_else(|| anyhow::anyhow!("missing socket name"))?;
 
         // Spawn evdev input thread (best-effort; may fail without permissions)
@@ -155,7 +156,7 @@ impl CompositorServer {
             let backends = self.selected_backends;
             std::thread::spawn(move || {
                 if let Ok(rt) = tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-                    let _ = rt.block_on(async move {
+                    rt.block_on(async move {
                         let _ = crate::renderer::AxiomRenderer::start_headless_loop_with_backends(backends).await;
                     });
                 }
@@ -187,47 +188,72 @@ impl CompositorServer {
             viewport_map: HashMap::new(),
         };
 
-        loop {
-            if let Ok(Some(stream)) = self.listening.accept() {
-                let _ = self
-                    .display
-                    .handle()
-                    .insert_client(stream, Arc::new(ServerClientData));
-                debug!("Client connected");
+        // Create calloop event loop
+        let mut event_loop = EventLoop::try_new().context("create calloop")?;
+        let handle = event_loop.handle();
+
+        // Move listening socket and display into dispatch timer closure
+        let mut listening = self.listening;
+        let mut display_handle = self.display.handle();
+
+        // Frame timer (~16ms)
+        let frame_timer = Timer::from_duration(Duration::from_millis(16));
+        handle.insert_source(frame_timer, move |_deadline: Instant, _meta: &mut (), data: &mut CompositorState| {
+            // Drain callbacks and send done
+            let ts_ms: u32 = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() & 0xFFFF_FFFF) as u32;
+            for cb in data.pending_callbacks.drain(..) {
+                cb.done(ts_ms);
             }
-            // Drain input from evdev and handle
-            self.handle_hw_input(&mut state)?;
+            data.last_frame_time = Instant::now();
+            // Re-arm timer
+            TimeoutAction::ToDuration(Duration::from_millis(16))
+        }).map_err(|_| anyhow::anyhow!("register frame timer"))?;
 
-            self.display.dispatch_clients(&mut state)?;
+        // Ping timer (~5s)
+        let ping_timer = Timer::from_duration(Duration::from_secs(5));
+        handle.insert_source(ping_timer, move |_deadline: Instant, _meta: &mut (), data: &mut CompositorState| {
+            let serial = data.serial_counter;
+            for base in &data.xdg_bases {
+                base.ping(serial);
+            }
+            data.serial_counter = data.serial_counter.wrapping_add(1);
+            data.last_ping_time = Instant::now();
+            TimeoutAction::ToDuration(Duration::from_secs(5))
+        }).map_err(|_| anyhow::anyhow!("register ping timer"))?;
 
-            // Drain and handle internal events produced during dispatch
-            self.handle_events(&mut state)?;
-
-            // Simple frame tick (~16ms)
-            if state.last_frame_time.elapsed() >= std::time::Duration::from_millis(16) {
-                let ts_ms: u32 = (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() & 0xFFFF_FFFF) as u32;
-                for cb in state.pending_callbacks.drain(..) {
-                    cb.done(ts_ms);
+        // Main dispatch via a small idle loop on calloop; use a repeated timer to dispatch/flush/handle events
+        let dispatch_timer = Timer::from_duration(Duration::from_millis(4));
+        let mut display_for_dispatch = self.display;
+        let wm = self.window_manager;
+        let ws = self.workspace_manager;
+        handle.insert_source(dispatch_timer, move |_deadline: Instant, _meta: &mut (), data: &mut CompositorState| {
+            // Accept any pending clients
+            loop {
+                match listening.accept() {
+                    Ok(Some(stream)) => {
+                        let _ = display_handle.insert_client(stream, Arc::new(ServerClientData));
+                        debug!("Client connected");
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
                 }
-                state.last_frame_time = Instant::now();
             }
+            // Dispatch Wayland clients
+            let _ = display_for_dispatch.dispatch_clients(data);
+            // Drain and handle internal events with access to managers
+            let _ = handle_events_inline(data, &wm, &ws);
+            // Flush clients
+            let _ = display_for_dispatch.flush_clients();
+            // Re-arm timer
+            TimeoutAction::ToDuration(Duration::from_millis(4))
+        }).map_err(|_| anyhow::anyhow!("register dispatch timer"))?;
 
-            // Periodic ping (~5s)
-            if state.last_ping_time.elapsed() >= std::time::Duration::from_secs(5) {
-                let serial = state.serial_counter; // use next_serial but without borrow; update below
-                for base in &state.xdg_bases {
-                    base.ping(serial);
-                }
-                state.serial_counter = state.serial_counter.wrapping_add(1);
-                state.last_ping_time = Instant::now();
-            }
-
-            self.display.flush_clients()?;
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        // Run event loop
+        event_loop.run(None, &mut state, |_| {});
+        Ok(())
     }
 }
 
@@ -510,7 +536,12 @@ impl CompositorServer {
                     (w.xdg_toplevel.clone(), w.xdg_surface.clone())
                 };
                 if let Some(tl) = tl_opt {
-                    tl.configure(rect.width as i32, rect.height as i32, vec![]);
+let mut states: Vec<u8> = Vec::new();
+if state.focused_window_id == Some(id) {
+    let activated: u32 = xdg_toplevel::State::Activated as u32;
+    states.extend_from_slice(&activated.to_ne_bytes());
+}
+tl.configure(rect.width as i32, rect.height as i32, states);
                     xdg_surf.configure(serial);
                     // Update serial in a short mutable borrow
                     state.windows[idx].configured_serial = Some(serial);
@@ -670,7 +701,7 @@ impl CompositorServer {
                 if let Ok(d) = Device::open(&p) {
                     let has_keys = d.supported_events().contains(EventType::KEY);
                     let has_rel = d.supported_events().contains(EventType::RELATIVE);
-                    let has_btn = d.supported_keys().map_or(false, |k| k.contains(Key::BTN_LEFT) || k.contains(Key::BTN_RIGHT) || k.contains(Key::BTN_MIDDLE));
+let has_btn = d.supported_keys().is_some_and(|k| k.contains(Key::BTN_LEFT) || k.contains(Key::BTN_RIGHT) || k.contains(Key::BTN_MIDDLE));
                     if has_keys && !has_rel { keyboards.push(d); }
                     else if has_rel || has_btn { pointers.push(d); }
                 }
@@ -802,27 +833,24 @@ impl Dispatch<wl_shm::WlShm, ()> for CompositorState {
         _dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wl_shm::Request::CreatePool { id, fd, size } => {
+        if let wl_shm::Request::CreatePool { id, fd, size } = request {
                 // Map the file descriptor
                 let file: File = fd.into();
                 match unsafe { Mmap::map(&file) } {
                     Ok(map) => {
-                        let pool_data = ShmPoolData { map: Arc::new(map), size };
+let pool_data = ShmPoolData { map: Arc::new(map), _size: size };
                         data_init.init(id, pool_data);
                     }
                     Err(_e) => {
                         // Failed to map; still init to avoid protocol errors with a tiny anon map
                         let anon = MmapOptions::new().len(1).map_anon().unwrap();
                         let ro = anon.make_read_only().unwrap();
-                        let pool_data = ShmPoolData { map: Arc::new(ro), size: 0 };
+let pool_data = ShmPoolData { map: Arc::new(ro), _size: 0 };
                         data_init.init(id, pool_data);
                     }
                 }
                 // File drops here; mapping remains valid
             }
-            _ => {}
-        }
     }
 }
 
@@ -905,7 +933,7 @@ impl Dispatch<wl_callback::WlCallback, ()> for CompositorState {
 #[derive(Clone)]
 struct ShmPoolData {
     map: Arc<Mmap>,
-    size: i32,
+    _size: i32,
 }
 
 #[derive(Clone)]
@@ -922,6 +950,7 @@ struct BufferRecord {
 }
 
 impl CompositorState {
+    #[allow(dead_code)]
     fn rid_buffer(buf: &wl_buffer::WlBuffer) -> u32 { buf.id().protocol_id() }
 }
 
@@ -1088,13 +1117,10 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for CompositorState {
         _dhandle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wl_buffer::Request::Destroy => {
-                if let Some(cell) = BUFFERS_MAP.get() {
-                    let _ = cell.fetch(state).remove(&resource.id().protocol_id());
-                }
+        if let wl_buffer::Request::Destroy = request {
+            if let Some(cell) = BUFFERS_MAP.get() {
+                let _ = cell.fetch(state).remove(&resource.id().protocol_id());
             }
-            _ => {}
         }
     }
 }
@@ -1106,10 +1132,10 @@ fn state_buffers(state: &mut CompositorState) -> &mut HashMap<u32, BufferRecord>
 }
 
 // Poor-man side storage associated with CompositorState pointer address
+#[derive(Default)]
 struct BuffersStorage {
     map: HashMap<usize, HashMap<u32, BufferRecord>>,
 }
-impl Default for BuffersStorage { fn default() -> Self { Self { map: HashMap::new() } } }
 static BUFFERS_MAP: OnceLock<BuffersStorageCell> = OnceLock::new();
 struct BuffersStorageCell(std::sync::Mutex<BuffersStorage>);
 impl BuffersStorageCell {
@@ -1119,7 +1145,7 @@ impl BuffersStorageCell {
     fn fetch<'a>(&'a self, state: &'a mut CompositorState) -> &'a mut HashMap<u32, BufferRecord> {
         let key = state as *mut _ as usize;
         let mut guard = self.0.lock().unwrap();
-        guard.map.entry(key).or_insert_with(HashMap::new);
+guard.map.entry(key).or_default();
         // SAFETY: We keep the storage for the lifetime of the process
         let ptr: *mut HashMap<u32, BufferRecord> = guard.map.get_mut(&key).unwrap();
         drop(guard);
@@ -1150,14 +1176,11 @@ impl Dispatch<wp_presentation::WpPresentation, ()> for CompositorState {
         _dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wp_presentation::Request::Feedback { surface, callback } => {
+        if let wp_presentation::Request::Feedback { surface, callback } = request {
                 let fb: wp_presentation_feedback::WpPresentationFeedback = data_init.init(callback, ());
                 let sid = surface.id().protocol_id();
                 state.presentation_feedbacks.entry(sid).or_default().push(fb);
             }
-            _ => {}
-        }
     }
 }
 
@@ -1184,15 +1207,12 @@ impl Dispatch<wp_viewporter::WpViewporter, ()> for CompositorState {
         _dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wp_viewporter::Request::GetViewport { id, surface } => {
+        if let wp_viewporter::Request::GetViewport { id, surface } = request {
                 let surface_id = surface.id().protocol_id();
                 let _vp = data_init.init(id, ViewportData { surface_id });
                 // Initialize default viewport state entry
-                state.viewport_map.entry(surface_id).or_insert_with(ViewportState::default);
+state.viewport_map.entry(surface_id).or_default();
             }
-            _ => {}
-        }
     }
 }
 impl Dispatch<wp_viewport::WpViewport, ViewportData> for CompositorState {
@@ -1205,7 +1225,7 @@ impl Dispatch<wp_viewport::WpViewport, ViewportData> for CompositorState {
         _dhandle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        let entry = state.viewport_map.entry(data.surface_id).or_insert_with(ViewportState::default);
+let entry = state.viewport_map.entry(data.surface_id).or_default();
         match request {
             wp_viewport::Request::SetSource { x, y, width, height } => {
                 // Note: protocol uses fixed-point; here values are f32/f64 in server crate
@@ -1232,6 +1252,168 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for Composit
         _dhandle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) { }
+}
+
+// Inline event handling utilities for calloop timer
+fn handle_events_inline(
+    state: &mut CompositorState,
+    wm: &Arc<RwLock<crate::window::WindowManager>>,
+    ws: &Arc<RwLock<crate::workspace::ScrollableWorkspaces>>,
+) -> Result<()> {
+    // Take events out to avoid borrow issues while mutating state
+    let mut events = Vec::new();
+    events.append(&mut state.events);
+
+    for ev in events {
+        match ev {
+            ServerEvent::Commit { surface } => {
+                // Locate window entry by surface
+                if let Some(idx) = state
+                    .windows
+                    .iter()
+                    .position(|w| w.wl_surface.as_ref() == Some(&surface))
+                {
+                    // Read-only check first
+                    let (should_map, title) = {
+                        let w = &state.windows[idx];
+                        let t = if w.title.is_empty() { "Untitled".to_string() } else { w.title.clone() };
+                        (w.configured_serial.is_some() && !w.mapped, t)
+                    };
+
+                    if should_map {
+                        let new_id = { let mut wml = wm.write(); wml.add_window(title) };
+                        { let mut wsl = ws.write(); wsl.add_window(new_id); }
+                        { let _ = wm.write().focus_window(new_id); }
+                        let previous_focus = state.focused_window_id.take();
+                        state.focused_window_id = Some(new_id);
+                        {
+                            let win_mut = &mut state.windows[idx];
+                            win_mut.axiom_id = Some(new_id);
+                            win_mut.mapped = true;
+                        }
+                        // Input focus routing
+                        if let Some(prev_id) = previous_focus {
+                            if let Some(prev_surface) = state
+                                .windows
+                                .iter()
+                                .find(|w| w.axiom_id == Some(prev_id))
+                                .and_then(|w| w.wl_surface.clone())
+                            {
+                                let serial = state.next_serial();
+                                for kb in &state.keyboards { kb.leave(serial, &prev_surface); }
+                                let serial = state.next_serial();
+                                for ptr in &state.pointers { ptr.leave(serial, &prev_surface); }
+                            }
+                        }
+                        let serial = state.next_serial();
+                        for kb in &state.keyboards { kb.enter(serial, &surface, vec![]); }
+                        let serial = state.next_serial();
+                        for ptr in &state.pointers { ptr.enter(serial, &surface, 0.0, 0.0); }
+                        apply_layouts_inline(state, wm, ws)?;
+                    }
+                    // After mapping/focus, if a buffer is attached, upload to renderer
+                    if let Some(win) = state.windows.iter_mut().find(|w| w.wl_surface.as_ref() == Some(&surface)) {
+                        if let (Some(ax_id), Some(buf_id)) = (win.axiom_id, win.pending_buffer_id.take()) {
+                            if let Some(rec) = state_buffers(state).get(&buf_id).cloned() {
+                                let sid = surface.id().protocol_id();
+                                let vp = state.viewport_map.get(&sid).cloned();
+                                if let Some((data, w, h)) = process_with_viewport(&rec, vp.as_ref()) {
+                                    crate::renderer::queue_texture_update(ax_id, data, w, h);
+                                    rec.buffer.release();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ServerEvent::Destroy { surface } => {
+                if let Some(idx) = state
+                    .windows
+                    .iter()
+                    .position(|w| w.wl_surface.as_ref() == Some(&surface))
+                {
+                    let entry = state.windows.remove(idx);
+                    if let Some(id) = entry.axiom_id {
+                        if state.focused_window_id == Some(id) { state.focused_window_id = None; }
+                        { let mut wsl = ws.write(); let _ = wsl.remove_window(id); }
+                        { let mut wml = wm.write(); let _ = wml.remove_window(id); }
+                        if let Some(new_focus_id) = state
+                            .windows
+                            .iter()
+                            .rev()
+                            .find_map(|w| w.axiom_id)
+                        {
+                            let _ = wm.write().focus_window(new_focus_id);
+                            state.focused_window_id = Some(new_focus_id);
+                            if let Some(focus_surface) = state
+                                .windows
+                                .iter()
+                                .find(|w| w.axiom_id == Some(new_focus_id))
+                                .and_then(|w| w.wl_surface.clone())
+                            {
+                                let serial = state.next_serial();
+                                for kb in &state.keyboards { kb.enter(serial, &focus_surface, vec![]); }
+                                let serial = state.next_serial();
+                                for ptr in &state.pointers { ptr.enter(serial, &focus_surface, 0.0, 0.0); }
+                            }
+                        }
+                        crate::renderer::remove_placeholder_quad(id);
+                        apply_layouts_inline(state, wm, ws)?;
+                    }
+                }
+            }
+            ServerEvent::TitleChanged { surface, title } => {
+                if let Some(win) = state
+                    .windows
+                    .iter_mut()
+                    .find(|w| w.wl_surface.as_ref() == Some(&surface))
+                {
+                    win.title = title.clone();
+                    if let Some(id) = win.axiom_id {
+                        if let Some(w) = wm.write().get_window_mut(id) { w.window.title = title; }
+                    }
+                }
+            }
+            ServerEvent::AppIdChanged { surface, app_id } => {
+                if let Some(win) = state
+                    .windows
+                    .iter_mut()
+                    .find(|w| w.wl_surface.as_ref() == Some(&surface))
+                {
+                    win.app_id = app_id;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_layouts_inline(
+    state: &mut CompositorState,
+    _wm: &Arc<RwLock<crate::window::WindowManager>>,
+    ws: &Arc<RwLock<crate::workspace::ScrollableWorkspaces>>,
+) -> Result<()> {
+    let layouts: HashMap<u64, crate::window::Rectangle> = { let wsr = ws.read(); wsr.calculate_workspace_layouts() };
+    state.last_layouts.clear();
+    state.last_layouts.extend(layouts.iter().map(|(k, v)| (*k, v.clone())));
+    for (id, rect) in layouts {
+        if let Some(idx) = state.windows.iter().position(|w| w.axiom_id == Some(id)) {
+            let serial = state.next_serial();
+            let (tl_opt, xdg_surf) = { let w = &state.windows[idx]; (w.xdg_toplevel.clone(), w.xdg_surface.clone()) };
+            if let Some(tl) = tl_opt {
+                let mut states: Vec<u8> = Vec::new();
+                if state.focused_window_id == Some(id) {
+                    let activated: u32 = xdg_toplevel::State::Activated as u32;
+                    states.extend_from_slice(&activated.to_ne_bytes());
+                }
+                tl.configure(rect.width as i32, rect.height as i32, states);
+                xdg_surf.configure(serial);
+                state.windows[idx].configured_serial = Some(serial);
+            }
+            crate::renderer::push_placeholder_quad(id, (rect.x as f32, rect.y as f32), (rect.width as f32, rect.height as f32), 1.0);
+        }
+    }
+    Ok(())
 }
 
 // wl_output global

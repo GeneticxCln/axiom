@@ -107,6 +107,7 @@ pub struct AxiomIPCServer {
     message_sender: Option<mpsc::UnboundedSender<AxiomMessage>>,
     command_receiver: Option<mpsc::UnboundedReceiver<LazyUIMessage>>,
     // System info for metrics sampling
+    #[allow(dead_code)]
     sys: Option<System>,
     last_metrics_sent: Instant,
     // Last CPU times for non-blocking CPU usage sampling
@@ -200,6 +201,7 @@ impl AxiomIPCServer {
     }
 
     /// Accept incoming connections from Lazy UI (kept for compatibility)
+    #[allow(dead_code)]
     async fn accept_connections(&mut self) -> Result<()> {
         // Deprecated path: connection acceptance is spawned in start() with a broadcast channel.
         // Keeping this method to satisfy older call sites; return Ok(()) without doing anything.
@@ -459,6 +461,7 @@ impl AxiomIPCServer {
     }
 
     /// Send user event to Lazy UI
+    #[allow(dead_code)]
     pub async fn send_user_event(
         &self,
         event_type: String,
@@ -482,11 +485,13 @@ impl AxiomIPCServer {
     }
 
     /// Get the socket path
+    #[allow(dead_code)]
     pub fn socket_path(&self) -> &PathBuf {
         &self.socket_path
     }
 
     /// Broadcast PerformanceMetrics to all connected clients
+    #[allow(dead_code)]
     pub fn broadcast_performance_metrics(
         &self,
         cpu_usage: f32,
@@ -513,6 +518,7 @@ impl AxiomIPCServer {
     }
 
     /// Rate-limited helper that samples CPU/memory and broadcasts metrics (~10Hz)
+    #[allow(dead_code)]
     pub fn maybe_broadcast_performance_metrics(
         &mut self,
         frame_time_ms: f32,
@@ -537,6 +543,7 @@ impl AxiomIPCServer {
 
     /// Sample system CPU usage (%) and memory used (MB) by reading /proc
     /// This is a synchronous sampler intended for periodic telemetry; it avoids extra deps.
+    #[allow(dead_code)]
     fn sample_system_metrics_nonblocking(&mut self) -> (f32, f32) {
         // CPU usage: sample /proc/stat twice and compute deltas
         fn read_cpu_times() -> Option<(u64, u64)> {
@@ -565,7 +572,7 @@ impl AxiomIPCServer {
             None
         }
 
-        let (cpu_percent, mem_used_mb) = (|| {
+let (cpu_percent, mem_used_mb) = {
             let current = read_cpu_times();
             let cpu = match (self.last_cpu_times, current) {
                 (Some((idle_a, total_a)), Some((idle_b, total_b))) => {
@@ -602,7 +609,7 @@ impl AxiomIPCServer {
             let used_kb = mem_total_kb.saturating_sub(mem_available_kb) as f32;
             let used_mb = used_kb / 1024.0;
             (cpu, used_mb)
-        })();
+};
 
         // Update last CPU times with the current sample for next call
         if let Some((idle, total)) = (|| {

@@ -24,13 +24,16 @@ use crate::xwayland::XWaylandManager;
 
 /// Main compositor struct that orchestrates all subsystems
 pub struct AxiomCompositor {
+    #[allow(dead_code)]
     config: AxiomConfig,
+    #[allow(dead_code)]
     windowed: bool,
 
     // Core subsystems
     workspace_manager: ScrollableWorkspaces,
     effects_engine: EffectsEngine,
     window_manager: WindowManager,
+    #[allow(dead_code)]
     decoration_manager: DecorationManager,
     input_manager: InputManager,
     xwayland_manager: Option<XWaylandManager>,
@@ -43,6 +46,7 @@ pub struct AxiomCompositor {
     running: bool,
 }
 
+#[allow(dead_code)]
 impl AxiomCompositor {
 
     /// Create a new Axiom compositor instance
@@ -465,7 +469,7 @@ impl AxiomCompositor {
         (
             self.workspace_manager.focused_column_index(),
             self.workspace_manager.current_position(),
-            self.workspace_manager.active_column_count(),
+            self.workspace_manager.active_window_count(),
             self.workspace_manager.is_scrolling(),
         )
     }

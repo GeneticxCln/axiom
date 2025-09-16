@@ -65,9 +65,12 @@ struct Vertex {
 
 static RENDER_STATE: OnceLock<Arc<Mutex<SharedRenderState>>> = OnceLock::new();
 
+type Pos = (f32, f32);
+type Size = (f32, f32);
+
 #[derive(Default)]
 struct SharedRenderState {
-    placeholders: HashMap<u64, ((f32, f32), (f32, f32), f32)>,
+    placeholders: HashMap<u64, (Pos, Size, f32)>,
     pending_textures: Vec<(u64, Vec<u8>, u32, u32)>,
 }
 
@@ -758,6 +761,7 @@ mod tests {
             size: (400.0, 300.0),
             texture: None,
             texture_view: None,
+            bind_group: None,
             dirty: true,
             opacity: 1.0,
         };
