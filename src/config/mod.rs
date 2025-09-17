@@ -180,6 +180,13 @@ pub struct WindowConfig {
 
     /// Default layout algorithm ("horizontal", "vertical")
     pub default_layout: String,
+
+    /// Force client-side decorations (CSD) for all clients.
+    /// When true, the compositor will always configure zxdg_toplevel_decoration_v1
+    /// to client-side. When false, the compositor will honor client requests and
+    /// prefer server-side decorations by default.
+    #[serde(default)]
+    pub force_client_side_decorations: bool,
 }
 
 /// Input configuration
@@ -375,6 +382,7 @@ impl Default for WindowConfig {
             inactive_border_color: "#374151".to_string(), // Gray
             gap: 10,
             default_layout: "horizontal".to_string(),
+            force_client_side_decorations: false,
         }
     }
 }

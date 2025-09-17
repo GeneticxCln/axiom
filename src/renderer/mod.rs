@@ -6,11 +6,13 @@
 #![allow(dead_code)]
 use anyhow::Result;
 use log::{debug, info, warn};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use wgpu::*;
 use wgpu::util::DeviceExt;
 use std::time::Duration;
+use std::fs;
+
 
 /// Real GPU rendering pipeline
 pub struct AxiomRenderer {
@@ -41,7 +43,7 @@ pub struct RenderedWindow {
     pub id: u64,
     /// Window position on screen
     pub position: (f32, f32),
-    /// Window size
+    /// Window size (on-screen size)
     pub size: (f32, f32),
     /// Window texture (actual pixel data)
     pub texture: Option<Texture>,
@@ -53,6 +55,10 @@ pub struct RenderedWindow {
     pub dirty: bool,
     /// Window opacity
     pub opacity: f32,
+    /// Texture pixel size (width,height) if texture exists
+    pub tex_size: Option<(u32, u32)>,
+    /// Pending damage regions in window-local pixels (x, y, w, h)
+    pub damage_regions: Vec<(u32, u32, u32, u32)>,
 }
 
 /// Vertex data for rendering quads
@@ -72,12 +78,25 @@ type Size = (f32, f32);
 struct SharedRenderState {
     placeholders: HashMap<u64, (Pos, Size, f32)>,
     pending_textures: Vec<(u64, Vec<u8>, u32, u32)>,
+    pending_texture_regions: Vec<RegionUpdate>,
 }
+
+// Caps for caches and queues to bound memory usage
+const MAX_PLACEHOLDERS: usize = 1024;
+const MAX_PENDING_TEXTURES: usize = 128;
+const MAX_PENDING_REGIONS: usize = 512;
 
 pub fn push_placeholder_quad(id: u64, position: (f32, f32), size: (f32, f32), opacity: f32) {
     let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
     if let Ok(mut s) = state.lock() {
         s.placeholders.insert(id, (position, size, opacity));
+        // Cap total placeholders to avoid unbounded growth
+        if s.placeholders.len() > MAX_PLACEHOLDERS {
+            if let Some((&victim, _)) = s.placeholders.iter().next() {
+                s.placeholders.remove(&victim);
+                debug!("🧹 Evicted placeholder quad {} to respect cap {}", victim, MAX_PLACEHOLDERS);
+            }
+        }
     }
 }
 
@@ -92,6 +111,33 @@ pub fn queue_texture_update(id: u64, data: Vec<u8>, width: u32, height: u32) {
     let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
     if let Ok(mut s) = state.lock() {
         s.pending_textures.push((id, data, width, height));
+        if s.pending_textures.len() > MAX_PENDING_TEXTURES {
+            // Drop oldest to respect cap
+            let dropped = s.pending_textures.remove(0);
+            debug!("🧹 Dropped oldest pending texture update for window {} to respect cap {}", dropped.0, MAX_PENDING_TEXTURES);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RegionUpdate {
+    pub id: u64,
+    pub full_size: (u32, u32),
+    pub rect: (u32, u32, u32, u32), // x, y, w, h
+    pub bytes: Vec<u8>,             // tightly packed RGBA for rect (bytes_per_row = 4*w)
+}
+
+pub fn queue_texture_update_region(id: u64, full_w: u32, full_h: u32, rect: (u32, u32, u32, u32), bytes: Vec<u8>) {
+    let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+    if let Ok(mut s) = state.lock() {
+        s.pending_texture_regions.push(RegionUpdate { id, full_size: (full_w, full_h), rect, bytes });
+        if s.pending_texture_regions.len() > MAX_PENDING_REGIONS {
+            // Drop oldest to respect cap
+            if let Some(dropped) = s.pending_texture_regions.first() {
+                debug!("🧹 Dropped oldest pending region update for window {} to respect cap {}", dropped.id, MAX_PENDING_REGIONS);
+            }
+            s.pending_texture_regions.remove(0);
+        }
     }
 }
 
@@ -118,7 +164,21 @@ impl AxiomRenderer {
         let mut chosen_adapter: Option<wgpu::Adapter> = None;
         let surface_for_opts = surface;
 
-        for power in [wgpu::PowerPreference::HighPerformance, wgpu::PowerPreference::LowPower] {
+        // Detect if system is on battery to bias adapter selection
+        let on_battery = Self::detect_on_battery();
+        if on_battery {
+            info!("🔋 Battery power detected — preferring LowPower GPU adapter");
+        } else {
+            info!("🔌 AC power detected — preferring HighPerformance GPU adapter");
+        }
+
+        let power_order = if on_battery {
+            [wgpu::PowerPreference::LowPower, wgpu::PowerPreference::HighPerformance]
+        } else {
+            [wgpu::PowerPreference::HighPerformance, wgpu::PowerPreference::LowPower]
+        };
+
+        for power in power_order {
             for fallback in [false, true] {
                 if let Some(adapter) = instance
                     .request_adapter(&wgpu::RequestAdapterOptions {
@@ -172,11 +232,11 @@ impl AxiomRenderer {
                     .copied()
                     .find(|f| f.is_srgb())
                     .unwrap_or(caps.formats[0]);
-                let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-                    wgpu::PresentMode::Mailbox
-                } else if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
+                // Enforce FIFO present mode for power efficiency and tear-free presentation
+                let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
                     wgpu::PresentMode::Fifo
                 } else {
+                    // Fallback to whatever is available
                     caps.present_modes[0]
                 };
                 let alpha_mode = caps
@@ -377,7 +437,7 @@ impl AxiomRenderer {
             id, position.0, position.1, size.0, size.1
         );
 
-        let window = RenderedWindow {
+let window = RenderedWindow {
             id,
             position,
             size,
@@ -386,6 +446,8 @@ impl AxiomRenderer {
             bind_group: None,
             dirty: true,
             opacity: 1.0,
+            tex_size: None,
+            damage_regions: Vec::new(),
         };
 
         self.windows.push(window);
@@ -401,10 +463,13 @@ impl AxiomRenderer {
         opacity: f32,
     ) {
         if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
-            w.position = position;
-            w.size = size;
-            w.opacity = opacity;
-            w.dirty = true;
+            // Only mark dirty if something actually changed
+            if w.position != position || w.size != size || (w.opacity - opacity).abs() > f32::EPSILON {
+                w.position = position;
+                w.size = size;
+                w.opacity = opacity;
+                w.dirty = true;
+            }
         } else {
             let window = RenderedWindow {
                 id,
@@ -415,6 +480,8 @@ impl AxiomRenderer {
                 bind_group: None,
                 dirty: true,
                 opacity,
+                tex_size: None,
+                damage_regions: Vec::new(),
             };
             self.windows.push(window);
         }
@@ -434,27 +501,38 @@ impl AxiomRenderer {
         );
 
         if let Some(window) = self.windows.iter_mut().find(|w| w.id == window_id) {
-            // Create texture
-            let texture = self.device.create_texture(&TextureDescriptor {
-                size: Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba8UnormSrgb,
-                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-                label: Some(&format!("Window {} Texture", window_id)),
-                view_formats: &[],
-            });
-
+            // If texture exists and same size, just overwrite contents; else recreate
+            let recreate = match window.tex_size {
+                Some((tw, th)) => !(tw == width && th == height),
+                None => true,
+            };
+            if recreate {
+                let texture = self.device.create_texture(&TextureDescriptor {
+                    size: Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format: TextureFormat::Rgba8UnormSrgb,
+                    usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+                    label: Some(&format!("Window {} Texture", window_id)),
+                    view_formats: &[],
+                });
+                let texture_view = texture.create_view(&TextureViewDescriptor::default());
+                window.texture = Some(texture);
+                window.texture_view = Some(texture_view);
+                window.bind_group = None;
+                window.tex_size = Some((width, height));
+            }
             // Upload pixel data to GPU
+            let texture_ref = window.texture.as_ref().unwrap();
             self.queue.write_texture(
                 ImageCopyTexture {
                     aspect: TextureAspect::All,
-                    texture: &texture,
+                    texture: texture_ref,
                     mip_level: 0,
                     origin: Origin3d::ZERO,
                 },
@@ -471,16 +549,66 @@ impl AxiomRenderer {
                 },
             );
 
-            let texture_view = texture.create_view(&TextureViewDescriptor::default());
-
-            window.texture = Some(texture);
-            window.texture_view = Some(texture_view);
-            window.bind_group = None;
             window.dirty = true;
-
+            window.damage_regions.clear();
             info!("✅ Updated texture for window {}", window_id);
         }
 
+        Ok(())
+    }
+
+    /// Update only a region of the window texture. Creates texture if missing.
+    pub fn update_window_texture_region(
+        &mut self,
+        window_id: u64,
+        full_width: u32,
+        full_height: u32,
+        rect: (u32, u32, u32, u32),
+        bytes: &[u8],
+    ) -> Result<()> {
+        if let Some(window) = self.windows.iter_mut().find(|w| w.id == window_id) {
+            // Ensure texture exists and is correct size
+            let recreate = match window.tex_size {
+                Some((tw, th)) => !(tw == full_width && th == full_height),
+                None => true,
+            };
+            if recreate {
+                let texture = self.device.create_texture(&TextureDescriptor {
+                    size: Extent3d { width: full_width, height: full_height, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format: TextureFormat::Rgba8UnormSrgb,
+                    usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+                    label: Some(&format!("Window {} Texture", window_id)),
+                    view_formats: &[],
+                });
+                let texture_view = texture.create_view(&TextureViewDescriptor::default());
+                window.texture = Some(texture);
+                window.texture_view = Some(texture_view);
+                window.bind_group = None;
+                window.tex_size = Some((full_width, full_height));
+            }
+            let texture_ref = window.texture.as_ref().unwrap();
+            let (x, y, w, h) = rect;
+            self.queue.write_texture(
+                ImageCopyTexture {
+                    aspect: TextureAspect::All,
+                    texture: texture_ref,
+                    mip_level: 0,
+                    origin: Origin3d { x, y, z: 0 },
+                },
+                bytes,
+                ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * w),
+                    rows_per_image: Some(h),
+                },
+                Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            window.dirty = true;
+            window.damage_regions.push(rect);
+        }
         Ok(())
     }
 
@@ -503,6 +631,11 @@ impl AxiomRenderer {
         }
 
         debug!("🖥️ Frame rendered with {} windows", self.windows.len());
+        // Clear damage and reset dirty flags after a successful draw (headless)
+        for win in &mut self.windows {
+            win.damage_regions.clear();
+            win.dirty = false;
+        }
         Ok(())
     }
 
@@ -535,25 +668,32 @@ impl AxiomRenderer {
             // Flatten all quads into a single draw list
             let mut all_vertices: Vec<Vertex> = Vec::new();
             let mut all_indices: Vec<u16> = Vec::new();
-            let mut draw_bind_groups: Vec<&BindGroup> = Vec::new();
+            let mut draw_cmds: Vec<(usize, u32)> = Vec::new();
 
-            for window in &mut self.windows {
-                if let Some(tex_view) = &window.texture_view {
-                    if window.bind_group.is_none() {
-                        window.bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("Axiom Window BindGroup"),
-                            layout: bgl,
-                            entries: &[
-                                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(tex_view) },
-                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
-                            ],
-                        }));
+            for widx in 0..self.windows.len() {
+                // Short mutable borrow to ensure bind_group exists and fetch geometry
+                let geo = {
+                    let window = &mut self.windows[widx];
+                    if let Some(tex_view) = &window.texture_view {
+                        if window.bind_group.is_none() {
+                            window.bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("Axiom Window BindGroup"),
+                                layout: bgl,
+                                entries: &[
+                                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(tex_view) },
+                                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+                                ],
+                            }));
+                        }
+                        Some((window.position, window.size))
+                    } else {
+                        None
                     }
-                    let bind_group = window.bind_group.as_ref().unwrap();
-
+                };
+                if let Some((position, size)) = geo {
                     // Build quad vertices in clip space for this window
-                    let (x, y) = window.position;
-                    let (w, h) = window.size;
+                    let (x, y) = position;
+                    let (w, h) = size;
                     let fw = self.size.0 as f32;
                     let fh = self.size.1 as f32;
                     let x0 = (x / fw) * 2.0 - 1.0;
@@ -568,8 +708,9 @@ impl AxiomRenderer {
                         Vertex { position: [x0, y0, 0.0], tex_coords: [0.0, 0.0] },
                         Vertex { position: [x1, y0, 0.0], tex_coords: [1.0, 0.0] },
                     ]);
+                    let first_index = all_indices.len() as u32;
                     all_indices.extend_from_slice(&[base_index, base_index + 1, base_index + 2, base_index + 2, base_index + 1, base_index + 3]);
-                    draw_bind_groups.push(bind_group);
+                    draw_cmds.push((widx, first_index));
                 }
             }
 
@@ -605,10 +746,34 @@ impl AxiomRenderer {
                     rpass.set_vertex_buffer(0, vbuf.slice(..));
                     rpass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint16);
 
-                    for (i, bind_group) in draw_bind_groups.iter().enumerate() {
+                    for (widx, first_index) in draw_cmds.iter().copied() {
+                        // Snapshot needed state without mutating windows during the pass
+                        let (bind_group, wxu, wyu, regions) = {
+                            let win = &self.windows[widx];
+                            (
+                                win.bind_group.as_ref().expect("bind group set"),
+                                win.position.0 as u32,
+                                win.position.1 as u32,
+                                win.damage_regions.clone(),
+                            )
+                        };
                         rpass.set_bind_group(0, bind_group, &[]);
-                        let first_index = (i as u32) * 6;
-                        rpass.draw_indexed(first_index..first_index + 6, 0, 0..1);
+
+                        if regions.is_empty() {
+                            // Full draw
+                            rpass.set_scissor_rect(0, 0, self.size.0, self.size.1);
+                            rpass.draw_indexed(first_index..first_index + 6, 0, 0..1);
+                        } else {
+                            for (dx, dy, dw, dh) in regions.into_iter() {
+                                let sx = wxu.saturating_add(dx);
+                                let sy = wyu.saturating_add(dy);
+                                let sw = dw.min(self.size.0.saturating_sub(sx));
+                                let sh = dh.min(self.size.1.saturating_sub(sy));
+                                if sw == 0 || sh == 0 { continue; }
+                                rpass.set_scissor_rect(sx, sy, sw, sh);
+                                rpass.draw_indexed(first_index..first_index + 6, 0, 0..1);
+                            }
+                        }
                     }
                 }
             }
@@ -616,6 +781,12 @@ impl AxiomRenderer {
 
         // Submit commands to GPU
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Clear damage and reset dirty flags after a successful draw
+        for win in &mut self.windows {
+            win.damage_regions.clear();
+            win.dirty = false;
+        }
 
         info!("✅ Rendered {} windows to surface", self.windows.len());
         Ok(())
@@ -641,19 +812,59 @@ impl AxiomRenderer {
         self.surface_compatible
     }
 
+    /// Whether there is any pending damage/dirty content to render
+    pub fn has_dirty(&self) -> bool {
+        self.windows.iter().any(|w| w.dirty || !w.damage_regions.is_empty())
+    }
+
+    /// Trim textures for windows that are not in the provided keep-set (e.g., unmapped or offscreen)
+    /// Returns the number of textures trimmed.
+    pub fn trim_textures_except(&mut self, keep_ids: &HashSet<u64>) -> usize {
+        let mut trimmed = 0;
+        for w in &mut self.windows {
+            if !keep_ids.contains(&w.id) {
+                if w.texture.is_some() || w.texture_view.is_some() || w.bind_group.is_some() || w.tex_size.is_some() {
+                    w.texture = None;
+                    w.texture_view = None;
+                    w.bind_group = None;
+                    w.tex_size = None;
+                    trimmed += 1;
+                }
+            }
+        }
+        if trimmed > 0 {
+            debug!("🧹 Trimmed {} window textures not currently visible", trimmed);
+        }
+        trimmed
+    }
+
     /// Sync renderer state from shared placeholders and pending textures
     pub fn sync_from_shared(&mut self) {
+        let mut keep_ids: Option<HashSet<u64>> = None;
         if let Some(state) = RENDER_STATE.get() {
             if let Ok(mut s) = state.lock() {
+                // Capture the set of IDs that currently have placeholders (visible/mapped)
+                let mut ks = HashSet::new();
+                for id in s.placeholders.keys() { ks.insert(*id); }
+                keep_ids = Some(ks);
+
                 for (id, (pos, size, opacity)) in s.placeholders.iter() {
                     self.upsert_window_rect(*id, *pos, *size, *opacity);
                 }
                 let updates: Vec<_> = s.pending_textures.drain(..).collect();
+                let region_updates: Vec<_> = s.pending_texture_regions.drain(..).collect();
                 drop(s);
                 for (id, data, w, h) in updates {
                     let _ = self.update_window_texture(id, &data, w, h);
                 }
+                for up in region_updates {
+                    let _ = self.update_window_texture_region(up.id, up.full_size.0, up.full_size.1, up.rect, &up.bytes);
+                }
             }
+        }
+        // After syncing, trim textures that are not currently referenced by placeholders
+        if let Some(keep) = keep_ids {
+            let _ = self.trim_textures_except(&keep);
         }
     }
 
@@ -676,9 +887,13 @@ impl AxiomRenderer {
                         }
                         // Drain pending textures into renderer
                         let updates: Vec<_> = s.pending_textures.drain(..).collect();
+                        let region_updates: Vec<_> = s.pending_texture_regions.drain(..).collect();
                         drop(s);
                         for (id, data, w, h) in updates {
                             let _ = renderer.update_window_texture(id, &data, w, h);
+                        }
+                        for up in region_updates {
+                            let _ = renderer.update_window_texture_region(up.id, up.full_size.0, up.full_size.1, up.rect, &up.bytes);
                         }
                     }
                 }
@@ -741,6 +956,43 @@ pub fn create_projection_matrix(width: f32, height: f32) -> [[f32; 4]; 4] {
     ]
 }
 
+impl AxiomRenderer {
+    /// Detect whether the system is currently on battery power (Linux power_supply sysfs)
+    fn detect_on_battery() -> bool {
+        // Best-effort: look for BAT* devices and check status
+        if let Ok(entries) = fs::read_dir("/sys/class/power_supply") {
+            let mut found_battery = false;
+            for entry in entries.flatten() {
+                if let Ok(name) = entry.file_name().into_string() {
+                    if name.starts_with("BAT") {
+                        found_battery = true;
+                        let status_path = entry.path().join("status");
+                        if let Ok(s) = fs::read_to_string(status_path) {
+                            let sl = s.trim().to_lowercase();
+                            if sl.contains("discharging") {
+                                return true;
+                            }
+                        }
+                    }
+                    if name.starts_with("AC") || name.to_lowercase().contains("ac") || name.to_lowercase().contains("ac_adapter") {
+                        // If AC online is present and set, assume not on battery
+                        let online_path = entry.path().join("online");
+                        if let Ok(s) = fs::read_to_string(online_path) {
+                            if s.trim() == "1" {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+            // If we found a battery but couldn't confirm charging, assume not on battery unless status said so
+            if found_battery { return false; }
+        }
+        // Fallback: unknown platform or missing sysfs — assume not on battery
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -764,6 +1016,8 @@ mod tests {
             bind_group: None,
             dirty: true,
             opacity: 1.0,
+            tex_size: None,
+            damage_regions: Vec::new(),
         };
 
         assert_eq!(window.id, 1);

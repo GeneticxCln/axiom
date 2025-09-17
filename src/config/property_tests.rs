@@ -168,6 +168,10 @@ prop_compose! {
             mouse_accel,
             touchpad_tap,
             natural_scrolling,
+            pan_threshold: InputConfig::default().pan_threshold,
+            scroll_threshold: InputConfig::default().scroll_threshold,
+            swipe_threshold: InputConfig::default().swipe_threshold,
+            drag_threshold: InputConfig::default().drag_threshold,
         }
     }
 }
@@ -194,6 +198,11 @@ prop_compose! {
             launch_launcher: "Super+Space".to_string(),
             toggle_effects: "Super+e".to_string(),
             quit,
+            mouse_left: String::new(),
+            mouse_right: String::new(),
+            mouse_middle: String::new(),
+            drag_move_modifier: BindingsConfig::default().drag_move_modifier,
+            drag_resize_modifier: BindingsConfig::default().drag_resize_modifier,
         }
     }
 }

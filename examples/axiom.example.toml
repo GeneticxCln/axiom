@@ -44,6 +44,9 @@ active_border_color = "#7C3AED"
 inactive_border_color = "#374151"
 gap = 10
 default_layout = "horizontal"
+# When true, force client-side decorations (CSD) for all clients.
+# When false (default), honor client requests and prefer SSD by default.
+force_client_side_decorations = false
 
 [input]
 keyboard_repeat_delay = 600

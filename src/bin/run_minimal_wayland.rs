@@ -24,6 +24,10 @@ fn main() -> Result<()> {
     let im = Arc::new(RwLock::new(InputManager::new(&config.input, &config.bindings)?));
 
     // Create compositor server without on-screen presenter or headless renderer
+    // Respect config.window.force_client_side_decorations via env for the server
+    if config.window.force_client_side_decorations {
+        std::env::set_var("AXIOM_FORCE_CSD", "1");
+    }
     let server = CompositorServer::new(
         wm,
         ws,

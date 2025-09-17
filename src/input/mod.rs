@@ -199,8 +199,8 @@ if let Some(action) = Self::parse_action_name(&bindings_config.mouse_middle) {
             InputEvent::MouseMove {
                 x,
                 y,
-                delta_x,
-                delta_y,
+                delta_x: _,
+                delta_y: _,
             } => {
                 let mut actions = Vec::new();
                 // Handle drag motion if active

@@ -4,10 +4,11 @@
 
 use crate::config::XWaylandConfig;
 use anyhow::Result;
-use log::info;
+use log::{info, warn};
 use std::collections::HashMap;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-use tokio::process::Child as TokioChild;
 
 /// XWayland manager for X11 application support
 pub struct XWaylandManager {
@@ -15,12 +16,12 @@ pub struct XWaylandManager {
     config: XWaylandConfig,
 
     /// XWayland server process
-    xwayland_process: Option<TokioChild>,
+    xwayland_process: Option<Child>,
 
     /// X11 display number
     display_number: Option<u32>,
 
-    /// X11 windows managed by XWayland
+    /// X11 windows managed by XWayland (metadata placeholder)
     x11_windows: HashMap<u32, X11WindowInfo>,
 
     /// XWayland server state
@@ -38,19 +39,14 @@ pub struct XWaylandManager {
 pub struct X11WindowInfo {
     /// X11 window ID
     pub window_id: u32,
-
     /// Window title
     pub title: String,
-
     /// Window class (application name)
     pub class: String,
-
     /// Window geometry
     pub geometry: (i32, i32, u32, u32), // x, y, width, height
-
     /// Whether window is mapped
     pub mapped: bool,
-
     /// Created timestamp
     pub created_at: Instant,
 }
@@ -60,13 +56,10 @@ pub struct X11WindowInfo {
 pub enum XWaylandServerState {
     /// Server is stopped
     Stopped,
-
     /// Server is starting up
     Starting,
-
     /// Server is running normally
     Running,
-
     /// Server encountered an error
     Error(String),
 }
@@ -82,10 +75,9 @@ pub struct XWaylandStats {
 }
 
 impl XWaylandManager {
-    /// Create a new XWayland manager
-    pub async fn new(config: &XWaylandConfig) -> Result<Self> {
+    /// Create a new XWayland manager (synchronous)
+    pub fn new(config: &XWaylandConfig) -> Result<Self> {
         info!("🔗 Initializing XWayland manager");
-
         Ok(Self {
             config: config.clone(),
             xwayland_process: None,
@@ -97,48 +89,95 @@ impl XWaylandManager {
         })
     }
 
-    pub async fn shutdown(&mut self) -> Result<()> {
+    /// Start the XWayland server if enabled. Pass the Wayland display name (e.g. "wayland-1").
+    pub fn start_server(&mut self, wayland_display: &str) -> Result<()> {
+        if !self.config.enabled {
+            warn!("XWayland is disabled in config");
+            return Ok(());
+        }
+        if self.xwayland_process.is_some() {
+            return Ok(());
+        }
+
+        // Select a display number
+        let display = if let Some(d) = self.config.display { d } else { find_free_x_display().unwrap_or(1) };
+
+        // Spawn Xwayland in rootless mode
+        let mut cmd = Command::new("Xwayland");
+        cmd.arg(format!(":{}", display))
+            .arg("-rootless")
+            .arg("-terminate")
+            .arg("-nolisten").arg("tcp")
+            .env("WAYLAND_DISPLAY", wayland_display)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        match cmd.spawn() {
+            Ok(child) => {
+                self.xwayland_process = Some(child);
+                self.display_number = Some(display);
+                self.server_state = XWaylandServerState::Running;
+                std::env::set_var("DISPLAY", format!(":{}", display));
+                info!("🗔 XWayland started on DISPLAY=:{} (WAYLAND_DISPLAY={})", display, wayland_display);
+                Ok(())
+            }
+            Err(e) => {
+                self.server_state = XWaylandServerState::Error(format!("spawn failed: {}", e));
+                warn!("Failed to start XWayland: {}", e);
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Update stats (call periodically if desired)
+    pub fn tick(&mut self) {
+        self.stats.uptime = self.start_time.elapsed();
+    }
+
+    /// Stop the XWayland server
+    pub fn stop_server(&mut self) -> Result<()> {
+        if let Some(mut child) = self.xwayland_process.take() {
+            info!("🛑 Stopping XWayland server");
+            let _ = child.kill();
+            let _ = child.wait();
+            self.server_state = XWaylandServerState::Stopped;
+            self.display_number = None;
+            info!("✅ XWayland server stopped");
+        }
+        Ok(())
+    }
+
+    /// Graceful shutdown
+    pub fn shutdown(&mut self) -> Result<()> {
         info!("🔽 Shutting down XWayland manager");
-
-        // Stop server if running
-        self.stop_server().await?;
-
-        // Clear all X11 windows
+        self.stop_server()?;
         self.x11_windows.clear();
-
-        // Unset environment variable
         std::env::remove_var("DISPLAY");
-
         info!(
             "📊 XWayland final stats: {} windows created, {} server restarts, {:.1}s uptime",
             self.stats.x11_windows_created,
             self.stats.server_restarts,
             self.stats.uptime.as_secs_f32()
         );
-
         info!("✅ XWayland manager shutdown complete");
         Ok(())
     }
+}
 
-    /// Stop the XWayland server
-    pub async fn stop_server(&mut self) -> Result<()> {
-        if let Some(mut process) = self.xwayland_process.take() {
-            info!("🛑 Stopping XWayland server");
-
-            // Try graceful shutdown first
-            if let Err(e) = process.kill().await {
-                log::warn!("Failed to kill XWayland process: {}", e);
+fn find_free_x_display() -> Option<u32> {
+    // Scan /tmp/.X11-unix for sockets and pick the first unused :N
+    let dir = Path::new("/tmp/.X11-unix");
+    let mut used = std::collections::BTreeSet::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if let Some(name) = e.file_name().to_str() {
+                if let Some(num) = name.strip_prefix('X').and_then(|s| s.parse::<u32>().ok()) { used.insert(num); }
             }
-
-            // Wait for process to exit
-            let _ = process.wait().await;
-
-            self.server_state = XWaylandServerState::Stopped;
-            self.display_number = None;
-
-            info!("✅ XWayland server stopped");
         }
-
-        Ok(())
     }
+    for n in 0..256u32 {
+        if !used.contains(&n) { return Some(n); }
+    }
+    None
 }

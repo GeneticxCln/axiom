@@ -53,6 +53,7 @@ env_logger = "0.10"
 # Core Wayland compositor dependencies
 wayland-server = "0.31"
 wayland-protocols = { version = "0.31", features = ["server", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.2", features = ["server"] }
 wayland-backend = "0.3"
 wayland-scanner = "0.31"
 

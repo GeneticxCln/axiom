@@ -1,4 +1,4 @@
-// Minimal textured quad shader
+// Minimal textured quad shader with per-window uniforms
 struct VsIn {
     @location(0) pos: vec3<f32>,
     @location(1) uv: vec2<f32>,
@@ -9,6 +9,18 @@ struct VsOut {
     @location(0) uv: vec2<f32>,
 };
 
+struct WindowUniforms {
+    // params = vec4(opacity, corner_radius_px, window_width, window_height)
+    params: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> window: WindowUniforms;
+@group(0) @binding(1)
+var t0: texture_2d<f32>;
+@group(0) @binding(2)
+var s0: sampler;
+
 @vertex
 fn vs_main(input: VsIn) -> VsOut {
     var out: VsOut;
@@ -17,13 +29,10 @@ fn vs_main(input: VsIn) -> VsOut {
     return out;
 }
 
-@group(0) @binding(0)
-var t0: texture_2d<f32>;
-@group(0) @binding(1)
-var s0: sampler;
-
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let color = textureSample(t0, s0, in.uv);
-    return color;
+    let base = textureSample(t0, s0, in.uv);
+    let opacity = window.params.x;
+    // Corner radius is available as window.params.y (px), width=window.params.z, height=window.params.w (px)
+    return vec4<f32>(base.rgb, base.a * opacity);
 }

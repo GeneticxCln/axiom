@@ -76,7 +76,7 @@ impl AxiomCompositor {
         // Initialize XWayland (if enabled)
         let xwayland_manager = if config.xwayland.enabled {
             debug!("🔗 Initializing XWayland...");
-            Some(XWaylandManager::new(&config.xwayland).await?)
+            Some(XWaylandManager::new(&config.xwayland)?)
         } else {
             warn!("🚫 XWayland disabled - X11 apps will not work");
             None
@@ -295,12 +295,12 @@ impl AxiomCompositor {
                         }
                     }
                     "move_focused_left" => {
-                        if let Some((&window_id)) = self.workspace_manager.get_focused_column_windows().first() {
+                        if let Some(&window_id) = self.workspace_manager.get_focused_column_windows().first() {
                             self.move_window_left(window_id);
                         }
                     }
                     "move_focused_right" => {
-                        if let Some((&window_id)) = self.workspace_manager.get_focused_column_windows().first() {
+                        if let Some(&window_id) = self.workspace_manager.get_focused_column_windows().first() {
                             self.move_window_right(window_id);
                         }
                     }
@@ -513,7 +513,7 @@ impl AxiomCompositor {
         // Clean up XWayland first
         if let Some(ref mut xwayland) = self.xwayland_manager {
             debug!("🔗 Shutting down XWayland...");
-            xwayland.shutdown().await?;
+            xwayland.shutdown()?;
         }
 
         // Clean up other subsystems (no direct Smithay backend owned here)
@@ -544,9 +544,19 @@ impl AxiomCompositor {
             warn!("⚠️ Error processing events: {}", e);
         }
 
-        // Render frame
-        if let Err(e) = self.render_frame().await {
-            warn!("⚠️ Error rendering frame: {}", e);
+        // Render only when we have damage or active animations/scrolling
+        let mut should_render = true; // default for now until renderer is present
+        if let Some(renderer) = self.renderer.as_ref() {
+            should_render = renderer.has_dirty() || self.workspace_manager.is_scrolling() || self.effects_engine.get_animation_stats().active_animations > 0;
+        }
+
+        if should_render {
+            if let Err(e) = self.render_frame().await {
+                warn!("⚠️ Error rendering frame: {}", e);
+            }
+        } else {
+            // Sleep briefly to reduce CPU while idle
+            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
         }
 
         Ok(())

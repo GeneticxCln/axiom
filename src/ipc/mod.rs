@@ -22,6 +22,7 @@ use crate::clipboard::ClipboardManager;
 static CONFIG_SNAPSHOT: std::sync::OnceLock<RwLock<crate::config::AxiomConfig>> = std::sync::OnceLock::new();
 
 // Runtime command channel for applying changes inside the compositor
+#[allow(dead_code)]
 pub enum RuntimeCommand {
     SetConfig { key: String, value: serde_json::Value },
     EffectsControl { enabled: Option<bool>, blur_radius: Option<f32>, animation_speed: Option<f32> },

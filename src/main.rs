@@ -135,9 +135,10 @@ async fn main() -> Result<()> {
     #[cfg(all(feature = "smithay", feature = "wgpu-present"))]
     {
         use crate::input::InputManager;
-        use crate::smithay::server::CompositorServer;
+        use crate::smithay::server::{CompositorServer, PresentEvent};
         use crate::window::WindowManager;
         use crate::workspace::ScrollableWorkspaces;
+        use crate::clipboard::ClipboardManager;
 
         // Select backends based on CLI
         let selected_backends = match cli.backend.as_str() {
@@ -153,18 +154,25 @@ async fn main() -> Result<()> {
             let wm = Arc::new(RwLock::new(WindowManager::new(&config.window)?));
             let ws = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)?));
             let im = Arc::new(RwLock::new(InputManager::new(&config.input, &config.bindings)?));
-            let server = CompositorServer::new(wm, ws, im, true, selected_backends)?; // spawn headless renderer
+            let clip = Arc::new(RwLock::new(ClipboardManager::new()));
+            // Set decoration policy env for server
+            if cfg_clone.window.force_client_side_decorations { std::env::set_var("AXIOM_FORCE_CSD", "1"); } else { std::env::remove_var("AXIOM_FORCE_CSD"); }
+            let server = CompositorServer::new(wm, ws, im, clip, None, true, selected_backends)?; // spawn headless renderer
             return server.run().map(|_| ());
         }
 
         // Start Smithay server without headless renderer (we'll present on-screen)
         let cfg_clone = config.clone();
+        let (present_tx, present_rx) = std::sync::mpsc::channel::<PresentEvent>();
+        let (redraw_tx, redraw_rx) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
             let _ = env_logger::try_init();
             let wm = Arc::new(RwLock::new(WindowManager::new(&cfg_clone.window).expect("wm")));
             let ws = Arc::new(RwLock::new(ScrollableWorkspaces::new(&cfg_clone.workspace).expect("ws")));
             let im = Arc::new(RwLock::new(InputManager::new(&cfg_clone.input, &cfg_clone.bindings).expect("im")));
-            let server = CompositorServer::new(wm, ws, im, false, selected_backends).expect("server");
+            let clip = Arc::new(RwLock::new(ClipboardManager::new()));
+            if cfg_clone.window.force_client_side_decorations { std::env::set_var("AXIOM_FORCE_CSD", "1"); } else { std::env::remove_var("AXIOM_FORCE_CSD"); }
+            let server = CompositorServer::new(wm, ws, im, clip, Some(present_rx), Some(redraw_tx), false, selected_backends).expect("server");
             let _ = server.run();
         });
 
@@ -208,6 +216,8 @@ async fn main() -> Result<()> {
                     }
                 }
                 Event::AboutToWait => {
+                    // If the compositor requested a redraw, drain signal and redraw once.
+                    while let Ok(_) = redraw_rx.try_recv() { /* drain */ }
                     window.request_redraw();
                 }
                 Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
@@ -219,6 +229,24 @@ async fn main() -> Result<()> {
                                 eprintln!("render error: {}", e);
                             }
                             frame.present();
+                            // Send presentation feedback timing
+                            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                            let tv_sec = now.as_secs();
+                            let tv_nsec = now.subsec_nanos();
+                            let tv_sec_hi: u32 = (tv_sec >> 32) as u32;
+                            let tv_sec_lo: u32 = (tv_sec & 0xFFFF_FFFF) as u32;
+                            // Query monitor refresh if available
+                            let refresh_ns: u32 = window.current_monitor()
+                                .and_then(|m| m.refresh_rate_millihertz())
+                                .map(|mhz| {
+                                    // ns per frame = 1e9 / (mhz/1000) = 1e12 / mhz
+                                    let ns = 1_000_000_000_000u64 / (mhz as u64);
+                                    ns.clamp(8_000_000, 33_333_333) as u32 // clamp between 120Hz and 30Hz typical bounds
+                                })
+                                .unwrap_or(16_666_666);
+                            // Flags: vsync + hw clock
+                            let flags: u32 = (wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync | wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock).bits();
+                            let _ = present_tx.send(PresentEvent { tv_sec_hi, tv_sec_lo, tv_nsec, refresh_ns, flags });
                         }
                     } else {
                         // Headless fallback: no on-screen presentation

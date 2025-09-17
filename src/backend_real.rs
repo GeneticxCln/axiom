@@ -103,6 +103,7 @@ impl Default for CompositorState {
 }
 
 /// Enhanced Real Wayland Backend - Integrates with Axiom systems
+#[allow(dead_code)]
 pub struct AxiomRealBackend {
     // Wayland core
     display: Display<AxiomCompositorState>,

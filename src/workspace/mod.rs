@@ -107,6 +107,12 @@ pub struct ScrollableWorkspaces {
     viewport_width: f64,
     viewport_height: f64,
 
+    /// Reserved insets for layer-shell exclusive zones (pixels)
+    reserved_top: f64,
+    reserved_right: f64,
+    reserved_bottom: f64,
+    reserved_left: f64,
+
     /// Animation easing parameters
     last_update: Instant,
 }
@@ -145,6 +151,10 @@ impl ScrollableWorkspaces {
             viewport_width: 1920.0,  // Default, will be updated
             viewport_height: 1080.0, // Default, will be updated
             last_update: Instant::now(),
+            reserved_top: 0.0,
+            reserved_right: 0.0,
+            reserved_bottom: 0.0,
+            reserved_left: 0.0,
         };
 
         // Create the initial workspace column
@@ -164,6 +174,27 @@ impl ScrollableWorkspaces {
         self.viewport_width = width;
         self.viewport_height = height;
         debug!("📐 Viewport size updated to {}x{}", width, height);
+    }
+
+    /// Update reserved insets (top, right, bottom, left)
+    pub fn set_reserved_insets(&mut self, top: f64, right: f64, bottom: f64, left: f64) {
+        self.reserved_top = top.max(0.0);
+        self.reserved_right = right.max(0.0);
+        self.reserved_bottom = bottom.max(0.0);
+        self.reserved_left = left.max(0.0);
+        debug!(
+            "📐 Reserved insets set: top {:.1}, right {:.1}, bottom {:.1}, left {:.1}",
+            self.reserved_top, self.reserved_right, self.reserved_bottom, self.reserved_left
+        );
+    }
+
+    /// Increase reserved insets to at least the provided values (component-wise max)
+    pub fn update_reserved_insets_max(&mut self, top: f64, right: f64, bottom: f64, left: f64) {
+        let nt = self.reserved_top.max(top.max(0.0));
+        let nr = self.reserved_right.max(right.max(0.0));
+        let nb = self.reserved_bottom.max(bottom.max(0.0));
+        let nl = self.reserved_left.max(left.max(0.0));
+        self.set_reserved_insets(nt, nr, nb, nl);
     }
 
     /// Ensure a column exists at the given index
@@ -341,11 +372,14 @@ impl ScrollableWorkspaces {
             if column_left + self.config.workspace_width as f64 >= 0.0
                 && column_left <= self.viewport_width
             {
+                // Apply reserved insets from layer-shell exclusive zones
+                let usable_height = (self.viewport_height - self.reserved_top - self.reserved_bottom).max(1.0);
+                let usable_width = (self.config.workspace_width as f64 - self.reserved_left - self.reserved_right).max(1.0);
                 let column_bounds = Rectangle {
-                    x: column_left as i32,
-                    y: 0,
-                    width: self.config.workspace_width,
-                    height: self.viewport_height as u32,
+                    x: (column_left + self.reserved_left) as i32,
+                    y: self.reserved_top as i32,
+                    width: usable_width as u32,
+                    height: usable_height as u32,
                 };
 
                 // Calculate layout for windows in this column

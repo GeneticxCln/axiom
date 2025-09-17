@@ -22,6 +22,7 @@ impl ClipboardManager {
         self.selection.clone()
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         info!("📋 Clipboard cleared");
         self.selection = None;
@@ -29,8 +30,10 @@ impl ClipboardManager {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DragAndDropManager {}
 
+#[allow(dead_code)]
 impl DragAndDropManager {
     pub fn new() -> Self { Self {} }
 
