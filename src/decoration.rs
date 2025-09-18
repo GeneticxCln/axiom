@@ -158,7 +158,8 @@ impl Default for DecorationTheme {
             text_color_unfocused: [0.7, 0.7, 0.7, 1.0],   // Light gray
             border_color_focused: [0.482, 0.235, 0.929, 1.0], // Purple (#7C3AED)
             // Gray (#374151)
-border_color_unfocused: DecorationManager::parse_color("#374151").unwrap_or([0.21586, 0.25490, 0.31765, 1.0]),
+            border_color_unfocused: DecorationManager::parse_color("#374151")
+                .unwrap_or([0.21586, 0.25490, 0.31765, 1.0]),
             button_size: 24,
             button_normal: [0.2, 0.2, 0.2, 1.0],
             button_hovered: [0.3, 0.3, 0.3, 1.0],
@@ -177,7 +178,7 @@ impl DecorationManager {
         info!("🎨 Initializing server-side decoration manager...");
 
         // Create theme from window config
-let theme = DecorationTheme {
+        let theme = DecorationTheme {
             border_width_focused: config.border_width,
             border_color_focused: Self::parse_color(&config.active_border_color)
                 .unwrap_or([0.482, 0.235, 0.929, 1.0]),

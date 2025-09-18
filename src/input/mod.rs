@@ -115,7 +115,10 @@ struct GestureState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum DragMode { Move, Resize }
+enum DragMode {
+    Move,
+    Resize,
+}
 
 impl InputManager {
     pub fn new(input_config: &InputConfig, bindings_config: &BindingsConfig) -> Result<Self> {
@@ -152,17 +155,17 @@ impl InputManager {
         // Parse mouse button bindings from config (optional)
         let mut mouse_bindings: HashMap<MouseButton, CompositorAction> = HashMap::new();
         if !bindings_config.mouse_left.trim().is_empty() {
-if let Some(action) = Self::parse_action_name(&bindings_config.mouse_left) {
+            if let Some(action) = Self::parse_action_name(&bindings_config.mouse_left) {
                 mouse_bindings.insert(MouseButton::Left, action);
             }
         }
         if !bindings_config.mouse_right.trim().is_empty() {
-if let Some(action) = Self::parse_action_name(&bindings_config.mouse_right) {
+            if let Some(action) = Self::parse_action_name(&bindings_config.mouse_right) {
                 mouse_bindings.insert(MouseButton::Right, action);
             }
         }
         if !bindings_config.mouse_middle.trim().is_empty() {
-if let Some(action) = Self::parse_action_name(&bindings_config.mouse_middle) {
+            if let Some(action) = Self::parse_action_name(&bindings_config.mouse_middle) {
                 mouse_bindings.insert(MouseButton::Middle, action);
             }
         }
@@ -212,13 +215,19 @@ if let Some(action) = Self::parse_action_name(&bindings_config.mouse_middle) {
                             match mode {
                                 DragMode::Move => {
                                     // Map to move window left/right based on sign; fine-grained movement is TBD
-                                    if dx > 0.0 { actions.push(CompositorAction::MoveWindowRight); }
-                                    else { actions.push(CompositorAction::MoveWindowLeft); }
+                                    if dx > 0.0 {
+                                        actions.push(CompositorAction::MoveWindowRight);
+                                    } else {
+                                        actions.push(CompositorAction::MoveWindowLeft);
+                                    }
                                 }
                                 DragMode::Resize => {
                                     // Reuse move actions as placeholder for resize
-                                    if dx > 0.0 { actions.push(CompositorAction::MoveWindowRight); }
-                                    else { actions.push(CompositorAction::MoveWindowLeft); }
+                                    if dx > 0.0 {
+                                        actions.push(CompositorAction::MoveWindowRight);
+                                    } else {
+                                        actions.push(CompositorAction::MoveWindowLeft);
+                                    }
                                 }
                             }
                         }
@@ -298,11 +307,17 @@ if let Some(action) = Self::parse_action_name(&bindings_config.mouse_middle) {
             let mods = self.active_modifiers.join("+");
             let drag_move_mod = self.bindings_config.drag_move_modifier.trim();
             let drag_resize_mod = self.bindings_config.drag_resize_modifier.trim();
-            if !drag_move_mod.is_empty() && mods.contains(drag_move_mod) && button == MouseButton::Left {
+            if !drag_move_mod.is_empty()
+                && mods.contains(drag_move_mod)
+                && button == MouseButton::Left
+            {
                 self.drag_mode = Some(DragMode::Move);
                 self.drag_start = Some((x, y));
                 info!("🚚 Drag move started at ({:.1},{:.1})", x, y);
-            } else if !drag_resize_mod.is_empty() && mods.contains(drag_resize_mod) && button == MouseButton::Right {
+            } else if !drag_resize_mod.is_empty()
+                && mods.contains(drag_resize_mod)
+                && button == MouseButton::Right
+            {
                 self.drag_mode = Some(DragMode::Resize);
                 self.drag_start = Some((x, y));
                 info!("📐 Drag resize started at ({:.1},{:.1})", x, y);
@@ -416,10 +431,26 @@ if let Some(action) = Self::parse_action_name(&bindings_config.mouse_middle) {
         Ok(())
     }
 
+    /// Return keyboard repeat parameters (delay in ms, rate in Hz)
+    pub fn repeat_params(&self) -> (u32, u32) {
+        (self.input_config.keyboard_repeat_delay, self.input_config.keyboard_repeat_rate)
+    }
+
+    /// Whether natural scrolling is enabled
+    pub fn natural_scrolling(&self) -> bool {
+        self.input_config.natural_scrolling
+    }
+
     pub fn update_thresholds(&mut self, pan: Option<f64>, scroll: Option<f64>, swipe: Option<f64>) {
-        if let Some(p) = pan { self.input_config.pan_threshold = p.max(0.0).min(1000.0); }
-        if let Some(s) = scroll { self.input_config.scroll_threshold = s.max(0.0).min(1000.0); }
-        if let Some(sw) = swipe { self.input_config.swipe_threshold = sw.max(0.0).min(5000.0); }
+        if let Some(p) = pan {
+            self.input_config.pan_threshold = p.clamp(0.0, 1000.0);
+        }
+        if let Some(s) = scroll {
+            self.input_config.scroll_threshold = s.clamp(0.0, 1000.0);
+        }
+        if let Some(sw) = swipe {
+            self.input_config.swipe_threshold = sw.clamp(0.0, 5000.0);
+        }
         debug!(
             "Updated thresholds: pan={:.1}, scroll={:.1}, swipe={:.1}",
             self.input_config.pan_threshold,
@@ -428,7 +459,7 @@ if let Some(action) = Self::parse_action_name(&bindings_config.mouse_middle) {
         );
     }
 
-fn parse_action_name(name: &str) -> Option<CompositorAction> {
+    fn parse_action_name(name: &str) -> Option<CompositorAction> {
         match name.trim().to_lowercase().as_str() {
             "scroll_left" => Some(CompositorAction::ScrollWorkspaceLeft),
             "scroll_right" => Some(CompositorAction::ScrollWorkspaceRight),

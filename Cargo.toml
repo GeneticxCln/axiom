@@ -58,7 +58,7 @@ wayland-backend = "0.3"
 wayland-scanner = "0.31"
 
 # Smithay compositor framework with full features
-smithay = { version = "0.3.0", default-features = false, features = [
+smithay = { version = "0.7.0", default-features = false, features = [
     "backend_winit",
     "backend_drm",
     "backend_libinput", 
@@ -71,18 +71,19 @@ smithay = { version = "0.3.0", default-features = false, features = [
 smithay-client-toolkit = "0.18"
 
 # Graphics and input
-glium = "0.34"
-cgmath = "0.18"
-xkbcommon = "0.7"
-libc = "0.2"
-calloop = "0.12"
-calloop-wayland-source = "0.2"
-input = "0.9"
-evdev = "0.12"
-drm = "0.11"
- gbm = "0.14"
-gl = "0.14"
-memmap2 = "0.9"
+ glium = "0.34"
+ cgmath = "0.18"
+ xkbcommon = "0.7"
+ libc = "0.2"
+ calloop = "0.12"
+ calloop-wayland-source = "0.2"
+ input = "0.9"
+ evdev = "0.12"
+ udev = "0.8"
+ drm = "0.11"
+  gbm = "0.14"
+ gl = "0.14"
+ memmap2 = "0.9"
 
 # Logging
 tracing = "0.1"

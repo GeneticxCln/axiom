@@ -93,7 +93,10 @@ fn test_workspace_scrolling() -> Result<()> {
 
 #[test]
 fn test_infinite_scrolling_bounds() -> Result<()> {
-let config = WorkspaceConfig { infinite_scroll: true, ..Default::default() };
+    let config = WorkspaceConfig {
+        infinite_scroll: true,
+        ..Default::default()
+    };
 
     let mut workspaces = ScrollableWorkspaces::new(&config)?;
 
@@ -147,13 +150,13 @@ fn test_focused_column_retrieval() -> Result<()> {
     workspaces.add_window_to_column(1002, 1);
 
     // Get focused column (should be first column initially)
-let focused_column = workspaces.get_focused_column_opt().unwrap();
+    let focused_column = workspaces.get_focused_column_opt().unwrap();
     assert_eq!(focused_column.windows.len(), 1);
     assert_eq!(focused_column.windows[0], 1001);
 
     // Move focus and check again
     workspaces.scroll_right();
-let focused_column = workspaces.get_focused_column_opt().unwrap();
+    let focused_column = workspaces.get_focused_column_opt().unwrap();
     assert_eq!(focused_column.windows.len(), 1);
     assert_eq!(focused_column.windows[0], 1002);
 
@@ -170,7 +173,7 @@ fn test_workspace_update_cycle() -> Result<()> {
     workspaces.add_window_to_column(1002, 1);
 
     // Test update cycle (should not crash)
-workspaces.update_animations()?;
+    workspaces.update_animations()?;
 
     // Should still have the same number of columns
     assert_eq!(workspaces.active_column_count(), 2);
@@ -180,7 +183,10 @@ workspaces.update_animations()?;
 
 #[test]
 fn test_smooth_scrolling_state() -> Result<()> {
-let config = WorkspaceConfig { smooth_scrolling: true, ..Default::default() };
+    let config = WorkspaceConfig {
+        smooth_scrolling: true,
+        ..Default::default()
+    };
 
     let mut workspaces = ScrollableWorkspaces::new(&config)?;
 
@@ -201,7 +207,10 @@ let config = WorkspaceConfig { smooth_scrolling: true, ..Default::default() };
 
 #[test]
 fn test_workspace_configuration_effects() -> Result<()> {
-let mut config = WorkspaceConfig { scroll_speed: 2.0, ..Default::default() };
+    let mut config = WorkspaceConfig {
+        scroll_speed: 2.0,
+        ..Default::default()
+    };
     // Test with different scroll speeds
     config.scroll_speed = 2.0;
     let workspaces_fast = ScrollableWorkspaces::new(&config)?;
@@ -340,6 +349,96 @@ fn test_workspace_bounds_checking() -> Result<()> {
     if !workspaces.is_infinite_scroll_enabled() {
         assert!(index < 10); // Reasonable upper bound
     }
+
+    Ok(())
+}
+
+#[test]
+fn test_reserved_insets_applied_to_layout() -> Result<()> {
+    let config = WorkspaceConfig { workspace_width: 800, ..Default::default() };
+    let mut ws = ScrollableWorkspaces::new(&config)?;
+    ws.set_viewport_size(1920.0, 1080.0);
+
+    // One window in focused column
+    ws.add_window(1);
+
+    // Reserve a top bar of 50px and left panel of 20px
+    ws.set_reserved_insets(50.0, 0.0, 0.0, 20.0);
+
+    let layouts = ws.calculate_workspace_layouts();
+    let rect = layouts.get(&1).expect("window layout");
+
+    // Expect y starts at reserved top plus gap, x at viewport center + left inset + gap
+    let gap = ws.config.gaps as i32;
+    assert_eq!(rect.y, 50 + gap);
+    assert_eq!(rect.x, (1920 / 2) + 20 + gap);
+    // Width reduced by left/right insets and gaps
+    assert_eq!(rect.width as i32, (800 - 20) - 2 * gap);
+    // Height is full viewport minus top/bottom and distributed among windows (>= usable - gaps)
+    assert!(rect.height as i32 <= (1080 - 50) - 2 * gap);
+
+    Ok(())
+}
+
+#[test]
+fn test_reserved_insets_max_behavior() -> Result<()> {
+    let config = WorkspaceConfig::default();
+    let mut ws = ScrollableWorkspaces::new(&config)?;
+
+    ws.set_reserved_insets(10.0, 0.0, 0.0, 0.0);
+    // Update with smaller top inset should not reduce
+    ws.update_reserved_insets_max(5.0, 0.0, 0.0, 0.0);
+    assert_eq!(ws.reserved_top, 10.0);
+    // Update with larger top inset should increase
+    ws.update_reserved_insets_max(30.0, 0.0, 0.0, 0.0);
+    assert_eq!(ws.reserved_top, 30.0);
+
+    Ok(())
+}
+
+#[test]
+fn test_reserved_insets_reset_lower_values() -> Result<()> {
+    let config = WorkspaceConfig::default();
+    let mut ws = ScrollableWorkspaces::new(&config)?;
+    // Raise insets via max updater
+    ws.update_reserved_insets_max(40.0, 50.0, 60.0, 70.0);
+    assert_eq!(ws.reserved_top, 40.0);
+    assert_eq!(ws.reserved_right, 50.0);
+    assert_eq!(ws.reserved_bottom, 60.0);
+    assert_eq!(ws.reserved_left, 70.0);
+    // Now explicitly set lower insets — should reduce
+    ws.set_reserved_insets(10.0, 20.0, 30.0, 0.0);
+    assert_eq!(ws.reserved_top, 10.0);
+    assert_eq!(ws.reserved_right, 20.0);
+    assert_eq!(ws.reserved_bottom, 30.0);
+    assert_eq!(ws.reserved_left, 0.0);
+    Ok(())
+}
+
+#[test]
+fn test_reserved_insets_multiple_sides_simulation() -> Result<()> {
+    let config = WorkspaceConfig { workspace_width: 1000, ..Default::default() };
+    let mut ws = ScrollableWorkspaces::new(&config)?;
+    ws.set_viewport_size(1200.0, 800.0);
+
+    ws.add_window(1);
+
+    // Simulate three layer surfaces:
+    // top bar 40, bottom bar 60, left panel 120, right panel 80
+    ws.update_reserved_insets_max(40.0, 0.0, 0.0, 0.0); // top
+    ws.update_reserved_insets_max(0.0, 0.0, 60.0, 0.0); // bottom
+    ws.update_reserved_insets_max(0.0, 0.0, 0.0, 120.0); // left
+    ws.update_reserved_insets_max(0.0, 80.0, 0.0, 0.0); // right
+
+    let layouts = ws.calculate_workspace_layouts();
+    let rect = layouts.get(&1).expect("window layout");
+
+    let gap = ws.config.gaps as i32;
+    assert_eq!(rect.x, (1200 / 2) + 120 + gap);
+    assert_eq!(rect.y, 40 + gap);
+    // Ensure width/height are bounded by usable region with gaps accounted
+    assert_eq!(rect.width as i32, (1000 - 120 - 80) - 2 * gap);
+    assert!(rect.height as i32 <= (800 - 40 - 60) - 2 * gap);
 
     Ok(())
 }

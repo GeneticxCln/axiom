@@ -140,6 +140,7 @@ prop_compose! {
             Just("horizontal".to_string()),
             Just("vertical".to_string()),
         ],
+        force_client_side_decorations in any::<bool>(),
     ) -> WindowConfig {
         WindowConfig {
             placement,
@@ -149,6 +150,7 @@ prop_compose! {
             inactive_border_color,
             gap,
             default_layout,
+            force_client_side_decorations,
         }
     }
 }

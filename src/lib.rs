@@ -1,16 +1,18 @@
+#![allow(missing_docs)]
+#![warn(rust_2018_idioms)]
 // Axiom library root
 
+pub mod clipboard;
 pub mod compositor;
-pub mod decoration;
 pub mod config;
+pub mod decoration;
 pub mod effects;
 pub mod input;
 pub mod ipc;
+pub mod renderer;
 pub mod window;
 pub mod workspace;
 pub mod xwayland;
-pub mod renderer;
-pub mod clipboard;
 
 // Axiom Wayland Compositor Library
 //
@@ -62,10 +64,7 @@ pub mod clipboard;
 // }
 // ```
 
-#[allow(missing_docs)]
-#[warn(rust_2018_idioms)]
 #[allow(dead_code)] // Remove this once development is complete
-
 // Re-export main compositor
 pub use crate::compositor::AxiomCompositor;
 

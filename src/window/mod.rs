@@ -12,9 +12,9 @@
 
 use crate::config::WindowConfig;
 use anyhow::{anyhow, Result};
+use log::debug;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
-use log::debug;
 
 /// Window operation types for the compositor
 #[derive(Debug, Clone, PartialEq)]
@@ -128,10 +128,19 @@ pub struct BackendWindow {
 
 impl BackendWindow {
     pub fn new(id: u64, title: String) -> Self {
-        Self { id, title, position: (0, 0), size: (800, 600) }
+        Self {
+            id,
+            title,
+            position: (0, 0),
+            size: (800, 600),
+        }
     }
-    pub fn set_position(&mut self, x: i32, y: i32) { self.position = (x, y); }
-    pub fn set_size(&mut self, width: u32, height: u32) { self.size = (width, height); }
+    pub fn set_position(&mut self, x: i32, y: i32) {
+        self.position = (x, y);
+    }
+    pub fn set_size(&mut self, width: u32, height: u32) {
+        self.size = (width, height);
+    }
 }
 
 /// Rectangle for window positioning and sizing
@@ -316,24 +325,36 @@ impl WindowManager {
 
     /// Execute a window operation
     pub fn execute_operation(&mut self, window_id: u64, operation: WindowOperation) -> Result<()> {
-        debug!("Executing window operation: {:?} on window {}", operation, window_id);
-        
+        debug!(
+            "Executing window operation: {:?} on window {}",
+            operation, window_id
+        );
+
         if !self.windows.contains_key(&window_id) {
             return Err(anyhow!("Window {} not found", window_id));
         }
 
         match operation {
             WindowOperation::Move { x, y } => self.move_window(window_id, x, y),
-            WindowOperation::Resize { width, height } => self.resize_window(window_id, width, height),
+            WindowOperation::Resize { width, height } => {
+                self.resize_window(window_id, width, height)
+            }
             WindowOperation::Close => self.close_window(window_id),
             WindowOperation::Minimize => self.minimize_window(window_id),
             WindowOperation::Maximize => self.maximize_window(window_id),
             WindowOperation::Restore => self.restore_window(window_id),
             WindowOperation::ToggleFullscreen => self.toggle_fullscreen(window_id),
-            WindowOperation::Focus => { self.focus_window(window_id)?; Ok(()) },
+            WindowOperation::Focus => {
+                self.focus_window(window_id)?;
+                Ok(())
+            }
             WindowOperation::Unfocus => self.unfocus_window(window_id),
-            WindowOperation::MoveToWorkspace(workspace) => self.move_window_to_workspace(window_id, workspace),
-            WindowOperation::SetAlwaysOnTop(always_on_top) => self.set_always_on_top(window_id, always_on_top),
+            WindowOperation::MoveToWorkspace(workspace) => {
+                self.move_window_to_workspace(window_id, workspace)
+            }
+            WindowOperation::SetAlwaysOnTop(always_on_top) => {
+                self.set_always_on_top(window_id, always_on_top)
+            }
             WindowOperation::SetOpacity(opacity) => self.set_window_opacity(window_id, opacity),
         }
     }
@@ -344,7 +365,7 @@ impl WindowManager {
             if !window.properties.constraints.movable {
                 return Err(anyhow!("Window {} is not movable", window_id));
             }
-            
+
             window.window.set_position(x, y);
             debug!("Moved window {} to ({}, {})", window_id, x, y);
             Ok(())
@@ -385,7 +406,7 @@ impl WindowManager {
             if let Some((aspect_w, aspect_h)) = constraints.aspect_ratio {
                 let aspect_ratio = aspect_w as f32 / aspect_h as f32;
                 let current_ratio = final_width as f32 / final_height as f32;
-                
+
                 if (current_ratio - aspect_ratio).abs() > 0.01 {
                     // Adjust to maintain aspect ratio, preferring width
                     final_height = (final_width as f32 / aspect_ratio) as u32;
@@ -393,7 +414,10 @@ impl WindowManager {
             }
 
             window.window.set_size(final_width, final_height);
-            debug!("Resized window {} to {}x{}", window_id, final_width, final_height);
+            debug!(
+                "Resized window {} to {}x{}",
+                window_id, final_width, final_height
+            );
             Ok(())
         } else {
             Err(anyhow!("Window {} not found", window_id))
@@ -406,16 +430,16 @@ impl WindowManager {
         self.remove_window_from_stacking(window_id);
         self.remove_window_from_layers(window_id);
         self.remove_from_focus_history(window_id);
-        
+
         // Handle modal/popup cleanup
         self.cleanup_modal_stack(window_id);
         self.cleanup_popup_hierarchy(window_id);
-        
+
         // If focused window, focus next in stack
         if self.focused_window == Some(window_id) {
             self.focus_next_window();
         }
-        
+
         debug!("Closed window {}", window_id);
         Ok(())
     }
@@ -431,17 +455,17 @@ impl WindowManager {
                     width: window.window.size.0,
                     height: window.window.size.1,
                 });
-                
+
                 window.properties.minimized = true;
-                
+
                 // Remove from stacking order when minimized
                 self.remove_window_from_stacking(window_id);
-                
+
                 // Focus next window if this was focused
                 if self.focused_window == Some(window_id) {
                     self.focus_next_window();
                 }
-                
+
                 debug!("Minimized window {}", window_id);
             }
             Ok(())
@@ -461,10 +485,10 @@ impl WindowManager {
                     width: window.window.size.0,
                     height: window.window.size.1,
                 });
-                
+
                 window.properties.maximized = true;
                 window.properties.minimized = false; // Can't be both
-                
+
                 // Geometry will be provided by the layout engine (workspace/compositor)
                 debug!("Maximized window {}", window_id);
             }
@@ -483,15 +507,15 @@ impl WindowManager {
                     window.window.set_position(saved_rect.x, saved_rect.y);
                     window.window.set_size(saved_rect.width, saved_rect.height);
                 }
-                
+
                 window.properties.minimized = false;
                 window.properties.maximized = false;
-                
+
                 // Re-add to stacking if was minimized
                 if !self.stacking_order.contains(&window_id) {
                     self.add_window_to_stacking(window_id);
                 }
-                
+
                 debug!("Restored window {}", window_id);
             }
             Ok(())
@@ -504,14 +528,14 @@ impl WindowManager {
     pub fn set_always_on_top(&mut self, window_id: u64, always_on_top: bool) -> Result<()> {
         if let Some(window) = self.windows.get_mut(&window_id) {
             window.properties.always_on_top = always_on_top;
-            
+
             // Update layer based on always on top
             let new_layer = if always_on_top {
                 WindowLayer::AlwaysOnTop
             } else {
                 WindowLayer::Normal
             };
-            
+
             self.move_window_to_layer(window_id, new_layer)?;
             debug!("Set window {} always on top: {}", window_id, always_on_top);
             Ok(())
@@ -524,7 +548,10 @@ impl WindowManager {
     pub fn set_window_opacity(&mut self, window_id: u64, opacity: f32) -> Result<()> {
         if let Some(window) = self.windows.get_mut(&window_id) {
             window.properties.opacity = opacity.clamp(0.0, 1.0);
-            debug!("Set window {} opacity to {:.2}", window_id, window.properties.opacity);
+            debug!(
+                "Set window {} opacity to {:.2}",
+                window_id, window.properties.opacity
+            );
             Ok(())
         } else {
             Err(anyhow!("Window {} not found", window_id))
@@ -546,7 +573,10 @@ impl WindowManager {
     pub fn unfocus_window(&mut self, window_id: u64) -> Result<()> {
         if self.focused_window == Some(window_id) {
             self.focused_window = None;
+            // First notify the specific window lost focus
             self.emit_focus_event(FocusEvent::WindowUnfocused(window_id));
+            // Then notify global focus lost (no focused window)
+            self.emit_focus_event(FocusEvent::FocusLost);
             debug!("Unfocused window {}", window_id);
         }
         Ok(())
@@ -565,10 +595,10 @@ impl WindowManager {
         };
 
         self.windows.insert(id, axiom_window);
-        
+
         // Add to stacking order
         self.add_window_to_stacking(id);
-        
+
         // Add to appropriate layer
         self.add_window_to_layer(id, WindowLayer::Normal);
 
@@ -577,7 +607,10 @@ impl WindowManager {
             let _ = self.focus_window(id);
         }
 
-        debug!("Added window {} with title: {}", id, self.windows[&id].window.title);
+        debug!(
+            "Added window {} with title: {}",
+            id, self.windows[&id].window.title
+        );
         id
     }
 
@@ -585,6 +618,9 @@ impl WindowManager {
     pub fn remove_window(&mut self, id: u64) -> Option<AxiomWindow> {
         if self.focused_window == Some(id) {
             self.focused_window = None;
+            // Emit consistent focus events when the focused window is removed
+            self.emit_focus_event(FocusEvent::WindowUnfocused(id));
+            self.emit_focus_event(FocusEvent::FocusLost);
         }
         self.windows.remove(&id)
     }
@@ -611,33 +647,33 @@ impl WindowManager {
         if !self.windows.contains_key(&id) {
             return Err(anyhow!("Window {} not found", id));
         }
-        
+
         // Check if window can be focused (not minimized)
         if let Some(window) = self.windows.get(&id) {
             if window.properties.minimized {
                 return Err(anyhow!("Cannot focus minimized window {}", id));
             }
         }
-        
+
         // Unfocus current window if different
         if let Some(current_focus) = self.focused_window {
             if current_focus != id {
                 self.emit_focus_event(FocusEvent::WindowUnfocused(current_focus));
-                
+
                 // Add current focus to history
                 self.add_to_focus_history(current_focus);
             }
         }
-        
+
         // Set new focus
         self.focused_window = Some(id);
-        
+
         // Bring window to front of its layer
         self.bring_window_to_front(id);
-        
+
         // Emit focus event
         self.emit_focus_event(FocusEvent::WindowFocused(id));
-        
+
         debug!("Focused window {}", id);
         Ok(())
     }
@@ -660,7 +696,9 @@ impl WindowManager {
         let mut windows_in_workspace: Vec<_> = self
             .windows
             .values()
-            .filter(|w| !w.properties.floating && !w.properties.fullscreen && !w.properties.minimized)
+            .filter(|w| {
+                !w.properties.floating && !w.properties.fullscreen && !w.properties.minimized
+            })
             .collect();
 
         if windows_in_workspace.is_empty() {
@@ -684,28 +722,42 @@ impl WindowManager {
                 // Horizontal tiling layout (like niri)
                 let n = windows_in_workspace.len() as i32;
                 let available_width = workspace_bounds.width as i32 - gap * (n + 1);
-                let window_width = if n > 0 { available_width / n } else { available_width };
+                let window_width = if n > 0 {
+                    available_width / n
+                } else {
+                    available_width
+                };
 
                 for (i, window) in windows_in_workspace.iter().enumerate() {
                     let x = workspace_bounds.x + gap + i as i32 * (window_width + gap);
                     let y = workspace_bounds.y + gap;
                     let w = window_width.max(1) as u32;
                     let h = (workspace_bounds.height as i32 - 2 * gap).max(1) as u32;
-                    layouts.push((window.window.id, Rectangle::from_loc_and_size((x, y), (w, h))));
+                    layouts.push((
+                        window.window.id,
+                        Rectangle::from_loc_and_size((x, y), (w, h)),
+                    ));
                 }
             }
             "vertical" => {
                 // Vertical tiling layout
                 let n = windows_in_workspace.len() as i32;
                 let available_height = workspace_bounds.height as i32 - gap * (n + 1);
-                let window_height = if n > 0 { available_height / n } else { available_height };
+                let window_height = if n > 0 {
+                    available_height / n
+                } else {
+                    available_height
+                };
 
                 for (i, window) in windows_in_workspace.iter().enumerate() {
                     let x = workspace_bounds.x + gap;
                     let y = workspace_bounds.y + gap + i as i32 * (window_height + gap);
                     let w = (workspace_bounds.width as i32 - 2 * gap).max(1) as u32;
                     let h = window_height.max(1) as u32;
-                    layouts.push((window.window.id, Rectangle::from_loc_and_size((x, y), (w, h))));
+                    layouts.push((
+                        window.window.id,
+                        Rectangle::from_loc_and_size((x, y), (w, h)),
+                    ));
                 }
             }
             "master-stack" => {
@@ -721,19 +773,30 @@ impl WindowManager {
                 let my = workspace_bounds.y + gap;
                 let mw = (master_w as i32 - gap).max(1) as u32;
                 let mh = (workspace_bounds.height as i32 - 2 * gap).max(1) as u32;
-                layouts.push((master.window.id, Rectangle::from_loc_and_size((mx, my), (mw, mh))));
+                layouts.push((
+                    master.window.id,
+                    Rectangle::from_loc_and_size((mx, my), (mw, mh)),
+                ));
 
                 if n > 1 {
                     // Stack vertically on the right
                     let stack_count = n - 1;
-                    let available_height = workspace_bounds.height as i32 - gap * (stack_count as i32 + 1);
-                    let each_h = if stack_count > 0 { available_height / stack_count as i32 } else { available_height };
+                    let available_height =
+                        workspace_bounds.height as i32 - gap * (stack_count as i32 + 1);
+                    let each_h = if stack_count > 0 {
+                        available_height / stack_count as i32
+                    } else {
+                        available_height
+                    };
                     for (i, window) in windows_in_workspace.iter().enumerate().skip(1) {
                         let x = workspace_bounds.x + gap + master_w as i32 + gap;
                         let y = workspace_bounds.y + gap + (i as i32 - 1) * (each_h + gap);
                         let w = (stack_w as i32).max(1) as u32;
                         let h = each_h.max(1) as u32;
-                        layouts.push((window.window.id, Rectangle::from_loc_and_size((x, y), (w, h))));
+                        layouts.push((
+                            window.window.id,
+                            Rectangle::from_loc_and_size((x, y), (w, h)),
+                        ));
                     }
                 }
             }
@@ -752,7 +815,10 @@ impl WindowManager {
                     let y = workspace_bounds.y + gap + r * (cell_h + gap);
                     let w = cell_w.max(1) as u32;
                     let h = cell_h.max(1) as u32;
-                    layouts.push((window.window.id, Rectangle::from_loc_and_size((x, y), (w, h))));
+                    layouts.push((
+                        window.window.id,
+                        Rectangle::from_loc_and_size((x, y), (w, h)),
+                    ));
                 }
             }
             _ => {
@@ -811,7 +877,7 @@ impl WindowManager {
             self.emit_focus_event(FocusEvent::FocusLost);
         }
     }
-    
+
     /// Focus previous window in history
     pub fn focus_previous_window(&mut self) {
         if let Some(prev_id) = self.focus_history.pop_back() {
@@ -826,7 +892,7 @@ impl WindowManager {
             self.focus_next_window();
         }
     }
-    
+
     /// Cycle focus to next window
     pub fn cycle_focus_forward(&mut self) {
         if let Some(current) = self.focused_window {
@@ -837,7 +903,7 @@ impl WindowManager {
             self.focus_next_window();
         }
     }
-    
+
     /// Cycle focus to previous window
     pub fn cycle_focus_backward(&mut self) {
         if let Some(current) = self.focused_window {
@@ -850,89 +916,95 @@ impl WindowManager {
     }
 
     // === Stacking Order Management ===
-    
+
     fn add_window_to_stacking(&mut self, window_id: u64) {
         if !self.stacking_order.contains(&window_id) {
             self.stacking_order.push_back(window_id);
         }
     }
-    
+
     fn remove_window_from_stacking(&mut self, window_id: u64) {
         self.stacking_order.retain(|&id| id != window_id);
     }
-    
+
     fn bring_window_to_front(&mut self, window_id: u64) {
         self.remove_window_from_stacking(window_id);
         self.stacking_order.push_back(window_id);
     }
-    
+
     /// Get windows in stacking order (bottom to top)
     pub fn get_stacking_order(&self) -> Vec<u64> {
         self.stacking_order.iter().cloned().collect()
     }
-    
+
     /// Get windows in reverse stacking order (top to bottom)
     pub fn get_reverse_stacking_order(&self) -> Vec<u64> {
         self.stacking_order.iter().rev().cloned().collect()
     }
-    
+
     // === Layer Management ===
-    
+
     fn add_window_to_layer(&mut self, window_id: u64, layer: WindowLayer) {
-        let layer_windows = self.layers.entry(layer).or_insert_with(Vec::new);
+        let layer_windows = self.layers.entry(layer).or_default();
         if !layer_windows.contains(&window_id) {
             layer_windows.push(window_id);
         }
     }
-    
+
     fn remove_window_from_layers(&mut self, window_id: u64) {
         for layer_windows in self.layers.values_mut() {
             layer_windows.retain(|&id| id != window_id);
         }
     }
-    
+
     pub fn set_window_layer(&mut self, window_id: u64, new_layer: WindowLayer) -> Result<()> {
         // Remove from all layers first
         self.remove_window_from_layers(window_id);
-        
+
         // Add to new layer
         self.add_window_to_layer(window_id, new_layer);
-        
+
         // Update window properties
         if let Some(window) = self.windows.get_mut(&window_id) {
             window.properties.layer = new_layer;
         }
-        
+
         Ok(())
     }
-    
+
     pub fn move_window_to_layer(&mut self, window_id: u64, new_layer: WindowLayer) -> Result<()> {
         // Remove from all layers first
         self.remove_window_from_layers(window_id);
-        
+
         // Add to new layer
         self.add_window_to_layer(window_id, new_layer);
-        
+
         // Update window properties
         if let Some(window) = self.windows.get_mut(&window_id) {
             window.properties.layer = new_layer;
         }
-        
+
         Ok(())
     }
-    
+
     /// Get windows in a specific layer
     pub fn get_windows_in_layer(&self, layer: WindowLayer) -> Vec<u64> {
         self.layers.get(&layer).cloned().unwrap_or_default()
     }
-    
+
     /// Get all windows sorted by layer and stacking order
     pub fn get_windows_by_render_order(&self) -> Vec<u64> {
         let mut result = Vec::new();
-        
+
         // Add windows from each layer in order (background to notification)
-        for layer in [WindowLayer::Background, WindowLayer::Normal, WindowLayer::AboveNormal, 
-                     WindowLayer::AlwaysOnTop, WindowLayer::Overlay, WindowLayer::Notification] {
+        for layer in [
+            WindowLayer::Background,
+            WindowLayer::Normal,
+            WindowLayer::AboveNormal,
+            WindowLayer::AlwaysOnTop,
+            WindowLayer::Overlay,
+            WindowLayer::Notification,
+        ] {
             if let Some(layer_windows) = self.layers.get(&layer) {
                 // Sort by stacking order within layer
                 let mut sorted_windows: Vec<u64> = layer_windows
@@ -940,88 +1012,91 @@ impl WindowManager {
                     .filter(|&&id| self.stacking_order.contains(&id))
                     .cloned()
                     .collect();
-                
+
                 sorted_windows.sort_by_key(|&id| {
-                    self.stacking_order.iter().position(|&stacked_id| stacked_id == id).unwrap_or(0)
+                    self.stacking_order
+                        .iter()
+                        .position(|&stacked_id| stacked_id == id)
+                        .unwrap_or(0)
                 });
-                
+
                 result.extend(sorted_windows);
             }
         }
-        
+
         result
     }
-    
+
     // === Focus History Management ===
-    
+
     fn add_to_focus_history(&mut self, window_id: u64) {
         // Remove if already in history to avoid duplicates
         self.focus_history.retain(|&id| id != window_id);
-        
+
         // Add to back (most recent)
         self.focus_history.push_back(window_id);
-        
+
         // Keep history limited
         while self.focus_history.len() > 10 {
             self.focus_history.pop_front();
         }
     }
-    
+
     fn remove_from_focus_history(&mut self, window_id: u64) {
         self.focus_history.retain(|&id| id != window_id);
     }
-    
+
     // === Modal and Popup Management ===
-    
+
     /// Add window as modal
     pub fn set_window_modal(&mut self, window_id: u64, parent_id: Option<u64>) -> Result<()> {
         if let Some(window) = self.windows.get_mut(&window_id) {
             window.properties.modal = true;
             window.properties.parent_id = parent_id;
             window.properties.window_type = WindowType::Modal;
-            
+
             // Add to modal stack
             self.modal_stack.push(window_id);
-            
+
             // Move to overlay layer
             self.move_window_to_layer(window_id, WindowLayer::Overlay)?;
-            
+
             // Focus the modal window
             self.focus_window(window_id)?;
-            
+
             debug!("Set window {} as modal", window_id);
             Ok(())
         } else {
             Err(anyhow!("Window {} not found", window_id))
         }
     }
-    
+
     /// Add popup window
     pub fn add_popup(&mut self, window_id: u64, parent_id: u64) -> Result<()> {
         if let Some(window) = self.windows.get_mut(&window_id) {
             window.properties.parent_id = Some(parent_id);
             window.properties.window_type = WindowType::Popup;
-            
+
             // Add to popup tracking
-            self.popups.entry(parent_id).or_insert_with(Vec::new).push(window_id);
-            
+            self.popups.entry(parent_id).or_default().push(window_id);
+
             debug!("Added popup window {} for parent {}", window_id, parent_id);
             Ok(())
         } else {
             Err(anyhow!("Window {} not found", window_id))
         }
     }
-    
+
     fn cleanup_modal_stack(&mut self, window_id: u64) {
         self.modal_stack.retain(|&id| id != window_id);
     }
-    
+
     fn cleanup_popup_hierarchy(&mut self, window_id: u64) {
         // Remove as popup child
         for children in self.popups.values_mut() {
             children.retain(|&id| id != window_id);
         }
-        
+
         // Remove as popup parent and close children
         if let Some(children) = self.popups.remove(&window_id) {
             for child_id in children {
@@ -1029,9 +1104,9 @@ impl WindowManager {
             }
         }
     }
-    
+
     // === Helper Methods ===
-    
+
     fn get_next_focusable_window(&self) -> Option<u64> {
         // Try focus history first
         for &window_id in self.focus_history.iter().rev() {
@@ -1041,7 +1116,7 @@ impl WindowManager {
                 }
             }
         }
-        
+
         // Fallback to stacking order
         for &window_id in self.stacking_order.iter().rev() {
             if let Some(window) = self.windows.get(&window_id) {
@@ -1050,12 +1125,13 @@ impl WindowManager {
                 }
             }
         }
-        
+
         None
     }
-    
+
     fn get_next_window_in_cycle(&self, current_id: u64) -> Option<u64> {
-        let focusable: Vec<u64> = self.stacking_order
+        let focusable: Vec<u64> = self
+            .stacking_order
             .iter()
             .filter(|&&id| {
                 if let Some(window) = self.windows.get(&id) {
@@ -1066,7 +1142,7 @@ impl WindowManager {
             })
             .cloned()
             .collect();
-        
+
         if let Some(current_pos) = focusable.iter().position(|&id| id == current_id) {
             let next_pos = (current_pos + 1) % focusable.len();
             focusable.get(next_pos).cloned()
@@ -1074,9 +1150,10 @@ impl WindowManager {
             focusable.first().cloned()
         }
     }
-    
+
     fn get_previous_window_in_cycle(&self, current_id: u64) -> Option<u64> {
-        let focusable: Vec<u64> = self.stacking_order
+        let focusable: Vec<u64> = self
+            .stacking_order
             .iter()
             .filter(|&&id| {
                 if let Some(window) = self.windows.get(&id) {
@@ -1087,28 +1164,28 @@ impl WindowManager {
             })
             .cloned()
             .collect();
-        
+
         if let Some(current_pos) = focusable.iter().position(|&id| id == current_id) {
-            let prev_pos = if current_pos == 0 { 
-                focusable.len() - 1 
-            } else { 
-                current_pos - 1 
+            let prev_pos = if current_pos == 0 {
+                focusable.len() - 1
+            } else {
+                current_pos - 1
             };
             focusable.get(prev_pos).cloned()
         } else {
             focusable.last().cloned()
         }
     }
-    
+
     /// Emit focus event to listeners
     fn emit_focus_event(&self, event: FocusEvent) {
         for listener in &self.focus_listeners {
             listener(event.clone());
         }
     }
-    
+
     /// Add focus event listener
-    pub fn add_focus_listener<F>(&mut self, listener: F) 
+    pub fn add_focus_listener<F>(&mut self, listener: F)
     where
         F: Fn(FocusEvent) + Send + Sync + 'static,
     {

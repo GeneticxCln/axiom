@@ -16,12 +16,11 @@ use crate::decoration::DecorationManager;
 use crate::effects::EffectsEngine;
 use crate::input::InputManager;
 use crate::ipc::{AxiomIPCServer, RuntimeCommand};
-use tokio::sync::mpsc;
 use crate::renderer::AxiomRenderer;
 use crate::window::WindowManager;
 use crate::workspace::ScrollableWorkspaces;
 use crate::xwayland::XWaylandManager;
-
+use tokio::sync::mpsc;
 
 /// Main compositor struct that orchestrates all subsystems
 pub struct AxiomCompositor {
@@ -52,7 +51,6 @@ pub struct AxiomCompositor {
 
 #[allow(dead_code)]
 impl AxiomCompositor {
-
     /// Create a new Axiom compositor instance
     pub async fn new(config: AxiomConfig, windowed: bool) -> Result<Self> {
         info!("🏗️ Initializing Axiom compositor...");
@@ -95,7 +93,9 @@ impl AxiomCompositor {
             .await
             .context("Failed to start IPC server")?;
 
-        warn!("⚠️ Running in simulation mode (Smithay window server is handled by main when enabled)");
+        warn!(
+            "⚠️ Running in simulation mode (Smithay window server is handled by main when enabled)"
+        );
 
         // Initialize a headless renderer as scaffolding for real GPU rendering
         let renderer = match AxiomRenderer::new_headless().await {
@@ -155,7 +155,6 @@ impl AxiomCompositor {
         info!("🛑 Axiom compositor event loop finished");
         Ok(())
     }
-
 
     /// Phase 3: Process all pending compositor events
     async fn process_events(&mut self) -> Result<()> {
@@ -229,7 +228,8 @@ impl AxiomCompositor {
                             self.effects_engine.set_animation_duration(ms);
                             // config updated inside setter
                             AxiomIPCServer::set_config_snapshot(self.config.clone());
-                        } else if let Some(f) = value.as_f64() { // allow float too
+                        } else if let Some(f) = value.as_f64() {
+                            // allow float too
                             let ms = f.max(0.0) as u32;
                             self.effects_engine.set_animation_duration(ms);
                             AxiomIPCServer::set_config_snapshot(self.config.clone());
@@ -248,7 +248,7 @@ impl AxiomCompositor {
                     }
                     "input.pan_threshold" => {
                         if let Some(v) = value.as_f64() {
-                            let v = v.max(0.0).min(1000.0);
+                            let v = v.clamp(0.0, 1000.0);
                             self.input_manager.update_thresholds(Some(v), None, None);
                             self.config.input.pan_threshold = v;
                             AxiomIPCServer::set_config_snapshot(self.config.clone());
@@ -256,7 +256,7 @@ impl AxiomCompositor {
                     }
                     "input.scroll_threshold" => {
                         if let Some(v) = value.as_f64() {
-                            let v = v.max(0.0).min(1000.0);
+                            let v = v.clamp(0.0, 1000.0);
                             self.input_manager.update_thresholds(None, Some(v), None);
                             self.config.input.scroll_threshold = v;
                             AxiomIPCServer::set_config_snapshot(self.config.clone());
@@ -264,7 +264,7 @@ impl AxiomCompositor {
                     }
                     "input.swipe_threshold" => {
                         if let Some(v) = value.as_f64() {
-                            let v = v.max(0.0).min(5000.0);
+                            let v = v.clamp(0.0, 5000.0);
                             self.input_manager.update_thresholds(None, None, Some(v));
                             self.config.input.swipe_threshold = v;
                             AxiomIPCServer::set_config_snapshot(self.config.clone());
@@ -275,10 +275,22 @@ impl AxiomCompositor {
                     }
                 }
             }
-            RuntimeCommand::EffectsControl { enabled, blur_radius, animation_speed } => {
-                if let Some(b) = enabled { self.effects_engine.set_effects_enabled(b); self.config.effects.enabled = b; }
-                if let Some(r) = blur_radius { self.effects_engine.set_blur_radius(r); self.config.effects.blur.radius = r as u32; }
-                if let Some(speed) = animation_speed { self.effects_engine.set_animation_speed(speed); }
+            RuntimeCommand::EffectsControl {
+                enabled,
+                blur_radius,
+                animation_speed,
+            } => {
+                if let Some(b) = enabled {
+                    self.effects_engine.set_effects_enabled(b);
+                    self.config.effects.enabled = b;
+                }
+                if let Some(r) = blur_radius {
+                    self.effects_engine.set_blur_radius(r);
+                    self.config.effects.blur.radius = r as u32;
+                }
+                if let Some(speed) = animation_speed {
+                    self.effects_engine.set_animation_speed(speed);
+                }
                 AxiomIPCServer::set_config_snapshot(self.config.clone());
             }
             RuntimeCommand::ClipboardSet { .. } | RuntimeCommand::ClipboardGet => {
@@ -295,12 +307,16 @@ impl AxiomCompositor {
                         }
                     }
                     "move_focused_left" => {
-                        if let Some(&window_id) = self.workspace_manager.get_focused_column_windows().first() {
+                        if let Some(&window_id) =
+                            self.workspace_manager.get_focused_column_windows().first()
+                        {
                             self.move_window_left(window_id);
                         }
                     }
                     "move_focused_right" => {
-                        if let Some(&window_id) = self.workspace_manager.get_focused_column_windows().first() {
+                        if let Some(&window_id) =
+                            self.workspace_manager.get_focused_column_windows().first()
+                        {
                             self.move_window_right(window_id);
                         }
                     }
@@ -316,11 +332,18 @@ impl AxiomCompositor {
                         }
                     }
                     "add_window" => {
-                        let title = parameters.get("title").and_then(|v| v.as_str()).unwrap_or("IPC Window").to_string();
+                        let title = parameters
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("IPC Window")
+                            .to_string();
                         self.add_window(title);
                     }
                     "set_viewport_size" => {
-                        if let (Some(w), Some(h)) = (parameters.get("width").and_then(|v| v.as_u64()), parameters.get("height").and_then(|v| v.as_u64())) {
+                        if let (Some(w), Some(h)) = (
+                            parameters.get("width").and_then(|v| v.as_u64()),
+                            parameters.get("height").and_then(|v| v.as_u64()),
+                        ) {
                             self.set_viewport_size(w as u32, h as u32);
                         }
                     }
@@ -503,7 +526,6 @@ impl AxiomCompositor {
         }
     }
 
-
     /// Gracefully shutdown the compositor
     async fn shutdown(&mut self) -> Result<()> {
         info!("🔽 Shutting down Axiom compositor...");
@@ -547,7 +569,9 @@ impl AxiomCompositor {
         // Render only when we have damage or active animations/scrolling
         let mut should_render = true; // default for now until renderer is present
         if let Some(renderer) = self.renderer.as_ref() {
-            should_render = renderer.has_dirty() || self.workspace_manager.is_scrolling() || self.effects_engine.get_animation_stats().active_animations > 0;
+            should_render = renderer.has_dirty()
+                || self.workspace_manager.is_scrolling()
+                || self.effects_engine.get_animation_stats().active_animations > 0;
         }
 
         if should_render {

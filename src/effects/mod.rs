@@ -775,7 +775,10 @@ impl EffectsEngine {
     /// Enable or disable all visual effects at runtime
     pub fn set_effects_enabled(&mut self, enabled: bool) {
         self.config.enabled = enabled;
-        info!("🎛️ Effects {}", if enabled { "enabled" } else { "disabled" });
+        info!(
+            "🎛️ Effects {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
     }
 
     /// Toggle effects on/off
@@ -788,7 +791,10 @@ impl EffectsEngine {
         self.blur_params.radius = radius;
         if let Some(renderer) = self.blur_renderer.as_mut() {
             let new_params = blur::BlurParams {
-                blur_type: blur::BlurType::Gaussian { radius, intensity: self.blur_params.intensity },
+                blur_type: blur::BlurType::Gaussian {
+                    radius,
+                    intensity: self.blur_params.intensity,
+                },
                 enabled: self.blur_params.enabled,
                 adaptive_quality: true,
                 performance_scale: self.effects_quality,

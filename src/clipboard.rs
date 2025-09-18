@@ -10,7 +10,9 @@ pub struct ClipboardManager {
 }
 
 impl ClipboardManager {
-    pub fn new() -> Self { Self { selection: None } }
+    pub fn new() -> Self {
+        Self { selection: None }
+    }
 
     pub fn set_selection(&mut self, data: String) {
         info!("📋 Clipboard selection set ({} bytes)", data.len());
@@ -29,13 +31,21 @@ impl ClipboardManager {
     }
 }
 
+impl Default for ClipboardManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct DragAndDropManager {}
 
 #[allow(dead_code)]
 impl DragAndDropManager {
-    pub fn new() -> Self { Self {} }
+    pub fn new() -> Self {
+        Self {}
+    }
 
     pub fn start_drag(&self, mime_types: &[&str]) {
         info!("🖱️ DnD start with types: {:?}", mime_types);
@@ -55,5 +65,11 @@ impl DragAndDropManager {
 
     pub fn cancel(&self) {
         warn!("🚫 DnD cancelled");
+    }
+}
+
+impl Default for DragAndDropManager {
+    fn default() -> Self {
+        Self::new()
     }
 }

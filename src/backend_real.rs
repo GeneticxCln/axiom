@@ -333,7 +333,11 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for CompositorState {
 // REAL wl_surface protocol implementation
 impl CompositorState {
     // Helpers to send minimal input events
-    fn next_serial(&mut self) -> u32 { let s = self.serial_counter; self.serial_counter = self.serial_counter.wrapping_add(1); s }
+    fn next_serial(&mut self) -> u32 {
+        let s = self.serial_counter;
+        self.serial_counter = self.serial_counter.wrapping_add(1);
+        s
+    }
 
     fn send_pointer_enter_if_needed(&mut self, surface: &wl_surface::WlSurface) {
         if self.focused_surface.as_ref() != Some(surface) {
@@ -341,7 +345,7 @@ impl CompositorState {
             if let Some(prev) = self.focused_surface.take() {
                 let serial = self.next_serial();
                 for p in &self.pointers {
-p.leave(serial, &prev);
+                    p.leave(serial, &prev);
                 }
             }
             // set new focus and send enter
@@ -349,7 +353,7 @@ p.leave(serial, &prev);
             let serial = self.next_serial();
             for p in &self.pointers {
                 // Surface-local coords: use current pointer_pos
-p.enter(serial, surface, self.pointer_pos.0, self.pointer_pos.1);
+                p.enter(serial, surface, self.pointer_pos.0, self.pointer_pos.1);
             }
         }
     }
@@ -365,7 +369,11 @@ p.enter(serial, surface, self.pointer_pos.0, self.pointer_pos.1);
     fn send_pointer_button(&mut self, button: u32, pressed: bool) {
         let serial = self.next_serial();
         let time_ms = 0u32;
-        let state = if pressed { wl_pointer::ButtonState::Pressed } else { wl_pointer::ButtonState::Released };
+        let state = if pressed {
+            wl_pointer::ButtonState::Pressed
+        } else {
+            wl_pointer::ButtonState::Released
+        };
         for p in &self.pointers {
             p.button(serial, time_ms, button, state);
         }
@@ -374,19 +382,23 @@ p.enter(serial, surface, self.pointer_pos.0, self.pointer_pos.1);
     fn surface_at(&self, x: f64, y: f64) -> Option<wl_surface::WlSurface> {
         // Simple hit-test: first window whose rect contains point
         for w in self.windows.iter() {
-            if w.pending_map { continue; }
+            if w.pending_map {
+                continue;
+            }
             let rx = w.x as f64;
             let ry = w.y as f64;
             let rw = w.width as f64;
             let rh = w.height as f64;
             if x >= rx && y >= ry && x < rx + rw && y < ry + rh {
-                if let Some(ref s) = w.wl_surface { return Some(s.clone()); }
+                if let Some(ref s) = w.wl_surface {
+                    return Some(s.clone());
+                }
             }
         }
         None
     }
 
-pub fn handle_pointer_motion(&mut self, x: f64, y: f64, input_mgr: Option<&mut InputManager>) {
+    pub fn handle_pointer_motion(&mut self, x: f64, y: f64, input_mgr: Option<&mut InputManager>) {
         // Hit test and update focus if needed
         if let Some(surface) = self.surface_at(x, y) {
             self.send_pointer_enter_if_needed(&surface);
@@ -395,11 +407,21 @@ pub fn handle_pointer_motion(&mut self, x: f64, y: f64, input_mgr: Option<&mut I
 
         // Forward to InputManager as a MouseMove
         if let Some(im) = input_mgr {
-            let _ = im.process_input_event(InputEvent::MouseMove { x, y, delta_x: 0.0, delta_y: 0.0 });
+            let _ = im.process_input_event(InputEvent::MouseMove {
+                x,
+                y,
+                delta_x: 0.0,
+                delta_y: 0.0,
+            });
         }
     }
 
-pub fn handle_pointer_button(&mut self, button: u32, pressed: bool, input_mgr: Option<&mut InputManager>) {
+    pub fn handle_pointer_button(
+        &mut self,
+        button: u32,
+        pressed: bool,
+        input_mgr: Option<&mut InputManager>,
+    ) {
         self.send_pointer_button(button, pressed);
         if let Some(im) = input_mgr {
             let btn = match button {
@@ -409,15 +431,30 @@ pub fn handle_pointer_button(&mut self, button: u32, pressed: bool, input_mgr: O
                 _ => MouseButton::Other((button & 0xFF) as u8),
             };
             let (x, y) = self.pointer_pos;
-            let _ = im.process_input_event(InputEvent::MouseButton { button: btn, pressed, x, y });
+            let _ = im.process_input_event(InputEvent::MouseButton {
+                button: btn,
+                pressed,
+                x,
+                y,
+            });
         }
     }
 
-pub fn handle_key_event(&mut self, keycode: u32, pressed: bool, modifiers: Vec<String>, input_mgr: Option<&mut InputManager>) {
+    pub fn handle_key_event(
+        &mut self,
+        keycode: u32,
+        pressed: bool,
+        modifiers: Vec<String>,
+        input_mgr: Option<&mut InputManager>,
+    ) {
         // Broadcast to all wl_keyboard resources
         let serial = self.next_serial();
         let time_ms = 0u32;
-        let state = if pressed { wl_keyboard::KeyState::Pressed } else { wl_keyboard::KeyState::Released };
+        let state = if pressed {
+            wl_keyboard::KeyState::Pressed
+        } else {
+            wl_keyboard::KeyState::Released
+        };
         for kb in &self.keyboards {
             kb.key(serial, time_ms, keycode, state);
         }
@@ -437,7 +474,11 @@ pub fn handle_key_event(&mut self, keycode: u32, pressed: bool, modifiers: Vec<S
         };
 
         if let Some(im) = input_mgr {
-            let _ = im.process_input_event(InputEvent::Keyboard { key: key_str, modifiers, pressed });
+            let _ = im.process_input_event(InputEvent::Keyboard {
+                key: key_str,
+                modifiers,
+                pressed,
+            });
         }
     }
 }
@@ -484,7 +525,10 @@ impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
                     .find(|w| w.wl_surface.as_ref() == Some(resource))
                 {
                     if win.pending_map {
-                        info!("🗺️ Mapping window at ({}, {}) size {}x{}", win.x, win.y, win.width, win.height);
+                        info!(
+                            "🗺️ Mapping window at ({}, {}) size {}x{}",
+                            win.x, win.y, win.width, win.height
+                        );
                         // Minimal mapping: nothing to render yet, but marked as mapped
                         win.pending_map = false;
                         // Set pointer focus to this surface on first map
@@ -764,7 +808,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for CompositorState {
     ) {
         match request {
             xdg_toplevel::Request::SetTitle { title } => {
-info!("📝 Window title: {}", title);
+                info!("📝 Window title: {}", title);
                 if let Some(win) = state
                     .windows
                     .iter_mut()
@@ -774,7 +818,7 @@ info!("📝 Window title: {}", title);
                 }
             }
             xdg_toplevel::Request::SetAppId { app_id } => {
-info!("📦 Window app ID: {}", app_id);
+                info!("📦 Window app ID: {}", app_id);
                 if let Some(win) = state
                     .windows
                     .iter_mut()

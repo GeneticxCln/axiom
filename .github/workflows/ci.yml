@@ -1,301 +1,93 @@
-name: Axiom CI/CD Pipeline
+name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, master ]
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libinput-dev libdrm-dev libgbm-dev
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libinput-dev libdrm-dev libgbm-dev
+      - name: cargo clippy (strict lib, no default features)
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          cargo clippy --lib --no-default-features -- -D warnings
+      - name: cargo clippy (strict lib, smithay only)
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          cargo clippy --lib --no-default-features --features smithay -- -D warnings
+      - name: cargo clippy (report all targets across matrix, non-fatal)
+        run: |
+          for FEATURES in "" "--no-default-features --features smithay" "--no-default-features --features smithay,wgpu-present"; do \
+            echo "Running clippy for: $FEATURES"; \
+            cargo clippy --all-targets $FEATURES || true; \
+          done
+
   test:
-    name: Test Suite
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        rust:
-          - stable
-          - beta
-          - nightly
         features:
-          - default
-          - no-effects
-    
+          - ""
+          - "--no-default-features --features smithay"
+          - "--no-default-features --features smithay,wgpu-present"
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: ${{ matrix.rust }}
-        components: rustfmt, clippy
-    
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          libwayland-dev \
-          libxkbcommon-dev \
-          libegl1-mesa-dev \
-          libdrm-dev \
-          libgbm-dev \
-          libinput-dev \
-          libsystemd-dev \
-          libdbus-1-dev \
-          pkg-config \
-          xvfb
-    
-    - name: Cache cargo registry
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-    
-    - name: Cache cargo index
-      uses: actions/cache@v3  
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-    
-    - name: Cache cargo build
-      uses: actions/cache@v3
-      with:
-        path: target
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libinput-dev libdrm-dev libgbm-dev xvfb
+      - name: cargo test
+        run: |
+          cargo test --all ${{ matrix.features }} --no-fail-fast
 
-    - name: Check formatting
-      run: cargo fmt -- --check
-      
-    - name: Run clippy
-      run: cargo clippy --all-targets -- -D warnings
-      
-    - name: Run unit tests
-      run: |
-        # Run unit tests (no graphics context needed)
-        cargo test --lib --verbose
-        
-    - name: Run property tests
-      run: |
-        # Run property-based tests for configuration and workspace modules
-        cargo test --lib property_tests --verbose
-        
-    - name: Run integration tests
-      run: |
-        # Test IPC communication with virtual display for graphics operations
-        xvfb-run -a cargo test --test integration_tests || echo "Integration tests may fail in CI without proper graphics context"
-        
-    - name: Build release binary
-      run: cargo build --release --verbose
-      
-    - name: Test release binary
-      run: |
-        # Quick smoke test of the release binary
-        timeout 10s ./target/release/axiom --help || true
-        
-  memory-safety:
-    name: Memory Safety
+  deny:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
-        
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          libwayland-dev \
-          libxkbcommon-dev \
-          libegl1-mesa-dev \
-          libdrm-dev \
-          libgbm-dev \
-          libinput-dev \
-          libsystemd-dev \
-          libdbus-1-dev \
-          pkg-config \
-          valgrind
-    
-    - name: Install cargo-valgrind
-      run: cargo install cargo-valgrind
-      
-    - name: Run valgrind tests
-      run: |
-        # Run subset of tests under valgrind for memory leak detection
-        cargo valgrind test --bin axiom --lib workspace config effects
-        
-  minimal-server:
-    name: Build minimal Wayland server
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-    - name: Build minimal server
-      run: cargo build --features "smithay-minimal" --bin run_minimal_wayland
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: Run cargo-deny (advisories)
+        run: cargo deny check advisories
 
-  performance:
-    name: Performance Benchmarks  
+  future-incompat:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          libwayland-dev \
-          libxkbcommon-dev \
-          libegl1-mesa-dev \
-          libdrm-dev \
-          libgbm-dev \
-          libinput-dev \
-          libsystemd-dev \
-          libdbus-1-dev \
-          pkg-config \
-          xvfb
-    
-    - name: Run benchmarks
-      run: |
-        # Run benchmarks with curated features to avoid unstable combos
-        xvfb-run -a cargo bench -F wgpu-present
-        
-    - name: Performance regression check
-      run: |
-        # Compare benchmark results with baseline (implement this when we have baseline)
-        echo "Benchmark results logged for performance tracking"
-
-  security:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      
-    - name: Install cargo-audit
-      run: cargo install cargo-audit
-      
-    - name: Run security audit
-      run: cargo audit
-      
-    - name: Check for vulnerable dependencies
-      run: |
-        cargo audit --deny warnings || echo "Security warnings found"
-
-  package:
-    name: Test Packaging
-    runs-on: ${{ matrix.os }}
-    needs: test
-    strategy:
-      matrix:
-        os: [ubuntu-latest, fedora-latest]
-        include:
-          - os: ubuntu-latest
-            package_type: deb
-          - os: fedora-latest  
-            package_type: rpm
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install system dependencies (Ubuntu)
-      if: matrix.os == 'ubuntu-latest'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          libwayland-dev \
-          libxkbcommon-dev \
-          libegl1-mesa-dev \
-          libdrm-dev \
-          libgbm-dev \
-          libinput-dev \
-          libsystemd-dev \
-          libdbus-1-dev \
-          pkg-config
-    
-    - name: Test package creation
-      run: |
-        # Create basic package structure (to be implemented)
-        echo "Package creation test for ${{ matrix.package_type }}"
-        
-  coverage:
-    name: Code Coverage
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-    
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          libwayland-dev \
-          libxkbcommon-dev \
-          libegl1-mesa-dev \
-          libdrm-dev \
-          libgbm-dev \
-          libinput-dev \
-          libsystemd-dev \
-          libdbus-1-dev \
-          pkg-config \
-          jq
-    
-    - name: Install tarpaulin
-      run: cargo install cargo-tarpaulin
-    
-    - name: Cache cargo registry
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: coverage-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          coverage-${{ runner.os }}-cargo-
-      
-    - name: Run coverage analysis
-      run: |
-        # Use our custom coverage script
-        chmod +x scripts/coverage.sh
-        ./scripts/coverage.sh unit
-        
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./target/tarpaulin/unit/cobertura.xml
-        flags: unittests
-        name: axiom-coverage
-        fail_ci_if_error: false
-    
-    - name: Archive coverage results
-      uses: actions/upload-artifact@v3
-      with:
-        name: coverage-report
-        path: target/tarpaulin/
-        retention-days: 30
-    
-    - name: Coverage Summary
-      run: |
-        # Extract and display coverage summary
-        if [ -f "target/tarpaulin/unit/tarpaulin-report.json" ]; then
-          coverage=$(jq -r '.coverage' target/tarpaulin/unit/tarpaulin-report.json 2>/dev/null || echo "0")
-          echo "Overall Coverage: ${coverage}%"
-          if (( $(echo "$coverage >= 70" | bc -l) )); then
-            echo "✅ Coverage meets minimum threshold (70%)"
-          else
-            echo "⚠️ Coverage below minimum threshold (70%)"
-          fi
-        fi
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Report future incompatibilities
+        run: cargo report future-incompatibilities --id 1

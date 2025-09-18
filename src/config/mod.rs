@@ -426,10 +426,18 @@ impl Default for BindingsConfig {
 }
 
 impl InputConfig {
-    fn default_pan_threshold() -> f64 { 10.0 }
-    fn default_scroll_threshold() -> f64 { 5.0 }
-    fn default_swipe_threshold() -> f64 { 20.0 }
-    fn default_drag_threshold() -> f64 { 12.0 }
+    fn default_pan_threshold() -> f64 {
+        10.0
+    }
+    fn default_scroll_threshold() -> f64 {
+        5.0
+    }
+    fn default_swipe_threshold() -> f64 {
+        20.0
+    }
+    fn default_drag_threshold() -> f64 {
+        12.0
+    }
 }
 
 impl Default for XWaylandConfig {
@@ -452,9 +460,15 @@ impl Default for GeneralConfig {
 }
 
 impl WorkspaceConfig {
-    fn default_momentum_friction() -> f64 { 0.95 }
-    fn default_momentum_min_velocity() -> f64 { 1.0 }
-    fn default_snap_threshold() -> f64 { 48.0 }
+    fn default_momentum_friction() -> f64 {
+        0.95
+    }
+    fn default_momentum_min_velocity() -> f64 {
+        1.0
+    }
+    fn default_snap_threshold() -> f64 {
+        48.0
+    }
 }
 
 impl AxiomConfig {

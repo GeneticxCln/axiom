@@ -132,7 +132,9 @@ impl ScrollableWorkspaces {
 
     /// Check if a window exists in any column
     pub fn window_exists(&self, window_id: u64) -> bool {
-        self.columns.values().any(|c| c.windows.contains(&window_id))
+        self.columns
+            .values()
+            .any(|c| c.windows.contains(&window_id))
     }
 
     /// Whether infinite scroll is enabled
@@ -373,8 +375,11 @@ impl ScrollableWorkspaces {
                 && column_left <= self.viewport_width
             {
                 // Apply reserved insets from layer-shell exclusive zones
-                let usable_height = (self.viewport_height - self.reserved_top - self.reserved_bottom).max(1.0);
-                let usable_width = (self.config.workspace_width as f64 - self.reserved_left - self.reserved_right).max(1.0);
+                let usable_height =
+                    (self.viewport_height - self.reserved_top - self.reserved_bottom).max(1.0);
+                let usable_width =
+                    (self.config.workspace_width as f64 - self.reserved_left - self.reserved_right)
+                        .max(1.0);
                 let column_bounds = Rectangle {
                     x: (column_left + self.reserved_left) as i32,
                     y: self.reserved_top as i32,
@@ -390,7 +395,7 @@ impl ScrollableWorkspaces {
                         / column.windows.len() as i32;
 
                     for (i, &window_id) in column.windows.iter().enumerate() {
-                        let y = gap + i as i32 * (window_height + gap);
+                        let y = column_bounds.y + gap + i as i32 * (window_height + gap);
                         let window_rect = Rectangle {
                             x: column_bounds.x + gap,
                             y,

@@ -100,14 +100,19 @@ impl XWaylandManager {
         }
 
         // Select a display number
-        let display = if let Some(d) = self.config.display { d } else { find_free_x_display().unwrap_or(1) };
+        let display = if let Some(d) = self.config.display {
+            d
+        } else {
+            find_free_x_display().unwrap_or(1)
+        };
 
         // Spawn Xwayland in rootless mode
         let mut cmd = Command::new("Xwayland");
         cmd.arg(format!(":{}", display))
             .arg("-rootless")
             .arg("-terminate")
-            .arg("-nolisten").arg("tcp")
+            .arg("-nolisten")
+            .arg("tcp")
             .env("WAYLAND_DISPLAY", wayland_display)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -119,7 +124,10 @@ impl XWaylandManager {
                 self.display_number = Some(display);
                 self.server_state = XWaylandServerState::Running;
                 std::env::set_var("DISPLAY", format!(":{}", display));
-                info!("🗔 XWayland started on DISPLAY=:{} (WAYLAND_DISPLAY={})", display, wayland_display);
+                info!(
+                    "🗔 XWayland started on DISPLAY=:{} (WAYLAND_DISPLAY={})",
+                    display, wayland_display
+                );
                 Ok(())
             }
             Err(e) => {
@@ -172,12 +180,11 @@ fn find_free_x_display() -> Option<u32> {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             if let Some(name) = e.file_name().to_str() {
-                if let Some(num) = name.strip_prefix('X').and_then(|s| s.parse::<u32>().ok()) { used.insert(num); }
+                if let Some(num) = name.strip_prefix('X').and_then(|s| s.parse::<u32>().ok()) {
+                    used.insert(num);
+                }
             }
         }
     }
-    for n in 0..256u32 {
-        if !used.contains(&n) { return Some(n); }
-    }
-    None
+    (0..256u32).find(|n| !used.contains(n))
 }

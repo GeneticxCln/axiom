@@ -4,15 +4,18 @@
 
 use anyhow::{Context, Result};
 use log::{debug, info};
-use std::time::Duration;
 
 // Use basic Wayland server functionality
 use wayland_server::protocol::{wl_buffer, wl_compositor, wl_shm, wl_shm_pool, wl_surface};
-use wayland_server::{Client, Display, Resource};
+use wayland_server::{
+    backend::ClientData, Client, DataInit, Display, DisplayHandle, GlobalDispatch, ListeningSocket,
+    New,
+};
 
 /// Basic backend that creates a real Wayland compositor
 pub struct BasicBackend {
     display: Display<State>,
+    listening: ListeningSocket,
     socket_name: String,
     running: bool,
 }
@@ -28,26 +31,27 @@ impl BasicBackend {
         info!("🚀 Creating basic Wayland backend...");
 
         // Create display with our state
-        let mut display = Display::<State>::new()?;
+        let display = Display::<State>::new()?;
+        let dh = display.handle();
 
-        // Create the compositor global
-        display.create_global::<wl_compositor::WlCompositor, _>(4, |_| {});
+        // Create globals
+        dh.create_global::<State, wl_compositor::WlCompositor, _>(4, ());
+        dh.create_global::<State, wl_shm::WlShm, _>(1, ());
 
-        // Create the shm global for shared memory buffers
-        display.create_global::<wl_shm::WlShm, _>(1, |_| {});
-
-        // Add socket
-        let socket_name = display
-            .add_socket_auto()
-            .context("Failed to add Wayland socket")?
-            .to_string_lossy()
-            .to_string();
+        // Create socket
+        let listening = ListeningSocket::bind_auto("wayland", 1..32)
+            .context("Failed to bind Wayland socket")?;
+        let socket_name = listening
+            .socket_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .ok_or_else(|| anyhow::anyhow!("missing socket name"))?;
 
         info!("✅ Wayland socket created: {}", socket_name);
         std::env::set_var("WAYLAND_DISPLAY", &socket_name);
 
         Ok(Self {
             display,
+            listening,
             socket_name,
             running: false,
         })
@@ -64,17 +68,39 @@ impl BasicBackend {
 
         let mut state = State::default();
 
+        struct BasicClientData;
+        impl ClientData for BasicClientData {
+            fn initialized(&self, _client: wayland_server::backend::ClientId) {}
+            fn disconnected(
+                &self,
+                _client: wayland_server::backend::ClientId,
+                _reason: wayland_server::backend::DisconnectReason,
+            ) {
+            }
+        }
+
         // Main event loop
         while self.running {
-            // Dispatch events
-            self.display
-                .dispatch(std::time::Duration::from_millis(16), &mut state)?;
+            // Accept clients
+            match self.listening.accept() {
+                Ok(Some(stream)) => {
+                    let _ = self
+                        .display
+                        .handle()
+                        .insert_client(stream, std::sync::Arc::new(BasicClientData));
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+
+            // Dispatch client events
+            let _ = self.display.dispatch_clients(&mut state);
 
             // Flush clients
-            self.display.flush_clients(&mut state);
+            let _ = self.display.flush_clients();
 
             // Log activity
-            if state.surfaces.len() > 0 {
+if !state.surfaces.is_empty() {
                 debug!("Active surfaces: {}", state.surfaces.len());
             }
         }
@@ -87,10 +113,11 @@ impl BasicBackend {
 impl GlobalDispatch<wl_compositor::WlCompositor, ()> for State {
     fn bind(
         _state: &mut Self,
+        _handle: &DisplayHandle,
         _client: &Client,
-        resource: wayland_server::New<wl_compositor::WlCompositor>,
+        resource: New<wl_compositor::WlCompositor>,
         _global_data: &(),
-        data_init: &mut wayland_server::DataInit<'_, Self>,
+        data_init: &mut DataInit<'_, Self>,
     ) {
         data_init.init(resource, ());
     }
@@ -103,8 +130,8 @@ impl wayland_server::Dispatch<wl_compositor::WlCompositor, ()> for State {
         _resource: &wl_compositor::WlCompositor,
         request: wl_compositor::Request,
         _data: &(),
-        _dhandle: &Display<Self>,
-        data_init: &mut wayland_server::DataInit<'_, Self>,
+        _dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
             wl_compositor::Request::CreateSurface { id } => {
@@ -132,8 +159,8 @@ impl wayland_server::Dispatch<wl_surface::WlSurface, ()> for State {
         _resource: &wl_surface::WlSurface,
         request: wl_surface::Request,
         _data: &(),
-        _dhandle: &Display<Self>,
-        _data_init: &mut wayland_server::DataInit<'_, Self>,
+        _dhandle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
             wl_surface::Request::Attach { .. } => {
@@ -154,10 +181,11 @@ impl wayland_server::Dispatch<wl_surface::WlSurface, ()> for State {
 impl GlobalDispatch<wl_shm::WlShm, ()> for State {
     fn bind(
         _state: &mut Self,
+        _handle: &DisplayHandle,
         _client: &Client,
-        resource: wayland_server::New<wl_shm::WlShm>,
+        resource: New<wl_shm::WlShm>,
         _global_data: &(),
-        data_init: &mut wayland_server::DataInit<'_, Self>,
+        data_init: &mut DataInit<'_, Self>,
     ) {
         let shm = data_init.init(resource, ());
         // Send supported formats
@@ -173,15 +201,12 @@ impl wayland_server::Dispatch<wl_shm::WlShm, ()> for State {
         _resource: &wl_shm::WlShm,
         request: wl_shm::Request,
         _data: &(),
-        _dhandle: &Display<Self>,
-        data_init: &mut wayland_server::DataInit<'_, Self>,
+        _dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wl_shm::Request::CreatePool { id, .. } => {
-                debug!("SHM pool creation requested");
-                data_init.init(id, ());
-            }
-            _ => {}
+if let wl_shm::Request::CreatePool { id, .. } = request {
+            debug!("SHM pool creation requested");
+            data_init.init(id, ());
         }
     }
 }
@@ -193,15 +218,12 @@ impl wayland_server::Dispatch<wl_shm_pool::WlShmPool, ()> for State {
         _resource: &wl_shm_pool::WlShmPool,
         request: wl_shm_pool::Request,
         _data: &(),
-        _dhandle: &Display<Self>,
-        data_init: &mut wayland_server::DataInit<'_, Self>,
+        _dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            wl_shm_pool::Request::CreateBuffer { id, .. } => {
-                debug!("Buffer creation requested");
-                data_init.init(id, ());
-            }
-            _ => {}
+if let wl_shm_pool::Request::CreateBuffer { id, .. } = request {
+            debug!("Buffer creation requested");
+            data_init.init(id, ());
         }
     }
 }
@@ -213,8 +235,8 @@ impl wayland_server::Dispatch<wl_buffer::WlBuffer, ()> for State {
         _resource: &wl_buffer::WlBuffer,
         _request: wl_buffer::Request,
         _data: &(),
-        _dhandle: &Display<Self>,
-        _data_init: &mut wayland_server::DataInit<'_, Self>,
+        _dhandle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
     ) {
         // Handle buffer requests
     }

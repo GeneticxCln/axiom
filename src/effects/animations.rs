@@ -393,11 +393,7 @@ impl AnimationController {
     }
 
     /// Update timeline-based animations
-    fn update_timelines(
-        &mut self,
-        now: Instant,
-        _updates: &mut [AnimationUpdate],
-    ) -> Result<()> {
+    fn update_timelines(&mut self, now: Instant, _updates: &mut [AnimationUpdate]) -> Result<()> {
         let timeline_names: Vec<String> = self.active_timelines.keys().cloned().collect();
 
         for timeline_name in timeline_names {
@@ -463,9 +459,9 @@ impl AnimationController {
 
                     if !already_active {
                         // Start this event
-let _window_id = event.target_window.unwrap_or(0); // 0 = global
-                                                                          // For now, just track that the event started
-                                                                          // In a full implementation, we'd manage these animations properly
+                        let _window_id = event.target_window.unwrap_or(0); // 0 = global
+                                                                           // For now, just track that the event started
+                                                                           // In a full implementation, we'd manage these animations properly
 
                         // This is a bit of a hack - we'd need to track this better
                         // For now, just create a dummy ActiveAnimation

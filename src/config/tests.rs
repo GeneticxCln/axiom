@@ -267,13 +267,16 @@ fn test_bindings_config_validation() {
 #[test]
 fn test_xwayland_config() {
     // Test enabling/disabling XWayland
-    let mut config = XWaylandConfig { enabled: false, ..Default::default() };
+    let mut config = XWaylandConfig {
+        enabled: false,
+        ..Default::default()
+    };
     assert!(!config.enabled);
 
     config.enabled = true;
     assert!(config.enabled);
 
-// Test display field defaults
+    // Test display field defaults
     assert!(config.display.is_none());
 }
 
@@ -296,42 +299,42 @@ mod property_tests {
     use proptest::prelude::*;
 
     proptest! {
-        #[test]
-        fn test_workspace_width_bounds(width in 100u32..10000u32) {
-            let mut config = AxiomConfig::default();
-            config.workspace.workspace_width = width;
+            #[test]
+            fn test_workspace_width_bounds(width in 100u32..10000u32) {
+                let mut config = AxiomConfig::default();
+                config.workspace.workspace_width = width;
 
-            // Should always be reasonable
-            prop_assert!(config.workspace.workspace_width >= 100);
-            prop_assert!(config.workspace.workspace_width <= 10000);
-        }
+                // Should always be reasonable
+                prop_assert!(config.workspace.workspace_width >= 100);
+                prop_assert!(config.workspace.workspace_width <= 10000);
+            }
 
-        #[test]
-        fn test_scroll_speed_bounds(speed in 0.1f64..20.0f64) {
-            let mut config = AxiomConfig::default();
-            config.workspace.scroll_speed = speed;
+            #[test]
+            fn test_scroll_speed_bounds(speed in 0.1f64..20.0f64) {
+                let mut config = AxiomConfig::default();
+                config.workspace.scroll_speed = speed;
 
-            // Validation should handle extreme values
-            let result = config.validate();
-            if speed <= 10.0 && speed > 0.0 {
-                prop_assert!(result.is_ok());
-            } else {
-                prop_assert!(result.is_err());
+                // Validation should handle extreme values
+                let result = config.validate();
+                if speed <= 10.0 && speed > 0.0 {
+                    prop_assert!(result.is_ok());
+                } else {
+                    prop_assert!(result.is_err());
+                }
+            }
+
+            #[test]
+            fn test_blur_intensity_bounds(intensity in 0.0f64..2.0f64) {
+                let mut config = AxiomConfig::default();
+                config.effects.blur.intensity = intensity;
+
+                // Validation should handle bounds
+                let result = config.validate();
+    if (0.0..=1.0).contains(&intensity) {
+                    prop_assert!(result.is_ok());
+                } else {
+                    prop_assert!(result.is_err());
+                }
             }
         }
-
-        #[test]
-        fn test_blur_intensity_bounds(intensity in 0.0f64..2.0f64) {
-            let mut config = AxiomConfig::default();
-            config.effects.blur.intensity = intensity;
-
-            // Validation should handle bounds
-            let result = config.validate();
-if (0.0..=1.0).contains(&intensity) {
-                prop_assert!(result.is_ok());
-            } else {
-                prop_assert!(result.is_err());
-            }
-        }
-    }
 }
