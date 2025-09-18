@@ -6,6 +6,7 @@
 use anyhow::Result;
 use std::time::Duration;
 use tokio::time::timeout;
+use tempfile::tempdir;
 
 // Import Axiom modules
 use axiom::{
@@ -17,13 +18,17 @@ use axiom::{
 /// Test IPC server startup and basic communication
 #[tokio::test]
 async fn test_ipc_server_startup() -> Result<()> {
-    let mut ipc_server = AxiomIPCServer::new();
+    // Use a unique socket path so the test never conflicts with a running instance
+    let tmp = tempdir()?;
+    let sock = tmp.path().join("axiom.sock");
 
-    // Test that server can start
+    // Create and start IPC server using the custom socket path
+    let mut ipc_server = AxiomIPCServer::new_with_socket_path(sock.clone());
     ipc_server.start().await?;
 
-    // Test that socket file is created
+    // Verify the socket file exists at the isolated path
     assert!(ipc_server.socket_path().exists());
+    assert_eq!(ipc_server.socket_path(), &sock);
 
     Ok(())
 }
@@ -84,7 +89,7 @@ async fn test_configuration_system() -> Result<()> {
     // Test default configuration
     let default_config = AxiomConfig::default();
     assert!(default_config.effects.enabled);
-assert!(default_config.workspace.workspace_width > 0);
+    assert!(default_config.workspace.workspace_width > 0);
 
     // Test configuration serialization
     let toml_str = toml::to_string(&default_config)?;
@@ -107,7 +112,7 @@ async fn test_workspace_logic() -> Result<()> {
     workspaces.add_window(1002);
     workspaces.add_window(1003);
 
-assert_eq!(workspaces.active_window_count(), 3);
+    assert_eq!(workspaces.active_window_count(), 3);
 
     // Test scrolling
     workspaces.scroll_right();
@@ -212,7 +217,7 @@ async fn test_stress_many_windows() -> Result<()> {
         }
     }
 
-assert_eq!(workspaces.active_window_count(), 100);
+    assert_eq!(workspaces.active_window_count(), 100);
 
     // Test scrolling through many workspaces
     let start = std::time::Instant::now();
@@ -238,7 +243,7 @@ async fn test_error_recovery() -> Result<()> {
     use axiom::effects::EffectsEngine;
 
     // Test effects engine with invalid configuration
-let mut bad_config = EffectsConfig::default();
+    let mut bad_config = EffectsConfig::default();
     bad_config.blur.intensity = -1.0; // Invalid value
 
     // Should handle gracefully or provide meaningful error
@@ -353,7 +358,7 @@ async fn test_concurrent_operations() -> Result<()> {
 
     // Check that all windows were added
     let ws = workspaces.lock().await;
-assert_eq!(ws.active_window_count(), 50); // 5 tasks * 10 windows each
+    assert_eq!(ws.active_window_count(), 50); // 5 tasks * 10 windows each
 
     Ok(())
 }

@@ -15,27 +15,43 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::sleep;
 
-use std::sync::RwLock;
 use crate::clipboard::ClipboardManager;
+use std::sync::RwLock;
 
 // Global read-only configuration snapshot for IPC queries (updatable)
-static CONFIG_SNAPSHOT: std::sync::OnceLock<RwLock<crate::config::AxiomConfig>> = std::sync::OnceLock::new();
+static CONFIG_SNAPSHOT: std::sync::OnceLock<RwLock<crate::config::AxiomConfig>> =
+    std::sync::OnceLock::new();
 
 // Runtime command channel for applying changes inside the compositor
 #[allow(dead_code)]
 pub enum RuntimeCommand {
-    SetConfig { key: String, value: serde_json::Value },
-    EffectsControl { enabled: Option<bool>, blur_radius: Option<f32>, animation_speed: Option<f32> },
-    Workspace { action: String, parameters: serde_json::Value },
-    ClipboardSet { data: String },
+    SetConfig {
+        key: String,
+        value: serde_json::Value,
+    },
+    EffectsControl {
+        enabled: Option<bool>,
+        blur_radius: Option<f32>,
+        animation_speed: Option<f32>,
+    },
+    Workspace {
+        action: String,
+        parameters: serde_json::Value,
+    },
+    ClipboardSet {
+        data: String,
+    },
     ClipboardGet,
 }
 
-static RUNTIME_CMD_TX: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<RuntimeCommand>> = std::sync::OnceLock::new();
+static RUNTIME_CMD_TX: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<RuntimeCommand>> =
+    std::sync::OnceLock::new();
 
 // Global metrics history for performance reports (~30s buffer)
-static METRICS_HISTORY: std::sync::OnceLock<RwLock<VecDeque<MetricSample>>> = std::sync::OnceLock::new();
-static CLIPBOARD: std::sync::OnceLock<std::sync::Mutex<ClipboardManager>> = std::sync::OnceLock::new();
+static METRICS_HISTORY: std::sync::OnceLock<RwLock<VecDeque<MetricSample>>> =
+    std::sync::OnceLock::new();
+static CLIPBOARD: std::sync::OnceLock<std::sync::Mutex<ClipboardManager>> =
+    std::sync::OnceLock::new();
 
 /// Messages sent from Axiom to Lazy UI (performance metrics, events)
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -80,7 +96,7 @@ pub enum AxiomMessage {
     },
 }
 
-    /// Messages sent from Lazy UI to Axiom (optimization commands)
+/// Messages sent from Lazy UI to Axiom (optimization commands)
 #[derive(Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum LazyUIMessage {
@@ -167,10 +183,30 @@ impl AxiomIPCServer {
         }
     }
 
+    /// Create a new IPC server with an explicit socket path
+    ///
+    /// This is useful for tests and tools that need to avoid the default
+    /// system path or want to ensure isolation.
+    pub fn new_with_socket_path<P: Into<PathBuf>>(socket_path: P) -> Self {
+        let socket_path = socket_path.into();
+        Self {
+            socket_path,
+            listener: None,
+            broadcast_tx: None,
+            message_sender: None,
+            command_receiver: None,
+            sys: None,
+            last_metrics_sent: Instant::now(),
+            last_cpu_times: None,
+        }
+    }
+
     /// Provide a read-only snapshot of the compositor configuration for IPC queries
     pub fn set_config_snapshot(config: crate::config::AxiomConfig) {
         if let Some(lock) = CONFIG_SNAPSHOT.get() {
-            if let Ok(mut guard) = lock.write() { *guard = config; }
+            if let Ok(mut guard) = lock.write() {
+                *guard = config;
+            }
             return;
         }
         let _ = CONFIG_SNAPSHOT.set(RwLock::new(config));
@@ -199,9 +235,13 @@ impl AxiomIPCServer {
         fn read_cpu_times() -> Option<(u64, u64)> {
             let contents = std::fs::read_to_string("/proc/stat").ok()?;
             let first = contents.lines().next()?;
-            if !first.starts_with("cpu ") { return None; }
+            if !first.starts_with("cpu ") {
+                return None;
+            }
             let parts: Vec<&str> = first.split_whitespace().collect();
-            if parts.len() < 8 { return None; }
+            if parts.len() < 8 {
+                return None;
+            }
             let user: u64 = parts.get(1)?.parse().ok()?;
             let nice: u64 = parts.get(2)?.parse().ok()?;
             let system: u64 = parts.get(3)?.parse().ok()?;
@@ -223,7 +263,11 @@ impl AxiomIPCServer {
             (Some((idle_a, total_a)), Some((idle_b, total_b))) => {
                 let idle_delta = idle_b.saturating_sub(idle_a) as f64;
                 let total_delta = total_b.saturating_sub(total_a) as f64;
-                if total_delta > 0.0 { ((1.0 - idle_delta/total_delta) * 100.0) as f32 } else { 0.0 }
+                if total_delta > 0.0 {
+                    ((1.0 - idle_delta / total_delta) * 100.0) as f32
+                } else {
+                    0.0
+                }
             }
             _ => 0.0,
         };
@@ -233,9 +277,13 @@ impl AxiomIPCServer {
         let mut mem_available_kb: u64 = 0;
         for line in meminfo.lines() {
             if line.starts_with("MemTotal:") {
-                if let Some(val) = line.split_whitespace().nth(1) { mem_total_kb = val.parse().unwrap_or(0); }
+                if let Some(val) = line.split_whitespace().nth(1) {
+                    mem_total_kb = val.parse().unwrap_or(0);
+                }
             } else if line.starts_with("MemAvailable:") {
-                if let Some(val) = line.split_whitespace().nth(1) { mem_available_kb = val.parse().unwrap_or(0); }
+                if let Some(val) = line.split_whitespace().nth(1) {
+                    mem_available_kb = val.parse().unwrap_or(0);
+                }
             }
         }
         let used_mb = (mem_total_kb.saturating_sub(mem_available_kb) as f32) / 1024.0;
@@ -271,7 +319,8 @@ impl AxiomIPCServer {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600));
+            let _ =
+                std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600));
         }
 
         // Create broadcast channel for outgoing messages
@@ -399,8 +448,11 @@ impl AxiomIPCServer {
                 for (key, value) in changes {
                     debug!("  📝 Setting {}: {:?}", key, value);
                     // For now accept only whitelisted keys
-                    let ok = matches!(key.as_str(),
-                        "effects.blur.radius" | "effects.animations.duration" | "workspace.scroll_speed"
+                    let ok = matches!(
+                        key.as_str(),
+                        "effects.blur.radius"
+                            | "effects.animations.duration"
+                            | "workspace.scroll_speed"
                     );
                     if ok {
                         applied.push(key);
@@ -434,7 +486,10 @@ impl AxiomIPCServer {
 
                 // Forward to compositor via runtime command channel if registered
                 if let Some(tx) = RUNTIME_CMD_TX.get() {
-                    let _ = tx.send(RuntimeCommand::SetConfig { key: key.clone(), value: value.clone() });
+                    let _ = tx.send(RuntimeCommand::SetConfig {
+                        key: key.clone(),
+                        value: value.clone(),
+                    });
                 }
 
                 // ACK the set request
@@ -467,7 +522,11 @@ impl AxiomIPCServer {
                 );
                 // Forward to compositor via runtime command channel if registered
                 if let Some(tx) = RUNTIME_CMD_TX.get() {
-                    let _ = tx.send(RuntimeCommand::EffectsControl { enabled, blur_radius, animation_speed });
+                    let _ = tx.send(RuntimeCommand::EffectsControl {
+                        enabled,
+                        blur_radius,
+                        animation_speed,
+                    });
                 }
             }
 
@@ -507,9 +566,11 @@ impl AxiomIPCServer {
             LazyUIMessage::ClipboardSet { data } => {
                 debug!("📋 IPC clipboard set ({} bytes)", data.len());
                 // Store via global clipboard (simple static for now)
-CLIPBOARD.get_or_init(|| std::sync::Mutex::new(ClipboardManager::new()));
+                CLIPBOARD.get_or_init(|| std::sync::Mutex::new(ClipboardManager::new()));
                 if let Some(cell) = CLIPBOARD.get() {
-                    if let Ok(mut mgr) = cell.lock() { mgr.set_selection(data); }
+                    if let Ok(mut mgr) = cell.lock() {
+                        mgr.set_selection(data);
+                    }
                 }
                 let ack = AxiomMessage::UserEvent {
                     timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
@@ -751,7 +812,7 @@ CLIPBOARD.get_or_init(|| std::sync::Mutex::new(ClipboardManager::new()));
             None
         }
 
-let (cpu_percent, mem_used_mb) = {
+        let (cpu_percent, mem_used_mb) = {
             let current = read_cpu_times();
             let cpu = match (self.last_cpu_times, current) {
                 (Some((idle_a, total_a)), Some((idle_b, total_b))) => {
@@ -763,7 +824,7 @@ let (cpu_percent, mem_used_mb) = {
                         0.0
                     }
                 }
-(_, Some((_idle_b, _total_b))) => {
+                (_, Some((_idle_b, _total_b))) => {
                     // First sample; store and return 0 for now
                     0.0
                 }
@@ -788,15 +849,19 @@ let (cpu_percent, mem_used_mb) = {
             let used_kb = mem_total_kb.saturating_sub(mem_available_kb) as f32;
             let used_mb = used_kb / 1024.0;
             (cpu, used_mb)
-};
+        };
 
         // Update last CPU times with the current sample for next call
         if let Some((idle, total)) = (|| {
             let contents = std::fs::read_to_string("/proc/stat").ok()?;
             let first = contents.lines().next()?;
-            if !first.starts_with("cpu ") { return None; }
+            if !first.starts_with("cpu ") {
+                return None;
+            }
             let parts: Vec<&str> = first.split_whitespace().collect();
-            if parts.len() < 5 { return None; }
+            if parts.len() < 5 {
+                return None;
+            }
             let idle: u64 = parts.get(4)?.parse().ok()?;
             let iowait: u64 = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
             let user: u64 = parts.get(1)?.parse().ok()?;
@@ -819,8 +884,10 @@ let (cpu_percent, mem_used_mb) = {
     /// Build a simple performance report from recent samples
     fn generate_performance_report() -> serde_json::Value {
         let mut samples_count = 0usize;
-        let (mut cpu_sum, mut mem_sum, mut gpu_sum, mut ft_sum): (f32, f32, f32, f32) = (0.0, 0.0, 0.0, 0.0);
-        let (mut cpu_peak, mut mem_peak, mut gpu_peak, mut ft_peak): (f32, f32, f32, f32) = (0.0, 0.0, 0.0, 0.0);
+        let (mut cpu_sum, mut mem_sum, mut gpu_sum, mut ft_sum): (f32, f32, f32, f32) =
+            (0.0, 0.0, 0.0, 0.0);
+        let (mut cpu_peak, mut mem_peak, mut gpu_peak, mut ft_peak): (f32, f32, f32, f32) =
+            (0.0, 0.0, 0.0, 0.0);
         let (mut last_active_windows, mut last_current_workspace) = (0u32, 0i32);
 
         if let Some(hist) = METRICS_HISTORY.get() {
@@ -879,7 +946,9 @@ let (cpu_percent, mem_used_mb) = {
         // Prefer NVML if enabled and available
         #[cfg(feature = "gpu-nvml")]
         {
-            if let Some(val) = Self::sample_gpu_usage_nvml() { return val; }
+            if let Some(val) = Self::sample_gpu_usage_nvml() {
+                return val;
+            }
         }
 
         // Fallback: Try common AMD path(s)
@@ -892,7 +961,9 @@ let (cpu_percent, mem_used_mb) = {
                         let busy = path.join("device").join("gpu_busy_percent");
                         if let Ok(contents) = std::fs::read_to_string(&busy) {
                             if let Ok(val) = contents.trim().parse::<f32>() {
-                                if val.is_finite() { return val.max(0.0).min(100.0); }
+                                if val.is_finite() {
+                                    return val.clamp(0.0, 100.0);
+                                }
                             }
                         }
                     }
@@ -904,8 +975,9 @@ let (cpu_percent, mem_used_mb) = {
 
     #[cfg(feature = "gpu-nvml")]
     fn sample_gpu_usage_nvml() -> Option<f32> {
-        use nvml_wrapper::NVML;
-        let nvml = NVML::init().ok()?;
+        // Use the correct type name from nvml-wrapper
+        use nvml_wrapper::Nvml;
+        let nvml = Nvml::init().ok()?;
         let device = nvml.device_by_index(0).ok()?;
         let util = device.utilization_rates().ok()?;
         Some((util.gpu as f32).clamp(0.0, 100.0))
@@ -986,5 +1058,19 @@ mod tests {
             }
             _ => panic!("Wrong message type"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_ipc_server_custom_socket_path() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let sock = tmp.path().join("custom_ipc.sock");
+
+        let mut server = AxiomIPCServer::new_with_socket_path(sock.clone());
+        server.start().await.unwrap();
+
+        assert!(server.socket_path().exists());
+        assert_eq!(server.socket_path(), &sock);
+        // Drop cleans up the socket file via Drop impl
     }
 }
