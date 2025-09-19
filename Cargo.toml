@@ -135,20 +135,24 @@ gpu-nvml = ["nvml-wrapper"]
 examples = []
 # Minimal Wayland server feature (no-op shim to align with README/CI)
 smithay-minimal = ["smithay"]
+# Experimental: Real XDG backend wiring (register core globals and dispatch loop)
+real-compositor = ["smithay"]
 
 # Development dependencies for testing
 [dev-dependencies]
 criterion = "0.5"
 # Unit testing frameworks
-tokio-test = "0.4"
-mockall = "0.12"  # For mocking
-proptest = "1.4"  # Property-based testing
-quickcheck = "1.0"  # QuickCheck-style testing
-# Integration testing utilities
-tempfile = "3.0"  # Temporary files and directories for tests
-serial_test = "3.0"  # Sequential test execution
-# Async testing utilities
-futures-test = "0.3"
+ tokio-test = "0.4"
+ mockall = "0.12"  # For mocking
+ proptest = "1.4"  # Property-based testing
+ quickcheck = "1.0"  # QuickCheck-style testing
+ # Integration testing utilities
+ tempfile = "3.0"  # Temporary files and directories for tests
+ serial_test = "3.0"  # Sequential test execution
+ # Async testing utilities
+ futures-test = "0.3"
+ # Wayland client for connectivity tests (used only when feature `real-compositor` is enabled)
+ wayland-client = "0.31"
 
 [build-dependencies]
 chrono = { version = "0.4", features = ["serde"] }

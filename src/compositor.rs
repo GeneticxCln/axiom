@@ -409,7 +409,97 @@ impl AxiomCompositor {
             }
             CompositorAction::Custom(command) => {
                 debug!("🎨 Input triggered custom command: {}", command);
-                // TODO: Handle custom commands
+                let trimmed = command.trim();
+                let lower = trimmed.to_lowercase();
+
+                // Parameterized commands (prefix matching)
+                if lower.starts_with("add_window") {
+                    // Syntax examples:
+                    // - "add_window"
+                    // - "add_window My Title"
+                    // - "add_window title=My Title"
+                    let title = if let Some(rest) = trimmed.strip_prefix("add_window") {
+                        let arg = rest.trim();
+                        if arg.is_empty() {
+                            "IPC Window".to_string()
+                        } else if let Some(val) = arg.strip_prefix("title=") {
+                            val.trim().to_string()
+                        } else {
+                            arg.to_string()
+                        }
+                    } else {
+                        "IPC Window".to_string()
+                    };
+                    self.add_window(title);
+                    return Ok(());
+                }
+                if lower.starts_with("set_viewport_size") {
+                    // Syntax examples:
+                    // - "set_viewport_size 1920 1080"
+                    // - "set_viewport_size width=1920 height=1080"
+                    let rest = trimmed.strip_prefix("set_viewport_size").unwrap_or("").trim();
+                    let mut w_opt: Option<u32> = None;
+                    let mut h_opt: Option<u32> = None;
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        // Try positional first
+                        w_opt = parts[0].parse::<u32>().ok();
+                        h_opt = parts[1].parse::<u32>().ok();
+                    }
+                    if w_opt.is_none() || h_opt.is_none() {
+                        // Try key=value pairs
+                        for tok in parts {
+                            if let Some(val) = tok.strip_prefix("width=") {
+                                w_opt = val.parse::<u32>().ok();
+                            } else if let Some(val) = tok.strip_prefix("height=") {
+                                h_opt = val.parse::<u32>().ok();
+                            }
+                        }
+                    }
+                    if let (Some(w), Some(h)) = (w_opt, h_opt) {
+                        self.set_viewport_size(w, h);
+                    } else {
+                        warn!("Invalid set_viewport_size args: '{}'", rest);
+                    }
+                    return Ok(());
+                }
+
+                // Simple command aliases
+                match lower.as_str() {
+                    "scroll_left" | "workspace_left" => {
+                        self.scroll_workspace_left();
+                    }
+                    "scroll_right" | "workspace_right" => {
+                        self.scroll_workspace_right();
+                    }
+                    "toggle_fullscreen" => {
+                        if let Some(focused_id) = self.window_manager.focused_window_id() {
+                            let _ = self.window_manager.toggle_fullscreen(focused_id);
+                        }
+                    }
+                    "close_focused" | "close_window" => {
+                        if let Some(focused_id) = self.window_manager.focused_window_id() {
+                            self.remove_window(focused_id);
+                            self.effects_engine.animate_window_close(focused_id);
+                        }
+                    }
+                    "move_left" | "move_window_left" => {
+                        if let Some(focused_id) = self.window_manager.focused_window_id() {
+                            self.move_window_left(focused_id);
+                        }
+                    }
+                    "move_right" | "move_window_right" => {
+                        if let Some(focused_id) = self.window_manager.focused_window_id() {
+                            self.move_window_right(focused_id);
+                        }
+                    }
+                    "quit" | "exit" => {
+                        self.shutdown().await?;
+                    }
+                    other => {
+                        warn!("Unknown custom command: {}", other);
+                    }
+                }
             }
         }
 

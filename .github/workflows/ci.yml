@@ -62,6 +62,8 @@ jobs:
           - ""
           - "--no-default-features --features smithay"
           - "--no-default-features --features smithay,wgpu-present"
+          - "--no-default-features --features real-compositor"
+          - "--no-default-features --features real-compositor,wgpu-present"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

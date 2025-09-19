@@ -4230,7 +4230,7 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for CompositorState
                 return;
             }
             // Compute geometry on an immutable snapshot, then send configure
-let (x, y, w, h, ws_id, _layer, excl, anchors) = {
+let (x, y, w, h, ws_id, _layer, _excl, _anchors) = {
                 let entry = &state.layer_surfaces[idx];
                 // Use primary output size for viewport
                 let (vw, vh) = {
@@ -5710,7 +5710,7 @@ mod layer_geom_tests {
     fn test_left_panel_half_height() {
         let vp = (1200, 800);
         let anchors = u32::from(Anchor::Left) | u32::from(Anchor::Top) | u32::from(Anchor::Bottom);
-        let (x, y, w, h) = compute_layer_geometry_from_fields(vp, anchors, (100, 0), (10, 0, 10, 5));
+let (x, _y, w, h) = compute_layer_geometry_from_fields(vp, anchors, (100, 0), (10, 0, 10, 5));
         assert_eq!(x, 5); // left margin applied
         assert_eq!(w, 100u32);
         assert!(h >= 1);
@@ -5762,6 +5762,7 @@ const FONT_5X7: [[u8; 7]; 38] = [
     [0x00,0x00,0x00,0x1F,0x00,0x00,0x00], // -
 ];
 
+#[allow(dead_code)]
 fn font_index(ch: char) -> Option<usize> {
     match ch {
         'A'..='Z' => Some((ch as u8 - b'A') as usize),
@@ -5780,7 +5781,7 @@ fn draw_title_text_overlay(window_id: u64, text: &str, x: f32, y: f32, font_size
     let px_w = scale.round().max(1.0);
     let px_h = scale.round().max(1.0);
     let glyph_w = base_w * px_w;
-    let glyph_h = base_h * px_h;
+let _glyph_h = base_h * px_h;
     let mut cx = x;
     for ch in text.chars().take(48) { // cap title length for safety
         let up = ch.to_ascii_uppercase();
@@ -5789,7 +5790,7 @@ fn draw_title_text_overlay(window_id: u64, text: &str, x: f32, y: f32, font_size
             '0'..='9' => 26 + (up as u8 - b'0') as usize,
             ' ' => 36,
             '-' => 36 + 1,
-            _ => { cx += (glyph_w + px_w*1.0); continue; }
+_ => { cx += glyph_w + px_w*1.0; continue; }
         };
         if let Some(pattern) = FONT_5X7.get(idx) {
             for (row, bits) in pattern.iter().enumerate() {
@@ -5930,5 +5931,51 @@ impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
             }
             _ => {}
         }
+    }
+}
+
+impl CompositorServer {
+    /// Expose the Wayland socket name (e.g., "wayland-1"). Useful for tests/tools.
+    pub fn wayland_socket_name(&self) -> &str {
+        &self.socket_name
+    }
+}
+
+#[cfg(test)]
+mod server_init_tests {
+    use super::*;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_compositor_server_socket_name_non_empty() -> anyhow::Result<()> {
+        let _ = env_logger::try_init();
+        let config = crate::config::AxiomConfig::default();
+        let wm = Arc::new(RwLock::new(crate::window::WindowManager::new(&config.window)?));
+        let ws = Arc::new(RwLock::new(crate::workspace::ScrollableWorkspaces::new(&config.workspace)?));
+        let im = Arc::new(RwLock::new(crate::input::InputManager::new(&config.input, &config.bindings)?));
+        let clip = Arc::new(RwLock::new(crate::clipboard::ClipboardManager::new()));
+        let deco = Arc::new(RwLock::new(crate::decoration::DecorationManager::new(&config.window)));
+
+        let server = CompositorServer::new(
+            wm,
+            ws,
+            im,
+            clip,
+            deco,
+            None,
+            None,
+            None,
+            None,
+            false,
+            wgpu::Backends::all(),
+            None,
+            None,
+        )?;
+
+        let name = server.wayland_socket_name();
+        assert!(!name.is_empty());
+        assert!(name.starts_with("wayland-"));
+        Ok(())
     }
 }

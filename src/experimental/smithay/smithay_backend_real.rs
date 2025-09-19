@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
+use wayland_server::ListeningSocket;
 use log::{debug, info, warn};
 
 use crate::config::AxiomConfig;
@@ -84,6 +85,13 @@ pub struct AxiomCompositorState {
 
     /// Running state
     pub running: bool,
+
+    /// Wayland listening socket (minimal scaffolding)
+    #[allow(dead_code)]
+    pub wayland_socket: Option<ListeningSocket>,
+    /// Name of the WAYLAND_DISPLAY socket
+    #[allow(dead_code)]
+    pub wayland_socket_name: Option<String>,
 }
 
 impl AxiomCompositorState {
@@ -114,6 +122,8 @@ impl AxiomCompositorState {
             input_manager,
             next_window_id: 1,
             running: false,
+            wayland_socket: None,
+            wayland_socket_name: None,
         })
     }
 
@@ -130,9 +140,26 @@ impl AxiomCompositorState {
         info!("🎬 Starting Smithay backend...");
         self.running = true;
 
-        // TODO: Initialize real Wayland display and protocols
-        // For now, just set the WAYLAND_DISPLAY environment variable
-        std::env::set_var("WAYLAND_DISPLAY", "wayland-axiom-0");
+        // Minimal Wayland socket scaffolding: create a real WAYLAND_DISPLAY socket
+        match ListeningSocket::bind_auto("wayland", 1..64) {
+            Ok(sock) => {
+                let name = sock
+                    .socket_name()
+                    .and_then(|s| s.to_str().map(|t| t.to_string()))
+                    .unwrap_or_else(|| "wayland-axiom-0".to_string());
+                std::env::set_var("WAYLAND_DISPLAY", &name);
+                self.wayland_socket_name = Some(name.clone());
+                self.wayland_socket = Some(sock);
+                info!("✅ Wayland listening socket created: {}", name);
+            }
+            Err(e) => {
+                warn!(
+                    "⚠️ Failed to create Wayland socket ({}). Falling back to env var only.",
+                    e
+                );
+                std::env::set_var("WAYLAND_DISPLAY", "wayland-axiom-0");
+            }
+        }
 
         info!("✅ Smithay backend started");
         Ok(())
@@ -179,7 +206,8 @@ impl AxiomCompositorState {
         info!("🛑 Shutting down Smithay backend...");
         self.running = false;
 
-        // TODO: Cleanup real Smithay resources
+        // Drop the listening socket (clients will be disconnected)
+        self.wayland_socket = None;
 
         info!("✅ Smithay backend shutdown complete");
         Ok(())
@@ -299,6 +327,10 @@ pub struct AxiomSmithayBackend {
 
     /// Windowed mode flag
     windowed: bool,
+
+    /// Optional real XDG backend (compiled with feature "real-compositor")
+    #[cfg(feature = "real-compositor")]
+    real_backend: Option<real_xdg_backend::AxiomSmithayBackendReal>,
 }
 
 impl AxiomSmithayBackend {
@@ -326,14 +358,19 @@ impl AxiomSmithayBackend {
 
         info!("✅ Smithay backend created successfully");
 
-        Ok(Self { state, windowed })
+        Ok(Self {
+            state,
+            windowed,
+            #[cfg(feature = "real-compositor")]
+            real_backend: None,
+        })
     }
 
     /// Initialize the backend
     pub async fn initialize(&mut self) -> Result<()> {
         info!("🚀 Initializing Smithay backend...");
 
-        // Start the backend state
+        // Start the backend state (creates a WAYLAND_DISPLAY socket as a fallback)
         self.state.start()?;
 
         if self.windowed {
@@ -343,12 +380,36 @@ impl AxiomSmithayBackend {
             info!("🖥️ Initializing native mode...");
         }
 
+        // If compiled with the real XDG backend, initialize it as well to register real globals
+        #[cfg(feature = "real-compositor")]
+        {
+            use real_xdg_backend::AxiomSmithayBackendReal as Real;
+            let rb = Real::new(
+                self.state.config.clone(),
+                self.state.window_manager.clone(),
+                self.state.workspace_manager.clone(),
+                self.state.effects_engine.clone(),
+                self.state.input_manager.clone(),
+            )?;
+            let mut rb = rb;
+            rb.initialize()?;
+            self.real_backend = Some(rb);
+            info!("✅ Real XDG backend initialized (Milestone 1)");
+        }
+
         info!("✅ Smithay backend initialization complete");
         Ok(())
     }
 
     /// Process events
     pub async fn process_events(&mut self) -> Result<()> {
+        // If we have the real backend compiled and initialized, run one cycle of client dispatch
+        #[cfg(feature = "real-compositor")]
+        {
+            if let Some(rb) = self.real_backend.as_mut() {
+                rb.run_one_cycle()?;
+            }
+        }
         self.state.process_events().await
     }
 
@@ -372,6 +433,14 @@ impl AxiomSmithayBackend {
     /// Shutdown the backend
     pub async fn shutdown(&mut self) -> Result<()> {
         info!("🛑 Shutting down Smithay backend...");
+        // Shut down the real backend if present
+        #[cfg(feature = "real-compositor")]
+        {
+            if let Some(rb) = self.real_backend.as_mut() {
+                let _ = rb.shutdown();
+            }
+            self.real_backend = None;
+        }
         self.state.shutdown().await?;
         info!("✅ Smithay backend shutdown complete");
         Ok(())

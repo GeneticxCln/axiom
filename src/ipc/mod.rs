@@ -187,7 +187,8 @@ impl AxiomIPCServer {
     ///
     /// This is useful for tests and tools that need to avoid the default
     /// system path or want to ensure isolation.
-    pub fn new_with_socket_path<P: Into<PathBuf>>(socket_path: P) -> Self {
+#[allow(dead_code)]
+pub fn new_with_socket_path<P: Into<PathBuf>>(socket_path: P) -> Self {
         let socket_path = socket_path.into();
         Self {
             socket_path,
