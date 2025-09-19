@@ -20,6 +20,15 @@ path = "src/bin/run_minimal_wayland.rs"
 required-features = ["smithay-minimal"]
 
 [[bin]]
+name = "run_present_winit"
+path = "src/bin/run_present_winit.rs"
+required-features = ["smithay", "wgpu-present"]
+
+[[bin]]
+name = "run_real_backend"
+path = "src/bin/run_real_backend.rs"
+
+[[bin]]
 name = "test_basic"
 path = "src/test_basic.rs"
 required-features = ["demo"]
@@ -58,16 +67,7 @@ wayland-backend = "0.3"
 wayland-scanner = "0.31"
 
 # Smithay compositor framework with full features
-smithay = { version = "0.7.0", default-features = false, features = [
-    "backend_winit",
-    "backend_drm",
-    "backend_libinput", 
-    "backend_session",
-    "backend_udev",
-    "renderer_gl",
-    "wayland_frontend",
-    "xwayland"
-] }
+smithay = { version = "0.7.0", default-features = false, optional = true }
 smithay-client-toolkit = "0.18"
 
 # Graphics and input
@@ -120,12 +120,25 @@ path = "src/lib.rs"
 
 # Features
 [features]
-# Enable unified smithay backend by default
-default = ["smithay"]
+# Provide structured control over smithay feature set
+default = ["smithay-minimal"]
 # Demos (no-op gate for example/test bins)
 demo = []
-# Main backend unification
-smithay = []
+# Base smithay dependency and minimal protocol frontend only
+smithay = ["dep:smithay", "smithay/wayland_frontend"]
+# Minimal Wayland server feature (no-op shim to align with README/CI)
+smithay-minimal = ["smithay"]
+# Full backend (drm, udev, libinput, xwayland, renderer_gl, winit)
+smithay-full = [
+    "smithay",
+    "smithay/backend_winit",
+    "smithay/backend_drm",
+    "smithay/backend_libinput",
+    "smithay/backend_session",
+    "smithay/backend_udev",
+    "smithay/renderer_gl",
+    "smithay/xwayland"
+]
 # Enable on-screen presentation via wgpu + winit path
 wgpu-present = ["pollster"]
 # Enable NVIDIA NVML GPU metrics support (requires libnvidia-ml)
@@ -133,8 +146,6 @@ wgpu-present = ["pollster"]
 gpu-nvml = ["nvml-wrapper"]
 # Example builds (no-op)
 examples = []
-# Minimal Wayland server feature (no-op shim to align with README/CI)
-smithay-minimal = ["smithay"]
 # Experimental: Real XDG backend wiring (register core globals and dispatch loop)
 real-compositor = ["smithay"]
 
