@@ -6,9 +6,10 @@
 use anyhow::{Context, Result};
 use log::{debug, info};
 use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
+use wayland_server::Resource;
 
 // Use direct wayland imports
 use wayland_server::{
@@ -46,6 +47,10 @@ pub struct CompositorState {
     pub pointer_pos: (f64, f64),
     pub focused_surface: Option<wl_surface::WlSurface>,
     pub serial_counter: u32,
+    // Queue wl_surface frame callbacks per-surface; flushed on present tick
+    pub pending_callbacks: HashMap<u32, Vec<wl_callback::WlCallback>>,
+    // Surfaces that committed since last present
+    pub dirty_surfaces: HashSet<u32>,
 }
 
 /// Real surface with actual data
@@ -98,6 +103,8 @@ impl Default for CompositorState {
             pointer_pos: (0.0, 0.0),
             focused_surface: None,
             serial_counter: 1,
+            pending_callbacks: HashMap::new(),
+            dirty_surfaces: HashSet::new(),
         }
     }
 }
@@ -243,6 +250,7 @@ impl RealBackend {
         );
 
         let mut state = CompositorState::default();
+        let mut last_present = std::time::Instant::now();
 
         // Simple event loop - accept clients and dispatch
         loop {
@@ -259,6 +267,28 @@ impl RealBackend {
             // Dispatch pending events
             self.display.dispatch_clients(&mut state)?;
             self.display.flush_clients()?;
+
+            // Simulated present tick: complete queued frame callbacks using output refresh cadence
+            let refresh_mhz = state.output_info.refresh.max(1) as u64; // millihertz
+            let present_ns = 1_000_000_000_000u64 / refresh_mhz; // ns per frame = 1e12 / mHz
+            let interval = std::time::Duration::from_nanos(present_ns);
+            if last_present.elapsed() >= interval {
+                let ts_ms: u32 = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    & 0xFFFF_FFFF) as u32;
+                // Complete callbacks only for surfaces that committed since last tick
+                let sids: Vec<u32> = state.dirty_surfaces.drain().collect();
+                for sid in sids {
+                    if let Some(list) = state.pending_callbacks.get_mut(&sid) {
+                        for cb in list.drain(..) {
+                            cb.done(ts_ms);
+                        }
+                    }
+                }
+                last_present = std::time::Instant::now();
+            }
 
             // Small sleep to avoid busy loop
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -360,7 +390,11 @@ impl CompositorState {
 
     fn send_pointer_motion(&mut self, x: f64, y: f64) {
         self.pointer_pos = (x, y);
-        let time_ms = 0u32; // placeholder
+        let time_ms: u32 = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            & 0xFFFF_FFFF) as u32;
         for p in &self.pointers {
             p.motion(time_ms, x, y);
         }
@@ -368,7 +402,11 @@ impl CompositorState {
 
     fn send_pointer_button(&mut self, button: u32, pressed: bool) {
         let serial = self.next_serial();
-        let time_ms = 0u32;
+        let time_ms: u32 = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            & 0xFFFF_FFFF) as u32;
         let state = if pressed {
             wl_pointer::ButtonState::Pressed
         } else {
@@ -459,7 +497,7 @@ impl CompositorState {
             kb.key(serial, time_ms, keycode, state);
         }
 
-        // Minimal mapping from keycode to key string (placeholder)
+        // Basic mapping from keycode to a readable key string
         let key_str = match keycode {
             1 => "Escape".to_string(),
             16 => "Q".to_string(),
@@ -517,6 +555,9 @@ impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
                     surface.committed = true;
                     info!("✅ Surface committed and ready to render!");
                 }
+                // Mark this surface dirty for next present tick
+                let sid = resource.id().protocol_id();
+                state.dirty_surfaces.insert(sid);
 
                 // If there is a corresponding xdg_surface that has acked configure, map the window
                 if let Some(win) = state
@@ -529,9 +570,7 @@ impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
                             "🗺️ Mapping window at ({}, {}) size {}x{}",
                             win.x, win.y, win.width, win.height
                         );
-                        // Minimal mapping: nothing to render yet, but marked as mapped
                         win.pending_map = false;
-                        // Set pointer focus to this surface on first map
                         state.send_pointer_enter_if_needed(resource);
                     }
                 }
@@ -545,14 +584,18 @@ impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
                 debug!("Surface damage at ({}, {}) size {}x{}", x, y, width, height);
             }
             wl_surface::Request::Frame { callback } => {
-                // Initialize the callback and immediately send done for now
-                // In a real compositor, this would be sent after the frame is rendered
+                // Initialize the callback and queue it for next present tick per-surface
                 let cb = data_init.init(callback, ());
-                cb.done(0); // 0 is the timestamp, normally would be actual frame time
-                debug!("Frame callback requested and completed");
+                let sid = resource.id().protocol_id();
+                state.pending_callbacks.entry(sid).or_default().push(cb);
+                debug!("Frame callback queued for surface {}", sid);
             }
             wl_surface::Request::Destroy => {
+                // Remove surface and any queued callbacks
+                let sid = resource.id().protocol_id();
                 state.surfaces.retain(|s| &s.wl_surface != resource);
+                state.pending_callbacks.remove(&sid);
+                state.dirty_surfaces.remove(&sid);
                 debug!("Surface destroyed");
             }
             _ => {}

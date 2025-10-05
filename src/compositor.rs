@@ -93,9 +93,7 @@ impl AxiomCompositor {
             .await
             .context("Failed to start IPC server")?;
 
-        warn!(
-            "⚠️ Running in simulation mode (Smithay window server is handled by main when enabled)"
-        );
+        info!("Smithay window server runs in main thread when enabled; compositor loop will manage subsystems here");
 
         // Initialize a headless renderer as scaffolding for real GPU rendering
         let renderer = match AxiomRenderer::new_headless().await {
@@ -156,7 +154,7 @@ impl AxiomCompositor {
         Ok(())
     }
 
-    /// Phase 3: Process all pending compositor events
+    /// Process all pending compositor events
     async fn process_events(&mut self) -> Result<()> {
         // Process IPC messages from Lazy UI
         if let Err(e) = self.ipc_server.process_messages().await {
@@ -168,36 +166,8 @@ impl AxiomCompositor {
             self.apply_runtime_command(cmd);
         }
 
-        // Phase 3: Simulate input processing for demonstration
-        // In a real implementation, this would receive events from Smithay
-        self.process_simulated_input_events().await?;
-
-        Ok(())
-    }
-
-    /// Phase 3: Simulate input events for testing (until real Smithay integration)
-    async fn process_simulated_input_events(&mut self) -> Result<()> {
-        // This is a placeholder that simulates occasional input events
-        // for testing purposes. Real implementation would receive these from Smithay.
-
-        use crate::input::InputEvent;
-
-        // Simulate a scroll event occasionally (for demo purposes)
-        if rand::random::<f32>() < 0.001 {
-            // Very low probability
-            let event = InputEvent::Scroll {
-                x: 100.0,
-                y: 100.0,
-                delta_x: if rand::random::<bool>() { 10.0 } else { -10.0 },
-                delta_y: 0.0,
-            };
-
-            let actions = self.input_manager.process_input_event(event);
-            for action in actions {
-                self.handle_compositor_action(action).await?;
-            }
-        }
-
+        // Input events are provided by real backends (Smithay/libinput) when enabled.
+        // No synthetic input generation.
         Ok(())
     }
 
@@ -437,7 +407,10 @@ impl AxiomCompositor {
                     // Syntax examples:
                     // - "set_viewport_size 1920 1080"
                     // - "set_viewport_size width=1920 height=1080"
-                    let rest = trimmed.strip_prefix("set_viewport_size").unwrap_or("").trim();
+                    let rest = trimmed
+                        .strip_prefix("set_viewport_size")
+                        .unwrap_or("")
+                        .trim();
                     let mut w_opt: Option<u32> = None;
                     let mut h_opt: Option<u32> = None;
                     let parts: Vec<&str> = rest.split_whitespace().collect();

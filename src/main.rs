@@ -42,6 +42,9 @@ mod window;
 mod workspace;
 mod xwayland;
 
+#[cfg(feature = "dmabuf-vulkan")]
+mod dmabuf_vulkan;
+
 #[cfg(all(feature = "smithay", feature = "wgpu-present"))]
 fn start_output_control_server(tx: std::sync::mpsc::Sender<crate::smithay::server::OutputOp>) {
     use std::io::{BufRead, BufReader};
@@ -132,7 +135,7 @@ fn parse_outputs_spec(spec: &str) -> Option<Vec<crate::smithay::server::OutputIn
         }
         // Split name/model optional prefix? Keep it minimal for now.
         // Parse WIDTHxHEIGHT@SCALE+X,Y
-let part = s;
+        let part = s;
         // WIDTHxHEIGHT
         let (wh, rest1) = match part.split_once('@') {
             Some(t) => t,
@@ -322,7 +325,9 @@ async fn main() -> Result<()> {
                 std::env::set_var("AXIOM_DEBUG_OUTPUTS", "1");
             }
             // Create decoration manager
-            let deco = Arc::new(RwLock::new(crate::decoration::DecorationManager::new(&config.window)));
+            let deco = Arc::new(RwLock::new(crate::decoration::DecorationManager::new(
+                &config.window,
+            )));
             let server = CompositorServer::new(
                 wm,
                 ws,
@@ -378,7 +383,9 @@ async fn main() -> Result<()> {
             if cli.debug_outputs {
                 std::env::set_var("AXIOM_DEBUG_OUTPUTS", "1");
             }
-            let deco = Arc::new(RwLock::new(crate::decoration::DecorationManager::new(&cfg_clone.window)));
+            let deco = Arc::new(RwLock::new(crate::decoration::DecorationManager::new(
+                &cfg_clone.window,
+            )));
             let server = CompositorServer::new(
                 wm,
                 ws,
@@ -451,6 +458,10 @@ async fn main() -> Result<()> {
                 Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                     // Sync from shared render state and draw
                     renderer.sync_from_shared();
+                    
+                    // Only render and present if we have content to show or this is the initial frame
+                    let has_content = renderer.window_count() > 0;
+                    
                     if renderer.can_present() {
                         if let Ok(frame) = surface.get_current_texture() {
                             // Compute output rectangles from the CLI topology if provided
@@ -464,35 +475,45 @@ async fn main() -> Result<()> {
                                 .unwrap_or_else(|| vec![(0, 0, size.width, size.height)]);
 
                             let debug_overlay = std::env::var("AXIOM_DEBUG_OUTPUTS").ok().map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
-                            if let Err(e) = renderer.render_to_surface_with_outputs(&surface, &frame, &outputs_rects, debug_overlay) {
-                                eprintln!("render error: {}", e);
-                            }
-                            frame.present();
-                            // Send per-output presentation feedback timing (one event per logical output)
-                            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-                            let tv_sec = now.as_secs();
-                            let tv_nsec = now.subsec_nanos();
-                            let tv_sec_hi: u32 = (tv_sec >> 32) as u32;
-                            let tv_sec_lo: u32 = (tv_sec & 0xFFFF_FFFF) as u32;
-                            // Query monitor refresh if available
-                            let refresh_ns: u32 = window.current_monitor()
-                                .and_then(|m| m.refresh_rate_millihertz())
-                                .map(|mhz| {
-                                    // ns per frame = 1e9 / (mhz/1000) = 1e12 / mhz
-                                    let ns = 1_000_000_000_000u64 / (mhz as u64);
-                                    ns.clamp(8_000_000, 33_333_333) as u32 // clamp between 120Hz and 30Hz typical bounds
-                                })
-                                .unwrap_or(16_666_666);
-                            // Flags: vsync + hw clock
-                            let flags: u32 = (wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync | wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock).bits();
-                            let outputs_count = outputs_init_main.as_ref().map(|v| v.len()).unwrap_or(1);
-                            for idx in 0..outputs_count {
-                                let _ = present_tx.send(PresentEvent { tv_sec_hi, tv_sec_lo, tv_nsec, refresh_ns, flags, output_idx: Some(idx) });
+                            
+                            // Only render if we have windows, otherwise just clear and present once
+                            if has_content {
+                                if let Err(e) = renderer.render_to_surface_with_outputs(&surface, &frame, &outputs_rects, debug_overlay) {
+                                    eprintln!("render error: {}", e);
+                                }
+                                frame.present();
+                                
+                                // Send per-output presentation feedback timing (one event per logical output)
+                                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                                let tv_sec = now.as_secs();
+                                let tv_nsec = now.subsec_nanos();
+                                let tv_sec_hi: u32 = (tv_sec >> 32) as u32;
+                                let tv_sec_lo: u32 = (tv_sec & 0xFFFF_FFFF) as u32;
+                                // Query monitor refresh if available
+                                let refresh_ns: u32 = window.current_monitor()
+                                    .and_then(|m| m.refresh_rate_millihertz())
+                                    .map(|mhz| {
+                                        // ns per frame = 1e9 / (mhz/1000) = 1e12 / mhz
+                                        let ns = 1_000_000_000_000u64 / (mhz as u64);
+                                        ns.clamp(8_000_000, 33_333_333) as u32 // clamp between 120Hz and 30Hz typical bounds
+                                    })
+                                    .unwrap_or(16_666_666);
+                                // Flags: vsync + hw clock
+                                let flags: u32 = (wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync | wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock).bits();
+                                let outputs_count = outputs_init_main.as_ref().map(|v| v.len()).unwrap_or(1);
+                                for idx in 0..outputs_count {
+                                    let _ = present_tx.send(PresentEvent { tv_sec_hi, tv_sec_lo, tv_nsec, refresh_ns, flags, output_idx: Some(idx) });
+                                }
+                            } else {
+                                // No windows yet - just drop the frame without presenting to avoid wgpu errors
+                                drop(frame);
                             }
                         }
                     } else {
                         // Headless fallback: no on-screen presentation
-                        let _ = renderer.render();
+                        if has_content {
+                            let _ = renderer.render();
+                        }
                     }
                 }
                 _ => {}

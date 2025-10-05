@@ -100,7 +100,7 @@ impl BasicBackend {
             let _ = self.display.flush_clients();
 
             // Log activity
-if !state.surfaces.is_empty() {
+            if !state.surfaces.is_empty() {
                 debug!("Active surfaces: {}", state.surfaces.len());
             }
         }
@@ -204,7 +204,7 @@ impl wayland_server::Dispatch<wl_shm::WlShm, ()> for State {
         _dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-if let wl_shm::Request::CreatePool { id, .. } = request {
+        if let wl_shm::Request::CreatePool { id, .. } = request {
             debug!("SHM pool creation requested");
             data_init.init(id, ());
         }
@@ -221,7 +221,7 @@ impl wayland_server::Dispatch<wl_shm_pool::WlShmPool, ()> for State {
         _dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-if let wl_shm_pool::Request::CreateBuffer { id, .. } = request {
+        if let wl_shm_pool::Request::CreateBuffer { id, .. } = request {
             debug!("Buffer creation requested");
             data_init.init(id, ());
         }

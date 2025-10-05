@@ -5,10 +5,11 @@
 //! updates and presentation.
 
 use anyhow::{Context, Result};
+use calloop::generic::Generic;
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::EventLoop;
-use calloop::generic::Generic;
 use calloop::{Interest, Mode, PostAction};
+use evdev::AbsoluteAxisType;
 use log::{debug, info};
 use memmap2::{Mmap, MmapOptions};
 use parking_lot::RwLock;
@@ -16,12 +17,12 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Write;
-use std::os::fd::{AsFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use wayland_protocols::wp::linux_dmabuf::zv1::server::{
-    zwp_linux_buffer_params_v1, zwp_linux_dmabuf_v1,
+    zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1, zwp_linux_dmabuf_v1,
 };
 use wayland_protocols::wp::presentation_time::server::{wp_presentation, wp_presentation_feedback};
 use wayland_protocols::wp::primary_selection::zv1::server::{
@@ -40,8 +41,8 @@ use wayland_server::{
     backend::{ClientData, GlobalId},
     protocol::{
         wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager,
-        wl_data_offer, wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm,
-        wl_shm_pool, wl_surface, wl_touch,
+        wl_data_offer, wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_region, wl_seat,
+        wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
     },
     Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, ListeningSocket, New,
     Resource, WEnum,
@@ -126,6 +127,12 @@ pub struct CompositorState {
     pub decoration_modes: HashMap<u32, zxdg_toplevel_decoration_v1::Mode>,
     pub decoration_to_toplevel: HashMap<u32, u32>,
     pub force_client_side_decorations: bool,
+
+    // Subsurface management
+    pub(crate) subsurfaces: HashMap<u32, SubsurfaceEntry>, // keyed by child surface id
+    pub parent_children: HashMap<u32, Vec<u32>>, // parent surface id -> ordered child surface ids
+    pub subsurface_axiom_ids: HashMap<u32, u64>, // child surface id -> axiom_id
+    pub subsurface_res_to_child: HashMap<u32, u32>, // wl_subsurface resource id -> child surface id
 
     // Frame callback gating: if true, require presentation on all overlapped outputs before completing a callback
     pub callback_gating_all_outputs: bool,
@@ -240,6 +247,20 @@ pub enum HwInputEvent {
         horizontal: f64,
         vertical: f64,
     },
+    // Basic single-touch events
+    TouchDown {
+        x: f64,
+        y: f64,
+        id: i32,
+    },
+    TouchMotion {
+        x: f64,
+        y: f64,
+        id: i32,
+    },
+    TouchUp {
+        id: i32,
+    },
     GestureSwipe {
         dx: f64,
         dy: f64,
@@ -277,6 +298,8 @@ pub struct LayerSurfaceEntry {
     pub wlr_surface: zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
     pub layer: AxiomLayerKind,
     pub namespace: String,
+    // If specified by the client at creation time, the target logical output index
+    pub target_output: Option<usize>,
     pub anchors: u32,
     pub margin_top: i32,
     pub margin_right: i32,
@@ -385,11 +408,13 @@ impl CompositorServer {
         dh.create_global::<CompositorState, wp_presentation::WpPresentation, _>(1, ());
         dh.create_global::<CompositorState, wp_viewporter::WpViewporter, _>(1, ());
         dh.create_global::<CompositorState, wl_data_device_manager::WlDataDeviceManager, _>(3, ());
+        // Advertise linux-dmabuf v4; we implement feedback objects with fallback behavior
         dh.create_global::<CompositorState, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, _>(4, ());
         dh.create_global::<CompositorState, zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1, _>(1, ());
         dh.create_global::<CompositorState, zwlr_layer_shell_v1::ZwlrLayerShellV1, _>(1, ());
         dh.create_global::<CompositorState, zxdg_decoration_manager_v1::ZxdgDecorationManagerV1, _>(1, ());
-        debug!("Globals: wl_compositor v4, wl_shm v1, wl_output v3, wl_seat v7, xdg_wm_base v3, wl_data_device_manager v3, primary_selection v1, wlr_layer_shell v1, xdg-decoration v1");
+        dh.create_global::<CompositorState, wl_subcompositor::WlSubcompositor, _>(1, ());
+        debug!("Globals: wl_compositor v4, wl_shm v1, wl_output v3, wl_seat v7, xdg_wm_base v3, wl_data_device_manager v3, primary_selection v1, wlr_layer_shell v1, xdg-decoration v1, wl_subcompositor v1");
 
         // Bind an auto socket for Wayland
         let listening = ListeningSocket::bind_auto("wayland", 1..32).context("bind socket")?;
@@ -571,6 +596,12 @@ impl CompositorServer {
             decoration_to_toplevel: HashMap::new(),
             force_client_side_decorations: force_csd,
 
+            // Subsurfaces
+            subsurfaces: HashMap::new(),
+            parent_children: HashMap::new(),
+            subsurface_axiom_ids: HashMap::new(),
+            subsurface_res_to_child: HashMap::new(),
+
             callback_gating_all_outputs: split_callbacks_env,
             multi_output_callbacks: Vec::new(),
 
@@ -631,7 +662,7 @@ impl CompositorServer {
 
         // Advertise wl_output globals for all logical outputs and record GlobalId per output
         for i in 0..state.logical_outputs.len() {
-let gid = display_handle.create_global::<CompositorState, wl_output::WlOutput, _>(
+            let gid = display_handle.create_global::<CompositorState, wl_output::WlOutput, _>(
                 4,
                 OutputGlobalData { index: i },
             );
@@ -657,44 +688,69 @@ let gid = display_handle.create_global::<CompositorState, wl_output::WlOutput, _
                             match ev {
                                 HwInputEvent::PointerMotion { dx, dy } => {
                                     let (min_x, min_y, max_x, max_y) = data.outputs_bounds();
-                                    data.pointer_pos.0 = (data.pointer_pos.0 + dx).clamp(min_x, max_x);
-                                    data.pointer_pos.1 = (data.pointer_pos.1 + dy).clamp(min_y, max_y);
-                                    let _ = CompositorServer::update_pointer_focus_and_motion_inline(data);
+                                    data.pointer_pos.0 =
+                                        (data.pointer_pos.0 + dx).clamp(min_x, max_x);
+                                    data.pointer_pos.1 =
+                                        (data.pointer_pos.1 + dy).clamp(min_y, max_y);
+                                    let _ =
+                                        CompositorServer::update_pointer_focus_and_motion_inline(
+                                            data,
+                                        );
                                 }
                                 HwInputEvent::PointerButton { button, pressed } => {
-                                    let _ = CompositorServer::handle_pointer_button_inline(data, button, pressed);
+                                    let _ = CompositorServer::handle_pointer_button_inline(
+                                        data, button, pressed,
+                                    );
                                 }
-                                HwInputEvent::PointerAxis { horizontal, vertical } => {
+                                HwInputEvent::PointerAxis {
+                                    horizontal,
+                                    vertical,
+                                } => {
                                     if data.pointer_focus_window.is_some() {
                                         let (h, v) = data.normalize_axis(horizontal, vertical);
                                         let time_ms: u32 = (std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap_or_default()
                                             .as_millis()
-                                            & 0xFFFF_FFFF) as u32;
+                                            & 0xFFFF_FFFF)
+                                            as u32;
                                         if h != 0.0 {
                                             for ptr in &data.pointers {
-                                                ptr.axis(time_ms, wl_pointer::Axis::HorizontalScroll, h);
+                                                ptr.axis(
+                                                    time_ms,
+                                                    wl_pointer::Axis::HorizontalScroll,
+                                                    h,
+                                                );
                                             }
                                         }
                                         if v != 0.0 {
                                             for ptr in &data.pointers {
-                                                ptr.axis(time_ms, wl_pointer::Axis::VerticalScroll, v);
+                                                ptr.axis(
+                                                    time_ms,
+                                                    wl_pointer::Axis::VerticalScroll,
+                                                    v,
+                                                );
                                             }
                                         }
                                     }
                                 }
-                                HwInputEvent::Key { key, modifiers, pressed } => {
+                                HwInputEvent::Key {
+                                    key,
+                                    modifiers,
+                                    pressed,
+                                } => {
                                     update_modifiers(data, &modifiers);
                                     if pressed {
-                                        use crate::input::{CompositorAction, InputEvent as AxiomInputEvent};
-                                        let actions = im2
-                                            .write()
-                                            .process_input_event(AxiomInputEvent::Keyboard {
+                                        use crate::input::{
+                                            CompositorAction, InputEvent as AxiomInputEvent,
+                                        };
+                                        let actions = im2.write().process_input_event(
+                                            AxiomInputEvent::Keyboard {
                                                 key: key.clone(),
                                                 modifiers: modifiers.clone(),
                                                 pressed,
-                                            });
+                                            },
+                                        );
                                         for action in actions {
                                             match action {
                                                 CompositorAction::ScrollWorkspaceLeft => {
@@ -706,27 +762,40 @@ let gid = display_handle.create_global::<CompositorState, wl_output::WlOutput, _
                                                     let _ = apply_layouts_inline(data, &wm2, &ws2);
                                                 }
                                                 CompositorAction::MoveWindowLeft => {
-                                                    if let Some(fid) = wm2.read().focused_window_id() {
+                                                    if let Some(fid) =
+                                                        wm2.read().focused_window_id()
+                                                    {
                                                         if ws2.write().move_window_left(fid) {
-                                                            let _ = apply_layouts_inline(data, &wm2, &ws2);
+                                                            let _ = apply_layouts_inline(
+                                                                data, &wm2, &ws2,
+                                                            );
                                                         }
                                                     }
                                                 }
                                                 CompositorAction::MoveWindowRight => {
-                                                    if let Some(fid) = wm2.read().focused_window_id() {
+                                                    if let Some(fid) =
+                                                        wm2.read().focused_window_id()
+                                                    {
                                                         if ws2.write().move_window_right(fid) {
-                                                            let _ = apply_layouts_inline(data, &wm2, &ws2);
+                                                            let _ = apply_layouts_inline(
+                                                                data, &wm2, &ws2,
+                                                            );
                                                         }
                                                     }
                                                 }
                                                 CompositorAction::ToggleFullscreen => {
-                                                    if let Some(fid) = wm2.read().focused_window_id() {
+                                                    if let Some(fid) =
+                                                        wm2.read().focused_window_id()
+                                                    {
                                                         let _ = wm2.write().toggle_fullscreen(fid);
-                                                        let _ = apply_layouts_inline(data, &wm2, &ws2);
+                                                        let _ =
+                                                            apply_layouts_inline(data, &wm2, &ws2);
                                                     }
                                                 }
                                                 CompositorAction::CloseWindow => {
-                                                    if let Some(fid) = wm2.read().focused_window_id() {
+                                                    if let Some(fid) =
+                                                        wm2.read().focused_window_id()
+                                                    {
                                                         if let Some(surf) = data
                                                             .windows
                                                             .iter()
@@ -792,11 +861,6 @@ let gid = display_handle.create_global::<CompositorState, wl_output::WlOutput, _
                                         if let Some(model) = msg.model.clone() {
                                             out0.model = model;
                                         }
-                                        // Update workspace viewport to match primary output
-                                        {
-                                            let mut ws = data.workspace_manager_handle.write();
-                                            ws.set_viewport_size(wi as f64, hi as f64);
-                                        }
                                         // Broadcast to connected wl_output resources for this output
                                         for out in &out0.wl_outputs {
                                             out.geometry(
@@ -821,6 +885,66 @@ let gid = display_handle.create_global::<CompositorState, wl_output::WlOutput, _
                                         }
                                     }
                                     had_activity = true;
+
+                                    // After updating primary output, recompute union viewport and reconfigure layers
+                                    {
+                                        let (min_x, min_y, max_x, max_y) = data.outputs_bounds();
+                                        let vw = (max_x - min_x).max(0.0);
+                                        let vh = (max_y - min_y).max(0.0);
+                                        let mut ws = data.workspace_manager_handle.write();
+                                        ws.set_viewport_size(vw, vh);
+                                    }
+                                    // Reconfigure layers (avoid borrow conflicts by collecting wlr surfaces)
+                                    let mut layer_surfaces_cloned: Vec<(
+                                        zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+                                        (i32, i32, i32, i32),
+                                    )> = Vec::new();
+                                    for i in 0..data.layer_surfaces.len() {
+                                        let target_opt = data.layer_surfaces[i].target_output;
+                                        let (origin_x, origin_y, vw_i, vh_i) =
+                                            if let Some(oidx) = target_opt {
+                                                if oidx < data.logical_outputs.len() {
+                                                    let out = &data.logical_outputs[oidx];
+                                                    (
+                                                        out.position.0,
+                                                        out.position.1,
+                                                        out.width,
+                                                        out.height,
+                                                    )
+                                                } else {
+                                                    let (min_x, min_y, max_x, max_y) =
+                                                        data.outputs_bounds();
+                                                    (
+                                                        min_x as i32,
+                                                        min_y as i32,
+                                                        (max_x - min_x) as i32,
+                                                        (max_y - min_y) as i32,
+                                                    )
+                                                }
+                                            } else {
+                                                let (min_x, min_y, max_x, max_y) =
+                                                    data.outputs_bounds();
+                                                (
+                                                    min_x as i32,
+                                                    min_y as i32,
+                                                    (max_x - min_x) as i32,
+                                                    (max_y - min_y) as i32,
+                                                )
+                                            };
+                                        let geom = compute_layer_geometry(
+                                            (vw_i, vh_i),
+                                            &data.layer_surfaces[i],
+                                        );
+                                        layer_surfaces_cloned.push((
+                                            data.layer_surfaces[i].wlr_surface.clone(),
+                                            (origin_x, origin_y, geom.2 as i32, geom.3 as i32),
+                                        ));
+                                    }
+                                    for (surf2, (_ox, _oy, w2, h2)) in layer_surfaces_cloned {
+                                        let serial2 = data.next_serial();
+                                        surf2.configure(serial2, w2 as u32, h2 as u32);
+                                    }
+                                    recompute_workspace_reserved_insets(data);
                                 }
                                 Err(TryRecvError::Empty) => break,
                                 Err(TryRecvError::Disconnected) => {
@@ -1060,13 +1184,43 @@ let gid = dh2.create_global::<CompositorState, wl_output::WlOutput, _>(4, Output
                                 last_present_time: Instant::now(),
                             };
                             data.logical_outputs.push(new_out);
+                            // Update workspace viewport to union of outputs
+                            let (min_x, min_y, max_x, max_y) = data.outputs_bounds();
+                            let vw = (max_x - min_x).max(0.0);
+                            let vh = (max_y - min_y).max(0.0);
+                            let mut ws_guard = ws.write();
+                            ws_guard.set_viewport_size(vw, vh);
+                            drop(ws_guard);
+// Reconfigure all existing layer surfaces against new topology
+                            for i in 0..data.layer_surfaces.len() {
+                                let target_opt = data.layer_surfaces[i].target_output;
+                                let (origin_x, origin_y, vw_i, vh_i) = if let Some(oidx) = target_opt {
+                                    if oidx < data.logical_outputs.len() {
+                                        let out = &data.logical_outputs[oidx];
+                                        (out.position.0, out.position.1, out.width, out.height)
+                                    } else {
+                                        let (min_x, min_y, max_x, max_y) = data.outputs_bounds();
+                                        (min_x as i32, min_y as i32, (max_x - min_x) as i32, (max_y - min_y) as i32)
+                                    }
+                                } else {
+                                    let (min_x, min_y, max_x, max_y) = data.outputs_bounds();
+                                    (min_x as i32, min_y as i32, (max_x - min_x) as i32, (max_y - min_y) as i32)
+                                };
+                                let (_x, _y, w, h) = compute_layer_geometry((vw_i, vh_i), &data.layer_surfaces[i]);
+                                let serial = data.next_serial();
+                                let surf = data.layer_surfaces[i].wlr_surface.clone();
+                                surf.configure(serial, w, h);
+                                let _ = (origin_x, origin_y); // keep computed for future if needed
+                            }
+                            // Recompute reserved insets
+                            recompute_workspace_reserved_insets(data);
                         }
-                        Ok(OutputOp::Remove { index }) => {
+Ok(OutputOp::Remove { index }) => {
                             if index < data.logical_outputs.len() {
                                 // Unadvertise the wl_output global if present
                                 if let Some(gid) = data.logical_outputs[index].global_id.take() {
                                     let dh2 = display_for_dispatch.handle();
-dh2.remove_global::<CompositorState>(gid);
+ dh2.remove_global::<CompositorState>(gid);
                                 }
                                 // Remove wl_output resource mappings and clear resources list
                                 let mut removed_ids: Vec<u32> = Vec::new();
@@ -1090,6 +1244,36 @@ dh2.remove_global::<CompositorState>(gid);
                                     if set.is_empty() { cb.done(now_ms); } else { remaining.push((sid, cb, set)); }
                                 }
                                 data.multi_output_callbacks = remaining;
+                                // Update workspace viewport to new union bounds
+                                let (min_x, min_y, max_x, max_y) = data.outputs_bounds();
+                                let vw = (max_x - min_x).max(0.0);
+                                let vh = (max_y - min_y).max(0.0);
+                                let mut ws_guard = ws.write();
+                                ws_guard.set_viewport_size(vw, vh);
+                                drop(ws_guard);
+// Reconfigure layer surfaces
+                                for i in 0..data.layer_surfaces.len() {
+                                    let target_opt = data.layer_surfaces[i].target_output;
+                                    let (origin_x, origin_y, vw_i, vh_i) = if let Some(oidx) = target_opt {
+                                        if oidx < data.logical_outputs.len() {
+                                            let out = &data.logical_outputs[oidx];
+                                            (out.position.0, out.position.1, out.width, out.height)
+                                        } else {
+                                            let (min_x, min_y, max_x, max_y) = data.outputs_bounds();
+                                            (min_x as i32, min_y as i32, (max_x - min_x) as i32, (max_y - min_y) as i32)
+                                        }
+                                    } else {
+                                        let (min_x, min_y, max_x, max_y) = data.outputs_bounds();
+                                        (min_x as i32, min_y as i32, (max_x - min_x) as i32, (max_y - min_y) as i32)
+                                    };
+                                    let (_x, _y, w, h) = compute_layer_geometry((vw_i, vh_i), &data.layer_surfaces[i]);
+                                    let serial = data.next_serial();
+                                    let surf = data.layer_surfaces[i].wlr_surface.clone();
+                                    surf.configure(serial, w, h);
+                                    let _ = (origin_x, origin_y);
+                                }
+                                // Recompute reserved insets
+                                recompute_workspace_reserved_insets(data);
                             }
                         }
                         Err(TryRecvError::Empty) => break,
@@ -1156,6 +1340,45 @@ dh2.remove_global::<CompositorState>(gid);
                                         }
                                     }
                                 }
+                                HwInputEvent::TouchDown { x, y, id } => {
+                                    // Clamp to outputs union and target a surface similar to pointer path
+                                    let (min_x, min_y, max_x, max_y) = data.outputs_bounds();
+                                    let gx = x.clamp(min_x, max_x);
+                                    let gy = y.clamp(min_y, max_y);
+                                    data.pointer_pos = (gx, gy);
+                                    let _ = CompositorServer::update_pointer_focus_and_motion_inline(data);
+                                    // Determine focused surface and local coords
+                                    if let Some(fid) = data.pointer_focus_window {
+                                        if let Some(surf) = CompositorServer::surface_for_axiom_id(data, fid) {
+                                            if let Some(rect) = data.last_layouts.get(&fid) {
+                                                let lx = (gx - rect.x as f64).max(0.0);
+                                                let ly = (gy - rect.y as f64).max(0.0);
+                                                let time_ms: u32 = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() & 0xFFFF_FFFF) as u32;
+                                                let serial = data.next_serial();
+                                                for t in &data.touches { t.down(serial, time_ms, &surf, id, lx, ly); t.frame(); }
+                                            }
+                                        }
+                                    }
+                                }
+                                HwInputEvent::TouchMotion { x, y, id } => {
+                                    let (min_x, min_y, max_x, max_y) = data.outputs_bounds();
+                                    let gx = x.clamp(min_x, max_x);
+                                    let gy = y.clamp(min_y, max_y);
+                                    // Use current focus target
+                                    if let Some(fid) = data.pointer_focus_window {
+                                        if let Some(rect) = data.last_layouts.get(&fid) {
+                                            let lx = (gx - rect.x as f64).max(0.0);
+                                            let ly = (gy - rect.y as f64).max(0.0);
+                                            let time_ms: u32 = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() & 0xFFFF_FFFF) as u32;
+                                            for t in &data.touches { t.motion(time_ms, id, lx, ly); t.frame(); }
+                                        }
+                                    }
+                                }
+                                HwInputEvent::TouchUp { id } => {
+                                    let time_ms: u32 = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() & 0xFFFF_FFFF) as u32;
+                                    let serial = data.next_serial();
+                                    for t in &data.touches { t.up(serial, time_ms, id); t.frame(); }
+                                }
                                 HwInputEvent::GestureSwipe { .. } | HwInputEvent::GesturePinch { .. } => {}
                             }
                         }
@@ -1210,6 +1433,11 @@ impl CompositorServer {
         for ev in buf {
             match ev {
                 HwInputEvent::GestureSwipe { .. } | HwInputEvent::GesturePinch { .. } => { /* gesture path disabled */
+                }
+                HwInputEvent::TouchDown { .. }
+                | HwInputEvent::TouchMotion { .. }
+                | HwInputEvent::TouchUp { .. } => {
+                    // Touch handling is wired in the main server loop; ignore here
                 }
                 HwInputEvent::Key {
                     key,
@@ -1465,13 +1693,9 @@ impl CompositorServer {
                                     }
 
                                     let serial = state.next_serial();
-                                    for kb in &state.keyboards {
-                                        kb.enter(serial, &surface, vec![]);
-                                    }
+                                    send_keyboard_enter_safe(&state, &surface, serial);
                                     let serial = state.next_serial();
-                                    for ptr in &state.pointers {
-                                        ptr.enter(serial, &surface, 0.0, 0.0);
-                                    }
+                                    send_pointer_enter_safe(&state, &surface, serial, 0.0, 0.0);
 
                                     debug!("axiom: mapped window id={:?}", state.windows[idx].axiom_id);
 
@@ -1575,13 +1799,9 @@ impl CompositorServer {
                                             .and_then(|w| w.wl_surface.clone())
                                         {
                                             let serial = state.next_serial();
-                                            for kb in &state.keyboards {
-                                                kb.enter(serial, &focus_surface, vec![]);
-                                            }
+                                            send_keyboard_enter_safe(&state, &focus_surface, serial);
                                             let serial = state.next_serial();
-                                            for ptr in &state.pointers {
-                                                ptr.enter(serial, &focus_surface, 0.0, 0.0);
-                                            }
+                                            send_pointer_enter_safe(&state, &focus_surface, serial, 0.0, 0.0);
                                         }
                                     }
 
@@ -1784,9 +2004,7 @@ impl CompositorServer {
                 {
                     state.pointer_focus_window = Some(id);
                     let serial = state.next_serial();
-                    for ptr in &state.pointers {
-                        ptr.enter(serial, &surface, lx, ly);
-                    }
+                    send_pointer_enter_safe(state, &surface, serial, lx, ly);
                 }
             } else {
                 // Motion on same surface
@@ -1856,9 +2074,7 @@ impl CompositorServer {
                     state.focused_window_id = Some(focus_id);
                     // Seat focus enter for keyboard
                     let serial = state.next_serial();
-                    for kb in &state.keyboards {
-                        kb.enter(serial, &surface, vec![]);
-                    }
+                    send_keyboard_enter_safe(state, &surface, serial);
                 }
                 let time_ms: u32 = (std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1956,9 +2172,7 @@ impl CompositorServer {
                 if let Some(surface) = CompositorServer::surface_for_axiom_id(state, id) {
                     state.pointer_focus_window = Some(id);
                     let serial = state.next_serial();
-                    for ptr in &state.pointers {
-                        ptr.enter(serial, &surface, lx, ly);
-                    }
+                    send_pointer_enter_safe(state, &surface, serial, lx, ly);
                 }
             } else {
                 let time_ms: u32 = (std::time::SystemTime::now()
@@ -2026,16 +2240,23 @@ impl CompositorServer {
             // Open devices best-effort
             let mut keyboards = Vec::new();
             let mut pointers = Vec::new();
+            let mut touch_devs: Vec<Device> = Vec::new();
             for p in dev_paths {
                 if let Ok(d) = Device::open(&p) {
                     let has_keys = d.supported_events().contains(EventType::KEY);
                     let has_rel = d.supported_events().contains(EventType::RELATIVE);
+                    let has_abs = d.supported_events().contains(EventType::ABSOLUTE);
                     let has_btn = d.supported_keys().is_some_and(|k| {
                         k.contains(Key::BTN_LEFT)
                             || k.contains(Key::BTN_RIGHT)
                             || k.contains(Key::BTN_MIDDLE)
                     });
-                    if has_keys && !has_rel {
+                    let is_touch = has_abs
+                        && d.supported_keys()
+                            .is_some_and(|k| k.contains(Key::BTN_TOUCH));
+                    if is_touch {
+                        touch_devs.push(d);
+                    } else if has_keys && !has_rel {
                         keyboards.push(d);
                     } else if has_rel || has_btn {
                         pointers.push(d);
@@ -2045,6 +2266,8 @@ impl CompositorServer {
 
             use std::collections::HashSet;
             let mut mods: HashSet<&'static str> = HashSet::new();
+            // Track last absolute positions for each touch device (single-finger id 0)
+            let mut last_abs: Vec<(f64, f64, bool)> = vec![(0.0, 0.0, false); touch_devs.len()];
             loop {
                 // Process keyboards
                 for dev in &mut keyboards {
@@ -2164,6 +2387,53 @@ impl CompositorServer {
                         }
                     }
                 }
+                // Process single-touch devices (BTN_TOUCH + ABS_X/ABS_Y)
+                for (idx, dev) in touch_devs.iter_mut().enumerate() {
+                    if let Ok(events) = dev.fetch_events() {
+                        let mut cur = last_abs[idx];
+                        let mut changed = false;
+                        for ev in events {
+                            match ev.event_type() {
+                                EventType::ABSOLUTE => {
+                                    if ev.code() == AbsoluteAxisType::ABS_X.0 {
+                                        cur.0 = ev.value() as f64;
+                                        changed = true;
+                                    } else if ev.code() == AbsoluteAxisType::ABS_Y.0 {
+                                        cur.1 = ev.value() as f64;
+                                        changed = true;
+                                    }
+                                }
+                                EventType::KEY => {
+                                    if ev.code() == Key::BTN_TOUCH.0 {
+                                        let pressed = ev.value() != 0;
+                                        cur.2 = pressed;
+                                        changed = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if changed {
+                            last_abs[idx] = cur;
+                            // Normalize: pass raw values; compositor will clamp to outputs bounds
+                            if cur.2 {
+                                // Press or motion
+                                let _ = tx.send(HwInputEvent::TouchMotion {
+                                    x: cur.0,
+                                    y: cur.1,
+                                    id: 0,
+                                });
+                                let _ = tx.send(HwInputEvent::TouchDown {
+                                    x: cur.0,
+                                    y: cur.1,
+                                    id: 0,
+                                });
+                            } else {
+                                let _ = tx.send(HwInputEvent::TouchUp { id: 0 });
+                            }
+                        }
+                    }
+                }
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         });
@@ -2194,11 +2464,201 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for CompositorState {
         _state: &mut Self,
         _client: &Client,
         _resource: &wl_compositor::WlCompositor,
-        _request: wl_compositor::Request,
+        request: wl_compositor::Request,
+        _data: &(),
+        _dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_compositor::Request::CreateSurface { id } => {
+                // Initialize wl_surface resource with default data
+                data_init.init(id, ());
+            }
+            wl_compositor::Request::CreateRegion { id } => {
+                // Initialize wl_region resource
+                data_init.init(id, ());
+            }
+            _ => {}
+        }
+    }
+}
+
+// wl_subcompositor global and subsurface handling
+impl GlobalDispatch<wl_subcompositor::WlSubcompositor, ()> for CompositorState {
+    fn bind(
+        _state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<wl_subcompositor::WlSubcompositor>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+impl Dispatch<wl_subcompositor::WlSubcompositor, ()> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        _resource: &wl_subcompositor::WlSubcompositor,
+        request: wl_subcompositor::Request,
+        _data: &(),
+        _dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if let wl_subcompositor::Request::GetSubsurface {
+            id,
+            surface,
+            parent,
+        } = request
+        {
+            let sub: wl_subsurface::WlSubsurface = data_init.init(id, ());
+            let child_sid = surface.id().protocol_id();
+            let parent_sid = parent.id().protocol_id();
+            // Track entry and resource mapping
+            state.subsurfaces.insert(
+                child_sid,
+                SubsurfaceEntry {
+                    child: surface.clone(),
+                    parent: parent.clone(),
+                    position: (0, 0),
+                    sync: true,
+                    pending_buffer_id: None,
+                    attach_offset: (0, 0),
+                },
+            );
+            state
+                .parent_children
+                .entry(parent_sid)
+                .or_default()
+                .push(child_sid);
+            state
+                .subsurface_res_to_child
+                .insert(sub.id().protocol_id(), child_sid);
+            debug!(
+                "subsurface: child {} registered under parent {}",
+                child_sid, parent_sid
+            );
+        }
+    }
+}
+
+impl Dispatch<wl_subsurface::WlSubsurface, ()> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &wl_subsurface::WlSubsurface,
+        request: wl_subsurface::Request,
         _data: &(),
         _dhandle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
+        match request {
+            wl_subsurface::Request::SetPosition { x, y } => {
+                if let Some(child_sid) = state
+                    .subsurface_res_to_child
+                    .get(&resource.id().protocol_id())
+                    .copied()
+                {
+                    if let Some(entry) = state.subsurfaces.get_mut(&child_sid) {
+                        entry.position = (x, y);
+                    }
+                }
+            }
+            wl_subsurface::Request::PlaceAbove { sibling } => {
+                if let Some(child_sid) = state
+                    .subsurface_res_to_child
+                    .get(&resource.id().protocol_id())
+                    .copied()
+                {
+                    let sib_sid = sibling.id().protocol_id();
+                    let parent_sid = state
+                        .subsurfaces
+                        .get(&child_sid)
+                        .map(|e| e.parent.id().protocol_id());
+                    if let Some(pid) = parent_sid {
+                        if let Some(list) = state.parent_children.get_mut(&pid) {
+                            // Remove child
+                            list.retain(|&c| c != child_sid);
+                            // Insert after sibling if found, else push
+                            if let Some(idx) = list.iter().position(|&c| c == sib_sid) {
+                                let insert_at = (idx + 1).min(list.len());
+                                list.insert(insert_at, child_sid);
+                            } else {
+                                list.push(child_sid);
+                            }
+                        }
+                    }
+                }
+            }
+            wl_subsurface::Request::PlaceBelow { sibling } => {
+                if let Some(child_sid) = state
+                    .subsurface_res_to_child
+                    .get(&resource.id().protocol_id())
+                    .copied()
+                {
+                    let sib_sid = sibling.id().protocol_id();
+                    let parent_sid = state
+                        .subsurfaces
+                        .get(&child_sid)
+                        .map(|e| e.parent.id().protocol_id());
+                    if let Some(pid) = parent_sid {
+                        if let Some(list) = state.parent_children.get_mut(&pid) {
+                            list.retain(|&c| c != child_sid);
+                            if let Some(idx) = list.iter().position(|&c| c == sib_sid) {
+                                list.insert(idx, child_sid);
+                            } else {
+                                list.insert(0, child_sid);
+                            }
+                        }
+                    }
+                }
+            }
+            wl_subsurface::Request::SetSync => {
+                if let Some(child_sid) = state
+                    .subsurface_res_to_child
+                    .get(&resource.id().protocol_id())
+                    .copied()
+                {
+                    if let Some(entry) = state.subsurfaces.get_mut(&child_sid) {
+                        entry.sync = true;
+                    }
+                }
+            }
+            wl_subsurface::Request::SetDesync => {
+                if let Some(child_sid) = state
+                    .subsurface_res_to_child
+                    .get(&resource.id().protocol_id())
+                    .copied()
+                {
+                    if let Some(entry) = state.subsurfaces.get_mut(&child_sid) {
+                        entry.sync = false;
+                    }
+                }
+            }
+            wl_subsurface::Request::Destroy => {
+                // Remove mapping; child surface cleanup occurs on wl_surface::Destroy
+                let _ = state
+                    .subsurface_res_to_child
+                    .remove(&resource.id().protocol_id());
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_region::WlRegion, ()> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &wl_region::WlRegion,
+        _request: wl_region::Request,
+        _data: &(),
+        _dhandle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        // Regions are used by clients for input/damage; we don't need server-side state beyond init.
+        // All requests are no-ops for this minimal path.
     }
 }
 
@@ -2290,39 +2750,60 @@ impl Dispatch<wl_seat::WlSeat, ()> for CompositorState {
                 if let Some(ref xkb) = state.xkb {
                     if let Ok(fd) = create_memfd_and_write(&xkb.keymap_string) {
                         let size = xkb.keymap_string.len() as u32;
-                        let borrowed = fd.as_fd();
-                        kb.keymap(wl_keyboard::KeymapFormat::XkbV1, borrowed, size);
+                        for kb in &state.keyboards {
+                            let _ = kb; // keep borrow rules simple
+                        }
+                        // Send to this keyboard
+                        kb.keymap(wl_keyboard::KeymapFormat::XkbV1, fd.as_fd(), size);
                     }
-                }
-                // Advertise keyboard repeat parameters (Wayland v4+)
-                if kb.version() >= 4 {
-                    kb.repeat_info(state.kbd_repeat_rate_hz, state.kbd_repeat_delay_ms);
                 }
                 state.keyboards.push(kb);
             }
             wl_seat::Request::GetPointer { id } => {
-                let pt = data_init.init(id, ());
-                state.pointers.push(pt);
+                let ptr = data_init.init(id, ());
+                state.pointers.push(ptr);
             }
             wl_seat::Request::GetTouch { id } => {
-                let t = data_init.init(id, ());
-                state.touches.push(t);
+                let touch = data_init.init(id, ());
+                state.touches.push(touch);
             }
+            wl_seat::Request::Release => {}
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_touch::WlTouch, ()> for CompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        resource: &wl_touch::WlTouch,
+        request: wl_touch::Request,
+        _data: &(),
+        _dhandle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        if let wl_touch::Request::Release = request {
+            let rid = resource.id().protocol_id();
+            state.touches.retain(|t| t.id().protocol_id() != rid);
         }
     }
 }
 
 impl Dispatch<wl_keyboard::WlKeyboard, ()> for CompositorState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
-        _resource: &wl_keyboard::WlKeyboard,
-        _request: wl_keyboard::Request,
+        resource: &wl_keyboard::WlKeyboard,
+        request: wl_keyboard::Request,
         _data: &(),
         _dhandle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
+        if let wl_keyboard::Request::Release = request {
+            let rid = resource.id().protocol_id();
+            state.keyboards.retain(|k| k.id().protocol_id() != rid);
+        }
     }
 }
 
@@ -2353,6 +2834,20 @@ fn build_default_xkb_info() -> Option<XkbInfo> {
     })
 }
 
+fn detect_main_device_dev() -> (u32, u32) {
+    use std::os::unix::fs::MetadataExt;
+    let paths = ["/dev/dri/renderD128", "/dev/dri/card0"]; // typical defaults
+    for p in &paths {
+        if let Ok(md) = std::fs::metadata(p) {
+            let dev_t = md.rdev();
+            let hi: u32 = (dev_t >> 32) as u32;
+            let lo: u32 = (dev_t & 0xFFFF_FFFF) as u32;
+            return (hi, lo);
+        }
+    }
+    (0, 0)
+}
+
 #[cfg(target_os = "linux")]
 fn create_memfd_and_write(data: &str) -> std::io::Result<OwnedFd> {
     // Use memfd where available; fall back to anonymous tmp file
@@ -2363,6 +2858,19 @@ fn create_memfd_and_write(data: &str) -> std::io::Result<OwnedFd> {
     }
     let mut file = unsafe { File::from_raw_fd(fd) };
     file.write_all(data.as_bytes())?;
+    let ofd = unsafe { OwnedFd::from_raw_fd(file.into_raw_fd()) };
+    Ok(ofd)
+}
+
+#[cfg(target_os = "linux")]
+fn create_memfd_and_write_bytes(data: &[u8]) -> std::io::Result<OwnedFd> {
+    let name = CString::new("axiom-bytes").unwrap();
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    file.write_all(data)?;
     let ofd = unsafe { OwnedFd::from_raw_fd(file.into_raw_fd()) };
     Ok(ofd)
 }
@@ -2380,6 +2888,23 @@ fn create_memfd_and_write(data: &str) -> std::io::Result<OwnedFd> {
     tmp.set_len(0)?;
     tmp.seek(SeekFrom::Start(0))?;
     tmp.write_all(data.as_bytes())?;
+    let ofd = unsafe { OwnedFd::from_raw_fd(tmp.into_raw_fd()) };
+    Ok(ofd)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_memfd_and_write_bytes(data: &[u8]) -> std::io::Result<OwnedFd> {
+    use std::fs::OpenOptions;
+    use std::io::Seek;
+    use std::io::SeekFrom;
+    let mut tmp = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open("/tmp/axiom-bytes")?;
+    tmp.set_len(0)?;
+    tmp.seek(SeekFrom::Start(0))?;
+    tmp.write_all(data)?;
     let ofd = unsafe { OwnedFd::from_raw_fd(tmp.into_raw_fd()) };
     Ok(ofd)
 }
@@ -2471,28 +2996,38 @@ impl CompositorServer {
         pressed: bool,
     ) -> Result<()> {
         // Same behavior as handle_pointer_button but without &mut self
-                if let Some(focus_id) = state.pointer_focus_window {
-                    if let Some(surface) = CompositorServer::surface_for_axiom_id(state, focus_id) {
-                        if state.focused_window_id != Some(focus_id) {
-                            // Leave previous focus if any
+        if let Some(focus_id) = state.pointer_focus_window {
+            if let Some(surface) = CompositorServer::surface_for_axiom_id(state, focus_id) {
+                if state.focused_window_id != Some(focus_id) {
+                    // Leave previous focus if any
                     if let Some(prev_id) = state.focused_window_id.take() {
-                        if let Some(prev_surface) = CompositorServer::surface_for_axiom_id(state, prev_id) {
+                        if let Some(prev_surface) =
+                            CompositorServer::surface_for_axiom_id(state, prev_id)
+                        {
                             let serial = state.next_serial();
-                            for kb in &state.keyboards { kb.leave(serial, &prev_surface); }
+                            for kb in &state.keyboards {
+                                kb.leave(serial, &prev_surface);
+                            }
                             let serial = state.next_serial();
-                            for ptr in &state.pointers { ptr.leave(serial, &prev_surface); }
+                            for ptr in &state.pointers {
+                                ptr.leave(serial, &prev_surface);
+                            }
                         }
                         // Update decoration focus
-                        state.decoration_manager_handle.write().set_window_focus(prev_id, false);
+                        state
+                            .decoration_manager_handle
+                            .write()
+                            .set_window_focus(prev_id, false);
                     }
                     state.focused_window_id = Some(focus_id);
                     // Update decoration focus
-                    state.decoration_manager_handle.write().set_window_focus(focus_id, true);
+                    state
+                        .decoration_manager_handle
+                        .write()
+                        .set_window_focus(focus_id, true);
                     // Seat focus enter for keyboard
                     let serial = state.next_serial();
-                    for kb in &state.keyboards {
-                        kb.enter(serial, &surface, vec![]);
-                    }
+                    send_keyboard_enter_safe(state, &surface, serial);
                 }
                 let time_ms: u32 = (std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -2548,19 +3083,6 @@ impl Dispatch<wl_pointer::WlPointer, ()> for CompositorState {
                 state.cursor_surface_sid = None;
             }
         }
-    }
-}
-
-impl Dispatch<wl_touch::WlTouch, ()> for CompositorState {
-    fn request(
-        _state: &mut Self,
-        _client: &Client,
-        _resource: &wl_touch::WlTouch,
-        _request: wl_touch::Request,
-        _data: &(),
-        _dhandle: &DisplayHandle,
-        _data_init: &mut DataInit<'_, Self>,
-    ) {
     }
 }
 
@@ -3138,6 +3660,10 @@ enum BufferSource {
 
 #[derive(Clone)]
 struct DmabufPlane {
+    // Keep a live reference to the plane's file descriptor for GPU import paths
+    #[allow(dead_code)]
+    fd: Arc<OwnedFd>,
+    // CPU mapping for fallback conversions
     map: Arc<Mmap>,
     stride: i32,
     offset: i32,
@@ -3170,6 +3696,18 @@ struct ViewportState {
 #[derive(Clone)]
 struct ViewportData {
     surface_id: u32,
+}
+
+#[derive(Clone)]
+pub(crate) struct SubsurfaceEntry {
+    #[allow(dead_code)]
+    child: wl_surface::WlSurface,
+    parent: wl_surface::WlSurface,
+    position: (i32, i32),
+    sync: bool,
+    // Track buffer attach and offset like other roles
+    pending_buffer_id: Option<u32>,
+    attach_offset: (i32, i32),
 }
 
 #[derive(Clone, Default)]
@@ -3257,6 +3795,23 @@ fn convert_dmabuf_to_rgba(rec: &BufferRecord) -> Option<Vec<u8>> {
         BufferSource::Dmabuf { planes, fourcc } => (planes.first()?, *fourcc),
         _ => return None,
     };
+
+    // Attempt Vulkan import first when enabled
+    #[cfg(feature = "dmabuf-vulkan")]
+    {
+        let w = rec.width.max(0) as u32;
+        let h = rec.height.max(0) as u32;
+        if let Some(bytes) = crate::dmabuf_vulkan::import_rgba_from_dmabuf(
+            fourcc,
+            w,
+            h,
+            plane.stride,
+            plane.offset,
+            &plane.fd,
+        ) {
+            return Some(bytes);
+        }
+    }
     let stride = plane.stride.max(0) as usize;
     let offset = plane.offset.max(0) as usize;
     if width == 0 || height == 0 {
@@ -3353,7 +3908,7 @@ fn convert_dmabuf_to_rgba(rec: &BufferRecord) -> Option<Vec<u8>> {
             for y in 0..height {
                 let y_row = &y_ptr[y * y_stride..];
                 let uv_row = &uv_ptr[(y / 2) * uv_stride..];
-for (x, _) in y_row.iter().enumerate().take(width) {
+                for (x, _) in y_row.iter().enumerate().take(width) {
                     let yv = y_row[x] as i32;
                     let uv_index = (x / 2) * 2;
                     let u = uv_row[uv_index] as i32;
@@ -3432,27 +3987,27 @@ fn convert_dmabuf_region_to_rgba(
                     DRM_FORMAT_ABGR8888 => {
                         for i in 0..rw as usize {
                             let s = i * 4;
-out[dst_off + s] = src_row[s + 2]; // R
+                            out[dst_off + s] = src_row[s + 2]; // R
                             out[dst_off + s + 1] = src_row[s + 1]; // G
-out[dst_off + s + 2] = src_row[s]; // B
+                            out[dst_off + s + 2] = src_row[s]; // B
                             out[dst_off + s + 3] = src_row[s + 3]; // A
                         }
                     }
                     DRM_FORMAT_XRGB8888 => {
                         for i in 0..rw as usize {
                             let s = i * 4;
-out[dst_off + s] = src_row[s + 2]; // R
+                            out[dst_off + s] = src_row[s + 2]; // R
                             out[dst_off + s + 1] = src_row[s + 1]; // G
-out[dst_off + s + 2] = src_row[s]; // B
+                            out[dst_off + s + 2] = src_row[s]; // B
                             out[dst_off + s + 3] = 255;
                         }
                     }
                     DRM_FORMAT_ARGB8888 => {
                         for i in 0..rw as usize {
                             let s = i * 4;
-out[dst_off + s] = src_row[s + 2]; // R
+                            out[dst_off + s] = src_row[s + 2]; // R
                             out[dst_off + s + 1] = src_row[s + 1]; // G
-out[dst_off + s + 2] = src_row[s]; // B
+                            out[dst_off + s + 2] = src_row[s]; // B
                             out[dst_off + s + 3] = src_row[s + 3]; // A
                         }
                     }
@@ -3707,7 +4262,7 @@ struct DmabufParamsData {
 
 impl Dispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()> for CompositorState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         _resource: &zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
         request: zwp_linux_dmabuf_v1::Request,
@@ -3715,9 +4270,98 @@ impl Dispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()> for CompositorState {
         _dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        if let zwp_linux_dmabuf_v1::Request::CreateParams { params_id } = request {
-            data_init.init(params_id, DmabufParamsData::default());
+        match request {
+            zwp_linux_dmabuf_v1::Request::CreateParams { params_id } => {
+                data_init.init(params_id, DmabufParamsData::default());
+            }
+            zwp_linux_dmabuf_v1::Request::GetDefaultFeedback { id } => {
+                // Create feedback object and emit main_device + format_table + tranche + done
+                let fb: zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 =
+                    data_init.init(id, ());
+                // main_device
+                let (dev_hi, dev_lo) = detect_main_device_dev();
+                let dev_u64 = (u64::from(dev_hi) << 32) | u64::from(dev_lo);
+                let mut dev_bytes = Vec::with_capacity(8);
+                dev_bytes.extend_from_slice(&dev_u64.to_le_bytes());
+                fb.main_device(dev_bytes.clone());
+                // format_table
+                let mut table: Vec<u8> = Vec::with_capacity(state.dmabuf_formats.len() * 16);
+                for (fmt, modifier) in &state.dmabuf_formats {
+                    table.extend_from_slice(&fmt.to_le_bytes()); // u32 format
+                    table.extend_from_slice(&0u32.to_le_bytes()); // padding
+                    table.extend_from_slice(&modifier.to_le_bytes()); // u64 modifier
+                }
+                if let Ok(fd) = create_memfd_and_write_bytes(&table) {
+                    use std::os::fd::IntoRawFd;
+                    let raw = fd.into_raw_fd();
+                    let ofd = unsafe { OwnedFd::from_raw_fd(raw) };
+                    fb.format_table(ofd.as_fd(), table.len() as u32);
+                }
+                // tranche: target_device -> formats (all indices 0..N-1) -> tranche_done
+                fb.tranche_target_device(dev_bytes);
+                // flags: none
+                fb.tranche_flags(zwp_linux_dmabuf_feedback_v1::TrancheFlags::empty());
+                let n = state.dmabuf_formats.len();
+                let mut idx_bytes: Vec<u8> = Vec::with_capacity(n * 2);
+                for i in 0..(n as u16) {
+                    idx_bytes.extend_from_slice(&i.to_le_bytes());
+                }
+                fb.tranche_formats(idx_bytes);
+                fb.tranche_done();
+                fb.done();
+                debug!("linux-dmabuf v4: default feedback with tranche emitted");
+            }
+            zwp_linux_dmabuf_v1::Request::GetSurfaceFeedback { id, surface: _ } => {
+                // Respond with per-surface feedback: main_device + format_table + tranche + done
+                let fb: zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 =
+                    data_init.init(id, ());
+                let (dev_hi, dev_lo) = detect_main_device_dev();
+                let dev_u64 = (u64::from(dev_hi) << 32) | u64::from(dev_lo);
+                let mut dev_bytes = Vec::with_capacity(8);
+                dev_bytes.extend_from_slice(&dev_u64.to_le_bytes());
+                fb.main_device(dev_bytes.clone());
+                // Provide same format_table
+                let mut table: Vec<u8> = Vec::with_capacity(state.dmabuf_formats.len() * 16);
+                for (fmt, modifier) in &state.dmabuf_formats {
+                    table.extend_from_slice(&fmt.to_le_bytes());
+                    table.extend_from_slice(&0u32.to_le_bytes());
+                    table.extend_from_slice(&modifier.to_le_bytes());
+                }
+                if let Ok(fd) = create_memfd_and_write_bytes(&table) {
+                    use std::os::fd::IntoRawFd;
+                    let raw = fd.into_raw_fd();
+                    let ofd = unsafe { OwnedFd::from_raw_fd(raw) };
+                    fb.format_table(ofd.as_fd(), table.len() as u32);
+                }
+                // tranche for this surface: we expose same formats/device for now
+                fb.tranche_target_device(dev_bytes);
+                fb.tranche_flags(zwp_linux_dmabuf_feedback_v1::TrancheFlags::empty());
+                let n = state.dmabuf_formats.len();
+                let mut idx_bytes: Vec<u8> = Vec::with_capacity(n * 2);
+                for i in 0..(n as u16) {
+                    idx_bytes.extend_from_slice(&i.to_le_bytes());
+                }
+                fb.tranche_formats(idx_bytes);
+                fb.tranche_done();
+                fb.done();
+                debug!("linux-dmabuf v4: surface feedback with tranche emitted");
+            }
+            _ => {}
         }
+    }
+}
+
+impl Dispatch<zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1, ()> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1,
+        _request: zwp_linux_dmabuf_feedback_v1::Request,
+        _data: &(),
+        _dhandle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        // Stateless; nothing to handle
     }
 }
 
@@ -3742,7 +4386,7 @@ impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, DmabufParamsDa
                 modifier_hi,
                 modifier_lo,
             } => {
-let owned: OwnedFd = fd;
+                let owned: OwnedFd = fd;
                 if let Ok(mut v) = data.planes.lock() {
                     v.push((
                         owned,
@@ -3788,7 +4432,13 @@ let owned: OwnedFd = fd;
                             return;
                         }
                         let (owned, offset, stride, _mhi, _mlo, _idx) = planes.remove(0);
-                        let file = unsafe { File::from_raw_fd(owned.into_raw_fd()) };
+                        // Duplicate FD for mapping to keep original FD alive for GPU import
+                        let dup_fd = unsafe { libc::dup(owned.as_fd().as_raw_fd()) };
+                        if dup_fd < 0 {
+                            resource.failed();
+                            return;
+                        }
+                        let file = unsafe { File::from_raw_fd(dup_fd) };
                         let needed = offset.saturating_add(stride.saturating_mul(height.max(0)));
                         let mmap =
                             match unsafe { MmapOptions::new().len(needed as usize).map(&file) } {
@@ -3799,6 +4449,7 @@ let owned: OwnedFd = fd;
                                 }
                             };
                         vec![DmabufPlane {
+                            fd: Arc::new(owned),
                             map: mmap,
                             stride,
                             offset,
@@ -3812,8 +4463,15 @@ let owned: OwnedFd = fd;
                         // Plane 0: Y, Plane 1: UV interleaved
                         let (owned0, offset0, stride0, _mhi0, _mlo0, _idx0) = planes.remove(0);
                         let (owned1, offset1, stride1, _mhi1, _mlo1, _idx1) = planes.remove(0);
-                        let file0 = unsafe { File::from_raw_fd(owned0.into_raw_fd()) };
-                        let file1 = unsafe { File::from_raw_fd(owned1.into_raw_fd()) };
+                        // Duplicate FDs for mapping while preserving originals for GPU import
+                        let dup0 = unsafe { libc::dup(owned0.as_fd().as_raw_fd()) };
+                        let dup1 = unsafe { libc::dup(owned1.as_fd().as_raw_fd()) };
+                        if dup0 < 0 || dup1 < 0 {
+                            resource.failed();
+                            return;
+                        }
+                        let file0 = unsafe { File::from_raw_fd(dup0) };
+                        let file1 = unsafe { File::from_raw_fd(dup1) };
                         let needed0 = offset0.saturating_add(stride0.saturating_mul(height.max(0)));
                         let needed1 =
                             offset1.saturating_add(stride1.saturating_mul((height / 2).max(0)));
@@ -3835,11 +4493,13 @@ let owned: OwnedFd = fd;
                             };
                         vec![
                             DmabufPlane {
+                                fd: Arc::new(owned0),
                                 map: mmap0,
                                 stride: stride0,
                                 offset: offset0,
                             },
                             DmabufPlane {
+                                fd: Arc::new(owned1),
                                 map: mmap1,
                                 stride: stride1,
                                 offset: offset1,
@@ -3889,7 +4549,12 @@ let owned: OwnedFd = fd;
                             return;
                         }
                         let (owned, offset, stride, _mhi, _mlo, _idx) = planes.remove(0);
-                        let file = unsafe { File::from_raw_fd(owned.into_raw_fd()) };
+                        let dup_fd = unsafe { libc::dup(owned.as_fd().as_raw_fd()) };
+                        if dup_fd < 0 {
+                            resource.failed();
+                            return;
+                        }
+                        let file = unsafe { File::from_raw_fd(dup_fd) };
                         let needed = offset.saturating_add(stride.saturating_mul(height.max(0)));
                         let mmap =
                             match unsafe { MmapOptions::new().len(needed as usize).map(&file) } {
@@ -3900,6 +4565,7 @@ let owned: OwnedFd = fd;
                                 }
                             };
                         vec![DmabufPlane {
+                            fd: Arc::new(owned),
                             map: mmap,
                             stride,
                             offset,
@@ -3912,8 +4578,14 @@ let owned: OwnedFd = fd;
                         }
                         let (owned0, offset0, stride0, _mhi0, _mlo0, _idx0) = planes.remove(0);
                         let (owned1, offset1, stride1, _mhi1, _mlo1, _idx1) = planes.remove(0);
-                        let file0 = unsafe { File::from_raw_fd(owned0.into_raw_fd()) };
-                        let file1 = unsafe { File::from_raw_fd(owned1.into_raw_fd()) };
+                        let dup0 = unsafe { libc::dup(owned0.as_fd().as_raw_fd()) };
+                        let dup1 = unsafe { libc::dup(owned1.as_fd().as_raw_fd()) };
+                        if dup0 < 0 || dup1 < 0 {
+                            resource.failed();
+                            return;
+                        }
+                        let file0 = unsafe { File::from_raw_fd(dup0) };
+                        let file1 = unsafe { File::from_raw_fd(dup1) };
                         let needed0 = offset0.saturating_add(stride0.saturating_mul(height.max(0)));
                         let needed1 =
                             offset1.saturating_add(stride1.saturating_mul((height / 2).max(0)));
@@ -3935,11 +4607,13 @@ let owned: OwnedFd = fd;
                             };
                         vec![
                             DmabufPlane {
+                                fd: Arc::new(owned0),
                                 map: mmap0,
                                 stride: stride0,
                                 offset: offset0,
                             },
                             DmabufPlane {
+                                fd: Arc::new(owned1),
                                 map: mmap1,
                                 stride: stride1,
                                 offset: offset1,
@@ -4110,7 +4784,14 @@ impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for CompositorState {
         _dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-if let zwlr_layer_shell_v1::Request::GetLayerSurface { id, surface, output: _output, layer, namespace } = request {
+        if let zwlr_layer_shell_v1::Request::GetLayerSurface {
+            id,
+            surface,
+            output,
+            layer,
+            namespace,
+        } = request
+        {
             let wlr: zwlr_layer_surface_v1::ZwlrLayerSurfaceV1 = data_init.init(id, ());
             let kind = match layer {
                 WEnum::Value(zwlr_layer_shell_v1::Layer::Background) => AxiomLayerKind::Background,
@@ -4119,11 +4800,17 @@ if let zwlr_layer_shell_v1::Request::GetLayerSurface { id, surface, output: _out
                 WEnum::Value(zwlr_layer_shell_v1::Layer::Overlay) => AxiomLayerKind::Overlay,
                 _ => AxiomLayerKind::Top,
             };
+            // Map provided wl_output to our logical output index if present
+            let target_output = output.as_ref().and_then(|out_res| {
+                let rid = out_res.id().protocol_id();
+                state.output_resource_map.get(&rid).copied()
+            });
             let entry = LayerSurfaceEntry {
                 wl_surface: surface,
                 wlr_surface: wlr,
                 layer: kind,
                 namespace,
+                target_output,
                 anchors: 0,
                 margin_top: 0,
                 margin_right: 0,
@@ -4137,14 +4824,32 @@ if let zwlr_layer_shell_v1::Request::GetLayerSurface { id, surface, output: _out
                 axiom_id: None,
                 pending_buffer_id: None,
                 attach_offset: (0, 0),
-                last_geometry: crate::window::Rectangle { x: 0, y: 0, width: 0, height: 0 },
+                last_geometry: crate::window::Rectangle {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                },
             };
             state.layer_surfaces.push(entry);
-            // Send initial configure with a default size; client will ack then commit
-            let vw = 1920; let vh = 30;
+            // Send initial configure with a computed size from the chosen viewport
+            let (vw, vh) = {
+                let last = state.layer_surfaces.last().unwrap();
+                if let Some(idx) = last.target_output {
+                    let out = &state.logical_outputs[idx];
+                    (out.width.max(0), out.height.max(0))
+                } else {
+                    let (min_x, min_y, max_x, max_y) = state.outputs_bounds();
+                    let vw = (max_x - min_x).max(0.0) as i32;
+                    let vh = (max_y - min_y).max(0.0) as i32;
+                    (vw, vh)
+                }
+            };
+            let (_x0, _y0, cw, ch) =
+                compute_layer_geometry_from_fields((vw, vh), 0, (0, 0), (0, 0, 0, 0));
             let serial = state.next_serial();
             let last = state.layer_surfaces.last().unwrap();
-            last.wlr_surface.configure(serial, vw, vh);
+            last.wlr_surface.configure(serial, cw, ch);
             // Note: mapped set on first Commit after AckConfigure
         }
     }
@@ -4230,22 +4935,35 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for CompositorState
                 return;
             }
             // Compute geometry on an immutable snapshot, then send configure
-let (x, y, w, h, ws_id, _layer, _excl, _anchors) = {
+            let (gx, gy, w, h, ws_id, _layer, _excl, _anchors) = {
                 let entry = &state.layer_surfaces[idx];
-                // Use primary output size for viewport
-                let (vw, vh) = {
-                    let out = state
-                        .logical_outputs
-                        .iter()
-                        .find(|o| o.enabled)
-                        .unwrap_or(&state.logical_outputs[0]);
-                    (out.width, out.height)
+                // Determine viewport and origin: target output rect or union of all enabled outputs
+                let (origin_x, origin_y, vw, vh) = if let Some(oidx) = entry.target_output {
+                    if oidx < state.logical_outputs.len() {
+                        let out = &state.logical_outputs[oidx];
+                        (out.position.0, out.position.1, out.width, out.height)
+                    } else {
+                        let (min_x, min_y, max_x, max_y) = state.outputs_bounds();
+                        (
+                            min_x as i32,
+                            min_y as i32,
+                            (max_x - min_x) as i32,
+                            (max_y - min_y) as i32,
+                        )
+                    }
+                } else {
+                    let (min_x, min_y, max_x, max_y) = state.outputs_bounds();
+                    (
+                        min_x as i32,
+                        min_y as i32,
+                        (max_x - min_x) as i32,
+                        (max_y - min_y) as i32,
+                    )
                 };
-                let viewport = (vw, vh);
-                let (x, y, w, h) = compute_layer_geometry(viewport, entry);
+                let (x, y, w, h) = compute_layer_geometry((vw, vh), entry);
                 (
-                    x,
-                    y,
+                    x + origin_x,
+                    y + origin_y,
                     w,
                     h,
                     entry.wlr_surface.clone(),
@@ -4272,10 +4990,17 @@ let (x, y, w, h, ws_id, _layer, _excl, _anchors) = {
             let lid = state.layer_surfaces[idx].axiom_id.unwrap();
             crate::renderer::push_placeholder_quad(
                 lid,
-                (x as f32, y as f32),
+                (gx as f32, gy as f32),
                 (w as f32, h as f32),
                 z,
             );
+            // Update last_geometry for hit-testing
+            state.layer_surfaces[idx].last_geometry = crate::window::Rectangle {
+                x: gx,
+                y: gy,
+                width: w,
+                height: h,
+            };
             let serial = state.next_serial();
             ws_id.configure(serial, w, h);
         }
@@ -4331,6 +5056,164 @@ fn handle_events_inline(
                         0.9990,
                     );
                 }
+                // If this is a parent surface, flush sync subsurfaces with pending buffers
+                {
+                    let parent_sid = surface.id().protocol_id();
+                    if let Some(children) = state.parent_children.get(&parent_sid).cloned() {
+                        let mut to_process: Vec<u32> = Vec::new();
+                        for csid in children {
+                            if let Some(entry) = state.subsurfaces.get(&csid) {
+                                if entry.sync {
+                                    if let Some(pbid) = state
+                                        .subsurfaces
+                                        .get(&csid)
+                                        .and_then(|e| e.pending_buffer_id)
+                                    {
+                                        let _ = pbid; // indicates pending
+                                        to_process.push(csid);
+                                    }
+                                }
+                            }
+                        }
+                        for child_sid in to_process {
+                            if let Some(entry) = state.subsurfaces.get(&child_sid).cloned() {
+                                // Find parent rect
+                                let mut parent_axiom_id: Option<u64> = None;
+                                let mut parent_rect: Option<crate::window::Rectangle> = None;
+                                // Try window
+                                if let Some(w) = state.windows.iter().find(|w| {
+                                    w.wl_surface.as_ref().map(|s| s.id().protocol_id())
+                                        == Some(parent_sid)
+                                }) {
+                                    parent_axiom_id = w.axiom_id;
+                                }
+                                // Try layer
+                                if parent_axiom_id.is_none() {
+                                    if let Some(e) = state
+                                        .layer_surfaces
+                                        .iter()
+                                        .find(|e| e.wl_surface.id().protocol_id() == parent_sid)
+                                    {
+                                        parent_axiom_id = e.axiom_id;
+                                    }
+                                }
+                                // Try X11 parent
+                                if parent_axiom_id.is_none() {
+                                    if let Some(xe) = state
+                                        .x11_surfaces
+                                        .iter()
+                                        .find(|e| e.wl_surface.id().protocol_id() == parent_sid)
+                                    {
+                                        parent_axiom_id = xe.axiom_id;
+                                    }
+                                }
+                                if let Some(pid) = parent_axiom_id {
+                                    parent_rect = state.last_layouts.get(&pid).cloned();
+                                }
+                                if let Some(prect) = parent_rect {
+                                    let axid = *state
+                                        .subsurface_axiom_ids
+                                        .entry(child_sid)
+                                        .or_insert(2_000_000u64 + child_sid as u64);
+                                    let gx =
+                                        (prect.x + entry.position.0 + entry.attach_offset.0) as f32;
+                                    let gy =
+                                        (prect.y + entry.position.1 + entry.attach_offset.1) as f32;
+                                    state.last_layouts.entry(axid).or_insert_with(|| {
+                                        crate::renderer::push_placeholder_quad(
+                                            axid,
+                                            (gx, gy),
+                                            (0.0, 0.0),
+                                            1.0,
+                                        );
+                                        crate::window::Rectangle {
+                                            x: gx as i32,
+                                            y: gy as i32,
+                                            width: 0,
+                                            height: 0,
+                                        }
+                                    });
+                                    if let Some(buf_id) = state
+                                        .subsurfaces
+                                        .get_mut(&child_sid)
+                                        .and_then(|e| e.pending_buffer_id.take())
+                                    {
+                                        if let Some(rec) = state.buffers.get(&buf_id).cloned() {
+                                            let vp = state.viewport_map.get(&child_sid).cloned();
+                                            if let Some((data, w, h)) =
+                                                process_with_viewport(&rec, vp.as_ref())
+                                            {
+                                                crate::renderer::push_placeholder_quad(
+                                                    axid,
+                                                    (gx, gy),
+                                                    (w as f32, h as f32),
+                                                    1.0,
+                                                );
+                                                state.last_layouts.insert(
+                                                    axid,
+                                                    crate::window::Rectangle {
+                                                        x: gx as i32,
+                                                        y: gy as i32,
+                                                        width: w,
+                                                        height: h,
+                                                    },
+                                                );
+                                                if let Some(mut damages) =
+                                                    state.damage_map.remove(&child_sid)
+                                                {
+                                                    let norm =
+                                                        CompositorServer::normalize_damage_list(
+                                                            &mut damages[..],
+                                                            w as i32,
+                                                            h as i32,
+                                                        );
+                                                    // Add specific damage regions for subsurface
+                                                    for (dxu, dyu, dwu, dhu) in &norm {
+                                                        crate::renderer::add_window_damage_region(
+                                                            axid,
+                                                            *dxu as i32,
+                                                            *dyu as i32,
+                                                            *dwu,
+                                                            *dhu,
+                                                        );
+                                                    }
+                                                    for (dxu, dyu, dwu, dhu) in norm {
+                                                        let mut bytes = Vec::with_capacity(
+                                                            (dwu * dhu * 4) as usize,
+                                                        );
+                                                        for row in 0..dhu {
+                                                            let src_off = (((dyu + row) * w + dxu)
+                                                                * 4)
+                                                                as usize;
+                                                            let end = src_off + (dwu * 4) as usize;
+                                                            bytes.extend_from_slice(
+                                                                &data[src_off..end],
+                                                            );
+                                                        }
+                                                        crate::renderer::queue_texture_update_region(
+                                                            axid,
+                                                            w,
+                                                            h,
+                                                            (dxu, dyu, dwu, dhu),
+                                                            bytes,
+                                                        );
+                                                    }
+                                                } else {
+                                                    // No specific damage, mark full subsurface as damaged
+                                                    crate::renderer::mark_window_damaged(axid);
+                                                    crate::renderer::queue_texture_update(
+                                                        axid, data, w, h,
+                                                    );
+                                                }
+                                                rec.buffer.release();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 // Locate window entry by surface
                 if let Some(idx) = state
                     .windows
@@ -4366,6 +5249,8 @@ fn handle_events_inline(
                             let mut wsl = ws.write();
                             wsl.add_window(new_id);
                         }
+                        // Add window to Z-order stack for rendering
+                        crate::renderer::add_window_to_stack(new_id);
                         // Focus only toplevels on map; popups should not steal keyboard focus automatically
                         if !is_popup {
                             let _ = wm.write().focus_window(new_id);
@@ -4373,19 +5258,24 @@ fn handle_events_inline(
                         let previous_focus = state.focused_window_id.take();
                         if !is_popup {
                             state.focused_window_id = Some(new_id);
+                            // Raise newly focused window to top of Z-order
+                            crate::renderer::raise_window_to_top(new_id);
                         }
                         // Register window with decoration manager and sync focus
                         {
                             // Determine SSD preference based on current mode or policy
                             let default_ssd = !state.force_client_side_decorations;
-                            let prefers_ssd = if let Some(tl) = state.windows[idx].xdg_toplevel.as_ref() {
-                                let tlid = tl.id().protocol_id();
-                                if let Some(m) = state.decoration_modes.get(&tlid) {
-                                    matches!(m, zxdg_toplevel_decoration_v1::Mode::ServerSide)
+                            let prefers_ssd =
+                                if let Some(tl) = state.windows[idx].xdg_toplevel.as_ref() {
+                                    let tlid = tl.id().protocol_id();
+                                    if let Some(m) = state.decoration_modes.get(&tlid) {
+                                        matches!(m, zxdg_toplevel_decoration_v1::Mode::ServerSide)
+                                    } else {
+                                        default_ssd
+                                    }
                                 } else {
                                     default_ssd
-                                }
-                            } else { default_ssd };
+                                };
                             let mut dm = state.decoration_manager_handle.write();
                             dm.add_window(new_id, title.clone(), prefers_ssd);
                             if !is_popup {
@@ -4435,7 +5325,11 @@ fn handle_events_inline(
                                     .and_then(|w| w.wl_surface.clone())
                             });
                             // Switch focus to this new surface
-                            switch_focus_surfaces_inline(state, prev_surface.as_ref(), Some(&surface));
+                            switch_focus_surfaces_inline(
+                                state,
+                                prev_surface.as_ref(),
+                                Some(&surface),
+                            );
                         }
                         apply_layouts_inline(state, wm, ws)?;
                     }
@@ -4448,7 +5342,7 @@ fn handle_events_inline(
                         if let (Some(ax_id), Some(buf_id)) =
                             (win.axiom_id, win.pending_buffer_id.take())
                         {
-if let Some(rec) = state.buffers.get(&buf_id).cloned() {
+                            if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                                 let sid = surface.id().protocol_id();
                                 let vp = state.viewport_map.get(&sid).cloned();
                                 if let Some((data, w, h)) = process_with_viewport(&rec, vp.as_ref())
@@ -4456,11 +5350,27 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                                     let sid = surface.id().protocol_id();
                                     if vp.is_none() {
                                         if let Some(mut damages) = state.damage_map.remove(&sid) {
-                                            let norm = CompositorServer::normalize_damage_list(&mut damages[..], w as i32, h as i32);
+                                            let norm = CompositorServer::normalize_damage_list(
+                                                &mut damages[..],
+                                                w as i32,
+                                                h as i32,
+                                            );
+                                            // Add specific damage regions to frame damage tracker
+                                            for (dxu, dyu, dwu, dhu) in &norm {
+                                                crate::renderer::add_window_damage_region(
+                                                    ax_id,
+                                                    *dxu as i32,
+                                                    *dyu as i32,
+                                                    *dwu,
+                                                    *dhu,
+                                                );
+                                            }
                                             for (dxu, dyu, dwu, dhu) in norm {
-                                                let mut bytes = Vec::with_capacity((dwu * dhu * 4) as usize);
+                                                let mut bytes =
+                                                    Vec::with_capacity((dwu * dhu * 4) as usize);
                                                 for row in 0..dhu {
-                                                    let src_off = (((dyu + row) * w + dxu) * 4) as usize;
+                                                    let src_off =
+                                                        (((dyu + row) * w + dxu) * 4) as usize;
                                                     let end = src_off + (dwu * 4) as usize;
                                                     bytes.extend_from_slice(&data[src_off..end]);
                                                 }
@@ -4473,11 +5383,15 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                                                 );
                                             }
                                         } else {
+                                            // No specific damage regions, mark entire window as damaged
+                                            crate::renderer::mark_window_damaged(ax_id);
                                             crate::renderer::queue_texture_update(
                                                 ax_id, data, w, h,
                                             );
                                         }
                                     } else {
+                                        // Viewport scaling applied, mark full window as damaged
+                                        crate::renderer::mark_window_damaged(ax_id);
                                         crate::renderer::queue_texture_update(ax_id, data, w, h);
                                     }
                                     rec.buffer.release();
@@ -4507,19 +5421,45 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                     if configured.is_some() && !mapped {
                         // Map layer: assign id and push placeholder
                         let (x, y, w, h, layer) = {
+                            // Compute viewport based on target output or union of outputs without holding a mutable borrow
+                            let target_opt = state.layer_surfaces[lidx].target_output;
+                            let (origin_x, origin_y, vw, vh) = if let Some(oidx) = target_opt {
+                                if oidx < state.logical_outputs.len() {
+                                    let out = &state.logical_outputs[oidx];
+                                    (out.position.0, out.position.1, out.width, out.height)
+                                } else {
+                                    let (min_x, min_y, max_x, max_y) = state.outputs_bounds();
+                                    (
+                                        min_x as i32,
+                                        min_y as i32,
+                                        (max_x - min_x) as i32,
+                                        (max_y - min_y) as i32,
+                                    )
+                                }
+                            } else {
+                                let (min_x, min_y, max_x, max_y) = state.outputs_bounds();
+                                (
+                                    min_x as i32,
+                                    min_y as i32,
+                                    (max_x - min_x) as i32,
+                                    (max_y - min_y) as i32,
+                                )
+                            };
                             let e = &mut state.layer_surfaces[lidx];
                             if e.axiom_id.is_none() {
                                 e.axiom_id = Some(1_000_000u64 + lidx as u64);
                             }
-                            let geom = compute_layer_geometry((1920, 1080), e);
+                            let geom = compute_layer_geometry((vw, vh), e);
+                            let gx = geom.0 + origin_x;
+                            let gy = geom.1 + origin_y;
                             e.last_geometry = crate::window::Rectangle {
-                                x: geom.0,
-                                y: geom.1,
+                                x: gx,
+                                y: gy,
                                 width: geom.2,
                                 height: geom.3,
                             };
                             e.mapped = true;
-                            (geom.0, geom.1, geom.2, geom.3, e.layer)
+                            (gx, gy, geom.2, geom.3, e.layer)
                         };
                         let z = match layer {
                             AxiomLayerKind::Background => 0.0,
@@ -4548,9 +5488,24 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                             if let Some((data, w, h)) = process_with_viewport(&rec, vp.as_ref()) {
                                 let sid2 = sid;
                                 if let Some(mut damages) = state.damage_map.remove(&sid2) {
-                                    let norm = CompositorServer::normalize_damage_list(&mut damages[..], w as i32, h as i32);
+                                    let norm = CompositorServer::normalize_damage_list(
+                                        &mut damages[..],
+                                        w as i32,
+                                        h as i32,
+                                    );
+                                    // Add specific damage regions for layer surface
+                                    for (dxu, dyu, dwu, dhu) in &norm {
+                                        crate::renderer::add_window_damage_region(
+                                            axid,
+                                            *dxu as i32,
+                                            *dyu as i32,
+                                            *dwu,
+                                            *dhu,
+                                        );
+                                    }
                                     for (dxu, dyu, dwu, dhu) in norm {
-                                        let mut bytes = Vec::with_capacity((dwu * dhu * 4) as usize);
+                                        let mut bytes =
+                                            Vec::with_capacity((dwu * dhu * 4) as usize);
                                         for row in 0..dhu {
                                             let src_off = (((dyu + row) * w + dxu) * 4) as usize;
                                             let end = src_off + (dwu * 4) as usize;
@@ -4565,9 +5520,140 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                                         );
                                     }
                                 } else {
+                                    // No specific damage, mark full layer surface as damaged
+                                    crate::renderer::mark_window_damaged(axid);
                                     crate::renderer::queue_texture_update(axid, data, w, h);
                                 }
                                 rec.buffer.release();
+                            }
+                        }
+                    }
+                } else if let Some(ss_entry) =
+                    state.subsurfaces.get(&surface.id().protocol_id()).cloned()
+                {
+                    // Subsurface commit: if sync, defer upload to parent commit; if desync, upload now
+                    let child_sid = surface.id().protocol_id();
+                    if ss_entry.sync {
+                        // Ensure pending buffer is recorded; do not upload yet
+                        // Nothing else to do here; handled on parent commit
+                    } else {
+                        // Locate parent geometry
+                        let parent_sid = ss_entry.parent.id().protocol_id();
+                        let mut parent_axiom_id: Option<u64> = None;
+                        let mut parent_rect: Option<crate::window::Rectangle> = None;
+                        // Try window
+                        if let Some(w) = state.windows.iter().find(|w| {
+                            w.wl_surface.as_ref().map(|s| s.id().protocol_id()) == Some(parent_sid)
+                        }) {
+                            parent_axiom_id = w.axiom_id;
+                        }
+                        // Try layer
+                        if parent_axiom_id.is_none() {
+                            if let Some(e) = state
+                                .layer_surfaces
+                                .iter()
+                                .find(|e| e.wl_surface.id().protocol_id() == parent_sid)
+                            {
+                                parent_axiom_id = e.axiom_id;
+                            }
+                        }
+                        // Try X11 parent
+                        if parent_axiom_id.is_none() {
+                            if let Some(xe) = state
+                                .x11_surfaces
+                                .iter()
+                                .find(|e| e.wl_surface.id().protocol_id() == parent_sid)
+                            {
+                                parent_axiom_id = xe.axiom_id;
+                            }
+                        }
+                        if let Some(pid) = parent_axiom_id {
+                            parent_rect = state.last_layouts.get(&pid).cloned();
+                        }
+                        if let Some(prect) = parent_rect {
+                            // Ensure axiom id for subsurface
+                            let axid = *state
+                                .subsurface_axiom_ids
+                                .entry(child_sid)
+                                .or_insert(2_000_000u64 + child_sid as u64);
+                            // Determine global position
+                            let gx =
+                                (prect.x + ss_entry.position.0 + ss_entry.attach_offset.0) as f32;
+                            let gy =
+                                (prect.y + ss_entry.position.1 + ss_entry.attach_offset.1) as f32;
+                            // Map placeholder if first time
+                            state.last_layouts.entry(axid).or_insert_with(|| {
+                                crate::renderer::push_placeholder_quad(
+                                    axid,
+                                    (gx, gy),
+                                    (0.0, 0.0),
+                                    1.0,
+                                );
+                                crate::window::Rectangle {
+                                    x: gx as i32,
+                                    y: gy as i32,
+                                    width: 0,
+                                    height: 0,
+                                }
+                            });
+                            // Upload buffer if pending
+                            if let Some(buf_id) = state
+                                .subsurfaces
+                                .get_mut(&child_sid)
+                                .and_then(|e| e.pending_buffer_id.take())
+                            {
+                                if let Some(rec) = state.buffers.get(&buf_id).cloned() {
+                                    let vp = state.viewport_map.get(&child_sid).cloned();
+                                    if let Some((data, w, h)) =
+                                        process_with_viewport(&rec, vp.as_ref())
+                                    {
+                                        // Update placeholder and layout rect size
+                                        crate::renderer::push_placeholder_quad(
+                                            axid,
+                                            (gx, gy),
+                                            (w as f32, h as f32),
+                                            1.0,
+                                        );
+                                        state.last_layouts.insert(
+                                            axid,
+                                            crate::window::Rectangle {
+                                                x: gx as i32,
+                                                y: gy as i32,
+                                                width: w,
+                                                height: h,
+                                            },
+                                        );
+                                        if let Some(mut damages) =
+                                            state.damage_map.remove(&child_sid)
+                                        {
+                                            let norm = CompositorServer::normalize_damage_list(
+                                                &mut damages[..],
+                                                w as i32,
+                                                h as i32,
+                                            );
+                                            for (dxu, dyu, dwu, dhu) in norm {
+                                                let mut bytes =
+                                                    Vec::with_capacity((dwu * dhu * 4) as usize);
+                                                for row in 0..dhu {
+                                                    let src_off =
+                                                        (((dyu + row) * w + dxu) * 4) as usize;
+                                                    let end = src_off + (dwu * 4) as usize;
+                                                    bytes.extend_from_slice(&data[src_off..end]);
+                                                }
+                                                crate::renderer::queue_texture_update_region(
+                                                    axid,
+                                                    w,
+                                                    h,
+                                                    (dxu, dyu, dwu, dhu),
+                                                    bytes,
+                                                );
+                                            }
+                                        } else {
+                                            crate::renderer::queue_texture_update(axid, data, w, h);
+                                        }
+                                        rec.buffer.release();
+                                    }
+                                }
                             }
                         }
                     }
@@ -4593,13 +5679,9 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                             e.axiom_id = Some(new_id);
                         }
                         let serial = state.next_serial();
-                        for kb in &state.keyboards {
-                            kb.enter(serial, &surface, vec![]);
-                        }
+                        send_keyboard_enter_safe(&state, &surface, serial);
                         let serial = state.next_serial();
-                        for ptr in &state.pointers {
-                            ptr.enter(serial, &surface, 0.0, 0.0);
-                        }
+                        send_pointer_enter_safe(&state, &surface, serial, 0.0, 0.0);
                         apply_layouts_inline(state, wm, ws)?;
                     }
                     if let Some(buf_id) = { state.x11_surfaces[xidx].pending_buffer_id.take() } {
@@ -4608,12 +5690,28 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                             let vp = state.viewport_map.get(&sid).cloned();
                             if let Some((data, w, h)) = process_with_viewport(&rec, vp.as_ref()) {
                                 if let Some(axid) = state.x11_surfaces[xidx].axiom_id {
-                                    if let Some(mut damages) = state.damage_map.remove(&sid) {
-                                        let norm = CompositorServer::normalize_damage_list(&mut damages[..], w as i32, h as i32);
+                            if let Some(mut damages) = state.damage_map.remove(&sid) {
+                                        let norm = CompositorServer::normalize_damage_list(
+                                            &mut damages[..],
+                                            w as i32,
+                                            h as i32,
+                                        );
+                                        // Add specific damage regions for X11 surface
+                                        for (dxu, dyu, dwu, dhu) in &norm {
+                                            crate::renderer::add_window_damage_region(
+                                                axid,
+                                                *dxu as i32,
+                                                *dyu as i32,
+                                                *dwu,
+                                                *dhu,
+                                            );
+                                        }
                                         for (dxu, dyu, dwu, dhu) in norm {
-                                            let mut bytes = Vec::with_capacity((dwu * dhu * 4) as usize);
+                                            let mut bytes =
+                                                Vec::with_capacity((dwu * dhu * 4) as usize);
                                             for row in 0..dhu {
-                                                let src_off = (((dyu + row) * w + dxu) * 4) as usize;
+                                                let src_off =
+                                                    (((dyu + row) * w + dxu) * 4) as usize;
                                                 let end = src_off + (dwu * 4) as usize;
                                                 bytes.extend_from_slice(&data[src_off..end]);
                                             }
@@ -4626,6 +5724,8 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                                             );
                                         }
                                     } else {
+                                        // No specific damage, mark full X11 surface as damaged
+                                        crate::renderer::mark_window_damaged(axid);
                                         crate::renderer::queue_texture_update(axid, data, w, h);
                                     }
                                 }
@@ -4636,6 +5736,35 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                 }
             }
             ServerEvent::Destroy { surface } => {
+                let sid = surface.id().protocol_id();
+                // Subsurface child destroyed?
+                if state.subsurfaces.contains_key(&sid) {
+                    if let Some(ax) = state.subsurface_axiom_ids.remove(&sid) {
+                        crate::renderer::remove_placeholder_quad(ax);
+                        state.last_layouts.remove(&ax);
+                    }
+                    if let Some(parent_sid) = state
+                        .subsurfaces
+                        .get(&sid)
+                        .map(|e| e.parent.id().protocol_id())
+                    {
+                        if let Some(list) = state.parent_children.get_mut(&parent_sid) {
+                            list.retain(|&c| c != sid);
+                        }
+                    }
+                    state.subsurfaces.remove(&sid);
+                    continue;
+                }
+                // Parent destroyed? Remove all children under this parent
+                if let Some(children) = state.parent_children.remove(&sid) {
+                    for csid in children {
+                        if let Some(ax) = state.subsurface_axiom_ids.remove(&csid) {
+                            crate::renderer::remove_placeholder_quad(ax);
+                            state.last_layouts.remove(&ax);
+                        }
+                        state.subsurfaces.remove(&csid);
+                    }
+                }
                 if let Some(idx) = state
                     .windows
                     .iter()
@@ -4654,7 +5783,7 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                             let mut wml = wm.write();
                             let _ = wml.remove_window(id);
                         }
-                    if let Some(new_focus_id) =
+                        if let Some(new_focus_id) =
                             state.windows.iter().rev().find_map(|w| w.axiom_id)
                         {
                             let _ = wm.write().focus_window(new_focus_id);
@@ -4672,7 +5801,9 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                             // Clear focus on the destroyed surface and enter new
                             switch_focus_surfaces_inline(state, Some(&surface), new_surf.as_ref());
                         }
+                        // Remove window from rendering system
                         crate::renderer::remove_placeholder_quad(id);
+                        crate::renderer::remove_window_from_stack(id);
                         apply_layouts_inline(state, wm, ws)?;
                     }
                     // Discard pending presentation feedbacks for this surface
@@ -4692,7 +5823,10 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                         if state.focused_window_id == Some(id) {
                             state.focused_window_id = None;
                             // Clear decoration focus too
-                            state.decoration_manager_handle.write().set_window_focus(id, false);
+                            state
+                                .decoration_manager_handle
+                                .write()
+                                .set_window_focus(id, false);
                         }
                         // Remove from decoration manager
                         state.decoration_manager_handle.write().remove_window(id);
@@ -4704,7 +5838,9 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                             let mut wml = wm.write();
                             let _ = wml.remove_window(id);
                         }
+                        // Remove X11 window from rendering system
                         crate::renderer::remove_placeholder_quad(id);
+                        crate::renderer::remove_window_from_stack(id);
                         apply_layouts_inline(state, wm, ws)?;
                     }
                     let sid = surface.id().protocol_id();
@@ -4749,7 +5885,9 @@ if let Some(rec) = state.buffers.get(&buf_id).cloned() {
                 if let Some(ax_id) = state
                     .windows
                     .iter()
-                    .find(|w| w.xdg_toplevel.as_ref().map(|t| t.id().protocol_id()) == Some(toplevel_id))
+                    .find(|w| {
+                        w.xdg_toplevel.as_ref().map(|t| t.id().protocol_id()) == Some(toplevel_id)
+                    })
                     .and_then(|w| w.axiom_id)
                 {
                     let decorated = matches!(mode, zxdg_toplevel_decoration_v1::Mode::ServerSide);
@@ -4826,75 +5964,82 @@ fn apply_layouts_inline(
             // If window uses server-side decorations, push overlay rects for titlebar and borders
             {
                 let dm = state.decoration_manager_handle.read();
-                if let Ok(deco) = dm.render_decorations(id, rect.clone(), None) {
-                    match deco {
-                        crate::decoration::DecorationRenderData::ServerSide { titlebar_rect, titlebar_bg, border_width, border_color, corner_radius, title, text_color, font_size, .. } => {
-                            // Titlebar
-                            if titlebar_rect.height > 0 && titlebar_rect.width > 0 {
-                                crate::renderer::queue_overlay_fill_rounded(
-                                    id,
-                                    titlebar_rect.x as f32,
-                                    titlebar_rect.y as f32,
-                                    titlebar_rect.width as f32,
-                                    titlebar_rect.height as f32,
-                                    titlebar_bg,
-                                    corner_radius,
-                                );
-                                // Title text (bitmap 5x7), centered vertically in titlebar
-                                draw_title_text_overlay(
-                                    id,
-                                    &title,
-                                    (titlebar_rect.x + 10) as f32, // left padding
-                                    (titlebar_rect.y + (titlebar_rect.height as i32 - font_size as i32) / 2).max(titlebar_rect.y) as f32,
-                                    font_size,
-                                    text_color,
-                                );
-                            }
-                            // Borders (skip top if titlebar present)
-                            let bw = border_width as i32;
-                            if bw > 0 {
-                                let rgba = border_color;
-                                // Left border
-                                crate::renderer::queue_overlay_fill(
-                                    id,
-                                    rect.x as f32,
-                                    rect.y as f32,
-                                    bw.max(1) as f32,
-                                    rect.height as f32,
-                                    rgba,
-                                );
-                                // Right border
-                                crate::renderer::queue_overlay_fill(
-                                    id,
-                                    (rect.x + rect.width as i32 - bw.max(1)) as f32,
-                                    rect.y as f32,
-                                    bw.max(1) as f32,
-                                    rect.height as f32,
-                                    rgba,
-                                );
-                                // Bottom border
-                                crate::renderer::queue_overlay_fill(
-                                    id,
-                                    rect.x as f32,
-                                    (rect.y + rect.height as i32 - bw.max(1)) as f32,
-                                    rect.width as f32,
-                                    bw.max(1) as f32,
-                                    rgba,
-                                );
-                                // Top border only if no titlebar
-                                if titlebar_rect.height == 0 {
-                                    crate::renderer::queue_overlay_fill(
-                                        id,
-                                        rect.x as f32,
-                                        rect.y as f32,
-                                        rect.width as f32,
-                                        bw.max(1) as f32,
-                                        rgba,
-                                    );
-                                }
-                            }
+                if let Ok(crate::decoration::DecorationRenderData::ServerSide {
+                    titlebar_rect,
+                    titlebar_bg,
+                    border_width,
+                    border_color,
+                    corner_radius,
+                    title,
+                    text_color,
+                    font_size,
+                    ..
+                }) = dm.render_decorations(id, rect.clone(), None)
+                {
+                    // Titlebar
+                    if titlebar_rect.height > 0 && titlebar_rect.width > 0 {
+                        crate::renderer::queue_overlay_fill_rounded(
+                            id,
+                            titlebar_rect.x as f32,
+                            titlebar_rect.y as f32,
+                            titlebar_rect.width as f32,
+                            titlebar_rect.height as f32,
+                            titlebar_bg,
+                            corner_radius,
+                        );
+                        // Title text (bitmap 5x7), centered vertically in titlebar
+                        draw_title_text_overlay(
+                            id,
+                            &title,
+                            (titlebar_rect.x + 10) as f32, // left padding
+                            (titlebar_rect.y + (titlebar_rect.height as i32 - font_size as i32) / 2)
+                                .max(titlebar_rect.y) as f32,
+                            font_size,
+                            text_color,
+                        );
+                    }
+                    // Borders (skip top if titlebar present)
+                    let bw = border_width as i32;
+                    if bw > 0 {
+                        let rgba = border_color;
+                        // Left border
+                        crate::renderer::queue_overlay_fill(
+                            id,
+                            rect.x as f32,
+                            rect.y as f32,
+                            bw.max(1) as f32,
+                            rect.height as f32,
+                            rgba,
+                        );
+                        // Right border
+                        crate::renderer::queue_overlay_fill(
+                            id,
+                            (rect.x + rect.width as i32 - bw.max(1)) as f32,
+                            rect.y as f32,
+                            bw.max(1) as f32,
+                            rect.height as f32,
+                            rgba,
+                        );
+                        // Bottom border
+                        crate::renderer::queue_overlay_fill(
+                            id,
+                            rect.x as f32,
+                            (rect.y + rect.height as i32 - bw.max(1)) as f32,
+                            rect.width as f32,
+                            bw.max(1) as f32,
+                            rgba,
+                        );
+                        // Top border only if no titlebar
+                        if titlebar_rect.height == 0 {
+                            crate::renderer::queue_overlay_fill(
+                                id,
+                                rect.x as f32,
+                                rect.y as f32,
+                                rect.width as f32,
+                                bw.max(1) as f32,
+                                rgba,
+                            );
                         }
-                        _ => {}
                     }
                 }
             }
@@ -5269,6 +6414,39 @@ impl Dispatch<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1, ()> for Com
 }
 
 // Helpers
+pub fn compute_outputs_bounds_from(outputs: &[LogicalOutput]) -> (f64, f64, f64, f64) {
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut max_y = i32::MIN;
+    for out in outputs {
+        if !out.enabled {
+            continue;
+        }
+        let x0 = out.position.0;
+        let y0 = out.position.1;
+        let x1 = x0 + out.width;
+        let y1 = y0 + out.height;
+        if x0 < min_x {
+            min_x = x0;
+        }
+        if y0 < min_y {
+            min_y = y0;
+        }
+        if x1 > max_x {
+            max_x = x1;
+        }
+        if y1 > max_y {
+            max_y = y1;
+        }
+    }
+    if min_x > max_x {
+        (0.0, 0.0, 0.0, 0.0)
+    } else {
+        (min_x as f64, min_y as f64, max_x as f64, max_y as f64)
+    }
+}
+
 impl CompositorState {
     fn next_serial(&mut self) -> u32 {
         let s = self.serial_counter;
@@ -5277,7 +6455,7 @@ impl CompositorState {
     }
 
     // Compute the bounding rectangle across all enabled outputs (global space)
-    fn outputs_bounds(&self) -> (f64, f64, f64, f64) {
+    pub fn outputs_bounds(&self) -> (f64, f64, f64, f64) {
         let mut min_x = i32::MAX;
         let mut min_y = i32::MAX;
         let mut max_x = i32::MIN;
@@ -5343,14 +6521,84 @@ fn recompute_workspace_reserved_insets(state: &mut CompositorState) {
         let a_top = (anchors & u32::from(zwlr_layer_surface_v1::Anchor::Top)) != 0;
         let a_bottom = (anchors & u32::from(zwlr_layer_surface_v1::Anchor::Bottom)) != 0;
 
-        if a_top && !a_bottom { top = top.max(excl); }
-        if a_bottom && !a_top { bottom = bottom.max(excl); }
-        if a_left && !a_right { left = left.max(excl); }
-        if a_right && !a_left { right = right.max(excl); }
+        if a_top && !a_bottom {
+            top = top.max(excl);
+        }
+        if a_bottom && !a_top {
+            bottom = bottom.max(excl);
+        }
+        if a_left && !a_right {
+            left = left.max(excl);
+        }
+        if a_right && !a_left {
+            right = right.max(excl);
+        }
     }
 
     let mut ws_guard = state.workspace_manager_handle.write();
     ws_guard.set_reserved_insets(top, right, bottom, left);
+}
+
+// Helper: safely send keyboard enter to a surface (only to keyboards from same client)
+fn send_keyboard_enter_safe(state: &CompositorState, surface: &wl_surface::WlSurface, serial: u32) {
+    if let Some(surface_client) = surface.client() {
+        let surface_client_id = surface_client.id();
+        for kb in &state.keyboards {
+            if let Some(kb_client) = kb.client() {
+                if kb_client.id() == surface_client_id {
+                    kb.enter(serial, surface, vec![]);
+                }
+            }
+        }
+    }
+}
+
+// Helper: safely send keyboard leave to a surface (only to keyboards from same client)
+fn send_keyboard_leave_safe(state: &CompositorState, surface: &wl_surface::WlSurface, serial: u32) {
+    if let Some(surface_client) = surface.client() {
+        let surface_client_id = surface_client.id();
+        for kb in &state.keyboards {
+            if let Some(kb_client) = kb.client() {
+                if kb_client.id() == surface_client_id {
+                    kb.leave(serial, surface);
+                }
+            }
+        }
+    }
+}
+
+// Helper: safely send pointer enter to a surface (only to pointers from same client)
+fn send_pointer_enter_safe(
+    state: &CompositorState,
+    surface: &wl_surface::WlSurface,
+    serial: u32,
+    x: f64,
+    y: f64,
+) {
+    if let Some(surface_client) = surface.client() {
+        let surface_client_id = surface_client.id();
+        for ptr in &state.pointers {
+            if let Some(ptr_client) = ptr.client() {
+                if ptr_client.id() == surface_client_id {
+                    ptr.enter(serial, surface, x, y);
+                }
+            }
+        }
+    }
+}
+
+// Helper: safely send pointer leave to a surface (only to pointers from same client)
+fn send_pointer_leave_safe(state: &CompositorState, surface: &wl_surface::WlSurface, serial: u32) {
+    if let Some(surface_client) = surface.client() {
+        let surface_client_id = surface_client.id();
+        for ptr in &state.pointers {
+            if let Some(ptr_client) = ptr.client() {
+                if ptr_client.id() == surface_client_id {
+                    ptr.leave(serial, surface);
+                }
+            }
+        }
+    }
 }
 
 // Unified focus transition helper: leave previous, enter next for keyboards and pointers
@@ -5361,15 +6609,15 @@ fn switch_focus_surfaces_inline(
 ) {
     if let Some(ps) = prev {
         let serial = state.next_serial();
-        for kb in &state.keyboards { kb.leave(serial, ps); }
+        send_keyboard_leave_safe(state, ps, serial);
         let serial = state.next_serial();
-        for ptr in &state.pointers { ptr.leave(serial, ps); }
+        send_pointer_leave_safe(state, ps, serial);
     }
     if let Some(ns) = next {
         let serial = state.next_serial();
-        for kb in &state.keyboards { kb.enter(serial, ns, vec![]); }
+        send_keyboard_enter_safe(state, ns, serial);
         let serial = state.next_serial();
-        for ptr in &state.pointers { ptr.enter(serial, ns, 0.0, 0.0); }
+        send_pointer_enter_safe(state, ns, serial, 0.0, 0.0);
     }
 }
 
@@ -5656,8 +6904,16 @@ fn compute_layer_geometry_from_fields(
 ) -> (i32, i32, u32, u32) {
     let (vw, vh) = viewport;
     // Determine base size from desired size and anchors. A size of 0 means 'auto'.
-    let mut w = if desired_size.0 > 0 { desired_size.0 } else { 0 };
-    let mut h = if desired_size.1 > 0 { desired_size.1 } else { 0 };
+    let mut w = if desired_size.0 > 0 {
+        desired_size.0
+    } else {
+        0
+    };
+    let mut h = if desired_size.1 > 0 {
+        desired_size.1
+    } else {
+        0
+    };
 
     let anchor_left = (anchors & u32::from(zwlr_layer_surface_v1::Anchor::Left)) != 0;
     let anchor_right = (anchors & u32::from(zwlr_layer_surface_v1::Anchor::Right)) != 0;
@@ -5665,15 +6921,35 @@ fn compute_layer_geometry_from_fields(
     let anchor_bottom = (anchors & u32::from(zwlr_layer_surface_v1::Anchor::Bottom)) != 0;
 
     // Auto-extend to full dimension when anchored to both opposing edges
-    if w == 0 && anchor_left && anchor_right { w = vw; }
-    if h == 0 && anchor_top && anchor_bottom { h = vh; }
+    if w == 0 && anchor_left && anchor_right {
+        w = vw;
+    }
+    if h == 0 && anchor_top && anchor_bottom {
+        h = vh;
+    }
     // Default fallback sizes when still unspecified
-    if w == 0 { w = vw; }
-    if h == 0 { h = 30; }
+    if w == 0 {
+        w = vw;
+    }
+    if h == 0 {
+        h = 30;
+    }
 
     // Position according to anchors; center along unconstrained axis
-    let mut x = if anchor_left { 0 } else if anchor_right { vw - w } else { (vw - w) / 2 };
-    let mut y = if anchor_top { 0 } else if anchor_bottom { vh - h } else { (vh - h) / 2 };
+    let mut x = if anchor_left {
+        0
+    } else if anchor_right {
+        vw - w
+    } else {
+        (vw - w) / 2
+    };
+    let mut y = if anchor_top {
+        0
+    } else if anchor_bottom {
+        vh - h
+    } else {
+        (vh - h) / 2
+    };
 
     // Apply margins (Wayland semantics: positive top/left moves inward; right/bottom subtract)
     let (mt, mr, mb, ml) = margins;
@@ -5688,7 +6964,12 @@ fn compute_layer_geometry(viewport: (i32, i32), entry: &LayerSurfaceEntry) -> (i
         viewport,
         entry.anchors,
         entry.desired_size,
-        (entry.margin_top, entry.margin_right, entry.margin_bottom, entry.margin_left),
+        (
+            entry.margin_top,
+            entry.margin_right,
+            entry.margin_bottom,
+            entry.margin_left,
+        ),
     )
 }
 
@@ -5710,7 +6991,8 @@ mod layer_geom_tests {
     fn test_left_panel_half_height() {
         let vp = (1200, 800);
         let anchors = u32::from(Anchor::Left) | u32::from(Anchor::Top) | u32::from(Anchor::Bottom);
-let (x, _y, w, h) = compute_layer_geometry_from_fields(vp, anchors, (100, 0), (10, 0, 10, 5));
+        let (x, _y, w, h) =
+            compute_layer_geometry_from_fields(vp, anchors, (100, 0), (10, 0, 10, 5));
         assert_eq!(x, 5); // left margin applied
         assert_eq!(w, 100u32);
         assert!(h >= 1);
@@ -5720,46 +7002,46 @@ let (x, _y, w, h) = compute_layer_geometry_from_fields(vp, anchors, (100, 0), (1
 // Simple 5x7 bitmap font for ASCII
 const FONT_5X7: [[u8; 7]; 38] = [
     // 'A'..'Z' (26)
-    [0x1E,0x11,0x11,0x1F,0x11,0x11,0x11], // A
-    [0x1E,0x11,0x1E,0x11,0x11,0x11,0x1E], // B
-    [0x1F,0x10,0x10,0x10,0x10,0x10,0x1F], // C
-    [0x1E,0x11,0x11,0x11,0x11,0x11,0x1E], // D
-    [0x1F,0x10,0x1E,0x10,0x10,0x10,0x1F], // E
-    [0x1F,0x10,0x1E,0x10,0x10,0x10,0x10], // F
-    [0x1F,0x10,0x10,0x17,0x11,0x11,0x1F], // G
-    [0x11,0x11,0x1F,0x11,0x11,0x11,0x11], // H
-    [0x1F,0x04,0x04,0x04,0x04,0x04,0x1F], // I
-    [0x1F,0x01,0x01,0x01,0x01,0x11,0x1E], // J
-    [0x11,0x12,0x1C,0x18,0x1C,0x12,0x11], // K
-    [0x10,0x10,0x10,0x10,0x10,0x10,0x1F], // L
-    [0x11,0x1B,0x15,0x11,0x11,0x11,0x11], // M
-    [0x11,0x19,0x15,0x13,0x11,0x11,0x11], // N
-    [0x0E,0x11,0x11,0x11,0x11,0x11,0x0E], // O
-    [0x1E,0x11,0x11,0x1E,0x10,0x10,0x10], // P
-    [0x0E,0x11,0x11,0x11,0x15,0x12,0x0D], // Q
-    [0x1E,0x11,0x11,0x1E,0x14,0x12,0x11], // R
-    [0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E], // S
-    [0x1F,0x04,0x04,0x04,0x04,0x04,0x04], // T
-    [0x11,0x11,0x11,0x11,0x11,0x11,0x0E], // U
-    [0x11,0x11,0x11,0x0A,0x0A,0x0A,0x04], // V
-    [0x11,0x11,0x11,0x15,0x15,0x1B,0x11], // W
-    [0x11,0x11,0x0A,0x04,0x0A,0x11,0x11], // X
-    [0x11,0x11,0x0A,0x04,0x04,0x04,0x04], // Y
-    [0x1F,0x01,0x02,0x04,0x08,0x10,0x1F], // Z
+    [0x1E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11], // A
+    [0x1E, 0x11, 0x1E, 0x11, 0x11, 0x11, 0x1E], // B
+    [0x1F, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F], // C
+    [0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E], // D
+    [0x1F, 0x10, 0x1E, 0x10, 0x10, 0x10, 0x1F], // E
+    [0x1F, 0x10, 0x1E, 0x10, 0x10, 0x10, 0x10], // F
+    [0x1F, 0x10, 0x10, 0x17, 0x11, 0x11, 0x1F], // G
+    [0x11, 0x11, 0x1F, 0x11, 0x11, 0x11, 0x11], // H
+    [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F], // I
+    [0x1F, 0x01, 0x01, 0x01, 0x01, 0x11, 0x1E], // J
+    [0x11, 0x12, 0x1C, 0x18, 0x1C, 0x12, 0x11], // K
+    [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F], // L
+    [0x11, 0x1B, 0x15, 0x11, 0x11, 0x11, 0x11], // M
+    [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11], // N
+    [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E], // O
+    [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10], // P
+    [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D], // Q
+    [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11], // R
+    [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E], // S
+    [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04], // T
+    [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E], // U
+    [0x11, 0x11, 0x11, 0x0A, 0x0A, 0x0A, 0x04], // V
+    [0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11], // W
+    [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11], // X
+    [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04], // Y
+    [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F], // Z
     // '0'..'9' (10)
-    [0x0E,0x11,0x13,0x15,0x19,0x11,0x0E], // 0
-    [0x04,0x0C,0x04,0x04,0x04,0x04,0x0E], // 1
-    [0x0E,0x11,0x01,0x0E,0x10,0x10,0x1F], // 2
-    [0x1F,0x01,0x02,0x06,0x01,0x11,0x0E], // 3
-    [0x02,0x06,0x0A,0x12,0x1F,0x02,0x02], // 4
-    [0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E], // 5
-    [0x06,0x08,0x10,0x1E,0x11,0x11,0x0E], // 6
-    [0x1F,0x01,0x02,0x04,0x08,0x08,0x08], // 7
-    [0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E], // 8
-    [0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C], // 9
+    [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E], // 0
+    [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E], // 1
+    [0x0E, 0x11, 0x01, 0x0E, 0x10, 0x10, 0x1F], // 2
+    [0x1F, 0x01, 0x02, 0x06, 0x01, 0x11, 0x0E], // 3
+    [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02], // 4
+    [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E], // 5
+    [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E], // 6
+    [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08], // 7
+    [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E], // 8
+    [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C], // 9
     // space and dash
-    [0x00,0x00,0x00,0x00,0x00,0x00,0x00], // space
-    [0x00,0x00,0x00,0x1F,0x00,0x00,0x00], // -
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // space
+    [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00], // -
 ];
 
 #[allow(dead_code)]
@@ -5773,7 +7055,14 @@ fn font_index(ch: char) -> Option<usize> {
     }
 }
 
-fn draw_title_text_overlay(window_id: u64, text: &str, x: f32, y: f32, font_size: f32, color: [f32;4]) {
+fn draw_title_text_overlay(
+    window_id: u64,
+    text: &str,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    color: [f32; 4],
+) {
     // 5x7 base font, scale to desired height
     let base_w = 5.0f32;
     let base_h = 7.0f32;
@@ -5781,16 +7070,20 @@ fn draw_title_text_overlay(window_id: u64, text: &str, x: f32, y: f32, font_size
     let px_w = scale.round().max(1.0);
     let px_h = scale.round().max(1.0);
     let glyph_w = base_w * px_w;
-let _glyph_h = base_h * px_h;
+    let _glyph_h = base_h * px_h;
     let mut cx = x;
-    for ch in text.chars().take(48) { // cap title length for safety
+    for ch in text.chars().take(48) {
+        // cap title length for safety
         let up = ch.to_ascii_uppercase();
         let idx = match up {
             'A'..='Z' => (up as u8 - b'A') as usize,
             '0'..='9' => 26 + (up as u8 - b'0') as usize,
             ' ' => 36,
             '-' => 36 + 1,
-_ => { cx += glyph_w + px_w*1.0; continue; }
+            _ => {
+                cx += glyph_w + px_w * 1.0;
+                continue;
+            }
         };
         if let Some(pattern) = FONT_5X7.get(idx) {
             for (row, bits) in pattern.iter().enumerate() {
@@ -5833,6 +7126,9 @@ impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
                 {
                     entry.pending_buffer_id = buffer.as_ref().map(|b| b.id().protocol_id());
                     entry.attach_offset = (x, y);
+                } else if let Some(ss) = state.subsurfaces.get_mut(&resource.id().protocol_id()) {
+                    ss.pending_buffer_id = buffer.as_ref().map(|b| b.id().protocol_id());
+                    ss.attach_offset = (x, y);
                 } else if let Some(x11e) = state
                     .x11_surfaces
                     .iter_mut()
@@ -5951,11 +7247,20 @@ mod server_init_tests {
     fn test_compositor_server_socket_name_non_empty() -> anyhow::Result<()> {
         let _ = env_logger::try_init();
         let config = crate::config::AxiomConfig::default();
-        let wm = Arc::new(RwLock::new(crate::window::WindowManager::new(&config.window)?));
-        let ws = Arc::new(RwLock::new(crate::workspace::ScrollableWorkspaces::new(&config.workspace)?));
-        let im = Arc::new(RwLock::new(crate::input::InputManager::new(&config.input, &config.bindings)?));
+        let wm = Arc::new(RwLock::new(crate::window::WindowManager::new(
+            &config.window,
+        )?));
+        let ws = Arc::new(RwLock::new(crate::workspace::ScrollableWorkspaces::new(
+            &config.workspace,
+        )?));
+        let im = Arc::new(RwLock::new(crate::input::InputManager::new(
+            &config.input,
+            &config.bindings,
+        )?));
         let clip = Arc::new(RwLock::new(crate::clipboard::ClipboardManager::new()));
-        let deco = Arc::new(RwLock::new(crate::decoration::DecorationManager::new(&config.window)));
+        let deco = Arc::new(RwLock::new(crate::decoration::DecorationManager::new(
+            &config.window,
+        )));
 
         let server = CompositorServer::new(
             wm,

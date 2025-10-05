@@ -85,6 +85,9 @@ pub mod backend_real;
 #[cfg(feature = "smithay")]
 pub mod smithay;
 
+#[cfg(feature = "dmabuf-vulkan")]
+pub mod dmabuf_vulkan;
+
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

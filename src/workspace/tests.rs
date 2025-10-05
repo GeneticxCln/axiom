@@ -355,7 +355,10 @@ fn test_workspace_bounds_checking() -> Result<()> {
 
 #[test]
 fn test_reserved_insets_applied_to_layout() -> Result<()> {
-    let config = WorkspaceConfig { workspace_width: 800, ..Default::default() };
+    let config = WorkspaceConfig {
+        workspace_width: 800,
+        ..Default::default()
+    };
     let mut ws = ScrollableWorkspaces::new(&config)?;
     ws.set_viewport_size(1920.0, 1080.0);
 
@@ -417,7 +420,10 @@ fn test_reserved_insets_reset_lower_values() -> Result<()> {
 
 #[test]
 fn test_reserved_insets_multiple_sides_simulation() -> Result<()> {
-    let config = WorkspaceConfig { workspace_width: 1000, ..Default::default() };
+    let config = WorkspaceConfig {
+        workspace_width: 1000,
+        ..Default::default()
+    };
     let mut ws = ScrollableWorkspaces::new(&config)?;
     ws.set_viewport_size(1200.0, 800.0);
 

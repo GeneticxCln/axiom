@@ -614,20 +614,85 @@ impl PerformanceMonitor {
     
     /// Sample system memory usage
     async fn sample_system_memory(&self) -> Result<MemoryInfo> {
-        // Implementation would read from /proc/meminfo, GPU driver APIs, etc.
-        // This is a placeholder for the actual implementation
+        // Read system memory from /proc/meminfo (MemTotal, MemAvailable)
+        let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+        let mut mem_total_kb: u64 = 0;
+        let mut mem_available_kb: u64 = 0;
+        for line in meminfo.lines() {
+            if line.starts_with("MemTotal:") {
+                if let Some(val) = line.split_whitespace().nth(1) { mem_total_kb = val.parse().unwrap_or(0); }
+            } else if line.starts_with("MemAvailable:") {
+                if let Some(val) = line.split_whitespace().nth(1) { mem_available_kb = val.parse().unwrap_or(0); }
+            }
+        }
+        let used_bytes = (mem_total_kb.saturating_sub(mem_available_kb)) * 1024;
         Ok(MemoryInfo {
-            system_bytes: 0,
-            gpu_bytes: 0,
-            texture_bytes: 0,
+            system_bytes: used_bytes,
+            gpu_bytes: 0, // Not portable to read; requires driver APIs
+            texture_bytes: 0, // Filled by renderer integration if available
         })
     }
     
     /// Sample GPU metrics
     async fn sample_gpu_metrics(&self) -> Result<GpuMetrics> {
-        // Implementation would query GPU driver (NVML, sysfs, etc.)
-        // This is a placeholder for the actual implementation
-        Ok(GpuMetrics::default())
+        // Prefer NVML if available behind feature; else fallback to sysfs
+        #[cfg(feature = "gpu-nvml")]
+        {
+            if let Ok(nvml) = nvml_wrapper::Nvml::init() {
+                if let Ok(device) = nvml.device_by_index(0) {
+                    let mut gpu = GpuMetrics::default();
+                    if let Ok(util) = device.utilization_rates() {
+                        gpu.gpu_utilization = (util.gpu as f32).clamp(0.0, 100.0);
+                        // memory utilization approximate if mem info available
+                        if let Ok(mem) = device.memory_info() {
+                            if mem.total > 0 {
+                                let used_pct = (mem.used as f64 / mem.total as f64 * 100.0) as f32;
+                                gpu.gpu_memory_utilization = used_pct.clamp(0.0, 100.0);
+                            }
+                        }
+                    }
+                    // Temperature (if supported)
+                    if let Ok(temp) = device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu) {
+                        gpu.gpu_temperature = temp as f32;
+                    }
+                    // Graphics clock
+                    if let Ok(clock) = device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics) {
+                        gpu.gpu_frequency = clock as u32;
+                    }
+                    return Ok(gpu);
+                }
+            }
+        }
+        // Best-effort GPU metrics via sysfs (amdgpu). Values default to 0 if unavailable.
+        let mut gpu = GpuMetrics::default();
+        // Utilization percent
+        let base = std::path::Path::new("/sys/class/drm");
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("card") {
+                        let busy = path.join("device").join("gpu_busy_percent");
+                        if let Ok(contents) = std::fs::read_to_string(&busy) {
+                            if let Ok(val) = contents.trim().parse::<f32>() { gpu.gpu_utilization = val.clamp(0.0, 100.0); }
+                        }
+                        // Temperature (if available)
+                        let temp = path.join("device").join("hwmon");
+                        if let Ok(hmons) = std::fs::read_dir(temp) {
+                            for h in hmons.flatten() {
+                                let tfile = h.path().join("temp1_input");
+                                if let Ok(t) = std::fs::read_to_string(&tfile) {
+                                    if let Ok(milli_c) = t.trim().parse::<u32>() { gpu.gpu_temperature = (milli_c as f32) / 1000.0; }
+                                }
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(gpu)
     }
     
     /// Automatic performance optimization

@@ -9,6 +9,7 @@ license = "GPL-3.0"
 keywords = ["wayland", "compositor", "window-manager", "tiling", "effects"]
 categories = ["gui"]
 autobins = false
+default-run = "axiom"
 
 [[bin]]
 name = "axiom"
@@ -105,6 +106,9 @@ rand = "0.8"  # For input simulation in Phase 3
 bytemuck = { version = "1.14", features = ["derive"] }  # For GPU buffer data
 parking_lot = "0.12"  # For RwLock synchronization
 nvml-wrapper = { version = "0.10", optional = true }
+# Vulkan bindings for dmabuf import (feature-gated)
+ash = { version = "0.38", default-features = false, optional = true }
+libloading = { version = "0.8", optional = true }
 
 # TODO: Add features when compositor dependencies are ready
 # [features]
@@ -144,6 +148,9 @@ wgpu-present = ["pollster"]
 # Enable NVIDIA NVML GPU metrics support (requires libnvidia-ml)
 # Usage: cargo build --features gpu-nvml
 gpu-nvml = ["nvml-wrapper"]
+# Vulkan-based dmabuf import path (off by default)
+# Usage: cargo build --features dmabuf-vulkan
+dmabuf-vulkan = ["dep:ash", "dep:libloading"]
 # Example builds (no-op)
 examples = []
 # Experimental: Real XDG backend wiring (register core globals and dispatch loop)

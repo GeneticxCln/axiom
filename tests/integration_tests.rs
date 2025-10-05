@@ -5,8 +5,8 @@
 
 use anyhow::Result;
 use std::time::Duration;
-use tokio::time::timeout;
 use tempfile::tempdir;
+use tokio::time::timeout;
 
 // Import Axiom modules
 use axiom::{
@@ -234,6 +234,60 @@ async fn test_stress_many_windows() -> Result<()> {
     workspaces.shutdown()?;
 
     Ok(())
+}
+
+/// Test outputs union bounds utility
+#[test]
+fn test_outputs_union_bounds() {
+    use axiom::smithay::server::{compute_outputs_bounds_from, LogicalOutput};
+    use wayland_server::protocol::wl_output::Transform;
+
+    let outputs = vec![
+        LogicalOutput {
+            id: 1,
+            name: "A".into(),
+            make: "Axiom".into(),
+            model: "Virtual".into(),
+            physical_width_mm: 300,
+            physical_height_mm: 200,
+            position: (0, 0),
+            width: 1920,
+            height: 1080,
+            refresh_mhz: 60000,
+            scale: 1,
+            transform: Transform::Normal,
+            enabled: true,
+            global_id: None,
+            wl_outputs: Vec::new(),
+            pending_damage: Vec::new(),
+            pending_callbacks: Vec::new(),
+            last_present_time: std::time::Instant::now(),
+        },
+        LogicalOutput {
+            id: 2,
+            name: "B".into(),
+            make: "Axiom".into(),
+            model: "Virtual".into(),
+            physical_width_mm: 300,
+            physical_height_mm: 200,
+            position: (1920, 0),
+            width: 1280,
+            height: 1024,
+            refresh_mhz: 60000,
+            scale: 1,
+            transform: Transform::Normal,
+            enabled: true,
+            global_id: None,
+            wl_outputs: Vec::new(),
+            pending_damage: Vec::new(),
+            pending_callbacks: Vec::new(),
+            last_present_time: std::time::Instant::now(),
+        },
+    ];
+
+    let (min_x, min_y, max_x, max_y) = compute_outputs_bounds_from(&outputs);
+    assert_eq!((min_x, min_y), (0.0, 0.0));
+    assert_eq!((max_x as i32, max_y as i32), (1920 + 1280, 1080));
 }
 
 /// Test error handling and recovery scenarios

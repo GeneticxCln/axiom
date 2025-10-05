@@ -304,25 +304,75 @@ impl EnhancedIPCServer {
                m.cpu_usage, m.memory_usage, m.gpu_usage, m.fps);
     }
     
-    /// Get CPU usage (placeholder - implement with real monitoring)
+    /// Get CPU usage (%) via /proc/stat sampling over ~100ms
     fn get_cpu_usage() -> f32 {
-        // TODO: Implement real CPU monitoring
-        // For now, return simulated value
-        20.0 + (rand::random::<f32>() * 10.0)
+        fn read_cpu_times() -> Option<(u64, u64)> {
+            let contents = std::fs::read_to_string("/proc/stat").ok()?;
+            let first = contents.lines().next()?;
+            if !first.starts_with("cpu ") { return None; }
+            let parts: Vec<&str> = first.split_whitespace().collect();
+            if parts.len() < 8 { return None; }
+            let user: u64 = parts.get(1)?.parse().ok()?;
+            let nice: u64 = parts.get(2)?.parse().ok()?;
+            let system: u64 = parts.get(3)?.parse().ok()?;
+            let idle: u64 = parts.get(4)?.parse().ok()?;
+            let iowait: u64 = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let irq: u64 = parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let softirq: u64 = parts.get(7).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let steal: u64 = parts.get(8).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let idle_all = idle + iowait;
+            let non_idle = user + nice + system + irq + softirq + steal;
+            let total = idle_all + non_idle;
+            Some((idle_all, total))
+        }
+        let a = read_cpu_times();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let b = read_cpu_times();
+        match (a, b) {
+            (Some((idle_a, total_a)), Some((idle_b, total_b))) => {
+                let idle_delta = idle_b.saturating_sub(idle_a) as f64;
+                let total_delta = total_b.saturating_sub(total_a) as f64;
+                if total_delta > 0.0 { ((1.0 - idle_delta/total_delta) * 100.0) as f32 } else { 0.0 }
+            }
+            _ => 0.0,
+        }
     }
     
-    /// Get memory usage in MB
+    /// Get memory usage in MB via /proc/meminfo (MemTotal-MemAvailable)
     fn get_memory_usage() -> f32 {
-        // TODO: Implement real memory monitoring
-        // For now, return simulated value
-        256.0 + (rand::random::<f32>() * 64.0)
+        let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+        let mut mem_total_kb: u64 = 0;
+        let mut mem_available_kb: u64 = 0;
+        for line in meminfo.lines() {
+            if line.starts_with("MemTotal:") {
+                if let Some(val) = line.split_whitespace().nth(1) { mem_total_kb = val.parse().unwrap_or(0); }
+            } else if line.starts_with("MemAvailable:") {
+                if let Some(val) = line.split_whitespace().nth(1) { mem_available_kb = val.parse().unwrap_or(0); }
+            }
+        }
+        let used_mb = (mem_total_kb.saturating_sub(mem_available_kb) as f32) / 1024.0;
+        used_mb
     }
     
-    /// Get GPU usage percentage
+    /// Get GPU usage percentage via sysfs (amdgpu) if available; else 0.0
     fn get_gpu_usage() -> f32 {
-        // TODO: Implement real GPU monitoring
-        // For now, return simulated value
-        15.0 + (rand::random::<f32>() * 20.0)
+        let base = std::path::Path::new("/sys/class/drm");
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("card") {
+                        let busy = path.join("device").join("gpu_busy_percent");
+                        if let Ok(contents) = std::fs::read_to_string(&busy) {
+                            if let Ok(val) = contents.trim().parse::<f32>() {
+                                if val.is_finite() { return val.clamp(0.0, 100.0); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        0.0
     }
     
     /// Check health of connected clients

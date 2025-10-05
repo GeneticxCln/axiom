@@ -97,7 +97,7 @@ pub fn drain_libinput_events(li: &mut input::Libinput) -> Vec<HwInputEvent> {
                 use pointer::Axis;
                 let mut h = 0.0;
                 let mut v = 0.0;
-if sw.has_axis(Axis::Horizontal) {
+                if sw.has_axis(Axis::Horizontal) {
                     h = sw.scroll_value(Axis::Horizontal);
                 } else if sw.has_axis(Axis::Vertical) {
                     v = sw.scroll_value(Axis::Vertical);
@@ -113,7 +113,7 @@ if sw.has_axis(Axis::Horizontal) {
                 use pointer::Axis;
                 let mut h = 0.0;
                 let mut v = 0.0;
-if sf.has_axis(Axis::Horizontal) {
+                if sf.has_axis(Axis::Horizontal) {
                     h = sf.scroll_value(Axis::Horizontal);
                 } else if sf.has_axis(Axis::Vertical) {
                     v = sf.scroll_value(Axis::Vertical);
@@ -129,7 +129,7 @@ if sf.has_axis(Axis::Horizontal) {
                 use pointer::Axis;
                 let mut h = 0.0;
                 let mut v = 0.0;
-if sc.has_axis(Axis::Horizontal) {
+                if sc.has_axis(Axis::Horizontal) {
                     h = sc.scroll_value(Axis::Horizontal);
                 } else if sc.has_axis(Axis::Vertical) {
                     v = sc.scroll_value(Axis::Vertical);

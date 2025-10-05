@@ -4,6 +4,10 @@
 //! windows and effects to the screen - not just stubs.
 
 #![allow(dead_code)]
+
+pub mod damage;
+pub mod window_stack;
+
 use anyhow::Result;
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
@@ -12,6 +16,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use wgpu::util::DeviceExt;
 use wgpu::*;
+
+use crate::renderer::damage::FrameDamage;
+use crate::renderer::window_stack::WindowStack;
 
 /// Real GPU rendering pipeline
 pub struct AxiomRenderer {
@@ -23,6 +30,8 @@ pub struct AxiomRenderer {
     size: (u32, u32),
     /// Rendered windows
     windows: Vec<RenderedWindow>,
+    /// Fast lookup: window ID → index in windows Vec
+    window_id_to_index: HashMap<u64, usize>,
     /// Whether this renderer was created with an adapter compatible with the given surface
     surface_compatible: bool,
     /// Pipeline for textured quad rendering (present when surface-backed)
@@ -52,6 +61,11 @@ pub struct AxiomRenderer {
 
     /// Optional cache for pipelines by surface format
     pipeline_cache: HashMap<TextureFormat, RenderPipeline>,
+
+    /// Window Z-ordering stack (optional, for multi-window rendering)
+    window_stack: Option<Arc<Mutex<WindowStack>>>,
+    /// Frame damage tracking (optional, for performance)
+    frame_damage: Option<Arc<Mutex<FrameDamage>>>,
 }
 
 /// Represents a rendered window surface
@@ -91,17 +105,48 @@ struct Vertex {
     tex_coords: [f32; 2],
 }
 
+/// Rendering statistics for performance monitoring
+#[derive(Debug, Default, Clone)]
+struct RenderStats {
+    /// Total draw calls issued
+    total_draw_calls: usize,
+    /// Draw calls optimized by scissor rectangles
+    scissor_optimized_draws: usize,
+    /// Full-window draws (no damage optimization)
+    full_window_draws: usize,
+    /// Number of windows actually rendered
+    windows_rendered: usize,
+    /// Number of windows skipped due to occlusion
+    windows_occluded: usize,
+}
+
 static RENDER_STATE: OnceLock<Arc<Mutex<SharedRenderState>>> = OnceLock::new();
 
 type Pos = (f32, f32);
 type Size = (f32, f32);
 
-#[derive(Default)]
 struct SharedRenderState {
     placeholders: HashMap<u64, (Pos, Size, f32)>,
     pending_textures: Vec<(u64, Vec<u8>, u32, u32)>,
     pending_texture_regions: Vec<RegionUpdate>,
     overlay_rects: Vec<OverlayRect>,
+    /// Window Z-ordering stack for multi-window rendering
+    window_stack: WindowStack,
+    /// Frame damage tracking for optimization
+    frame_damage: FrameDamage,
+}
+
+impl Default for SharedRenderState {
+    fn default() -> Self {
+        Self {
+            placeholders: HashMap::new(),
+            pending_textures: Vec::new(),
+            pending_texture_regions: Vec::new(),
+            overlay_rects: Vec::new(),
+            window_stack: WindowStack::new(),
+            frame_damage: FrameDamage::new(),
+        }
+    }
 }
 
 // Caps for caches and queues to bound memory usage
@@ -113,6 +158,10 @@ pub fn push_placeholder_quad(id: u64, position: (f32, f32), size: (f32, f32), op
     let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
     if let Ok(mut s) = state.lock() {
         s.placeholders.insert(id, (position, size, opacity));
+        info!(
+            "➕ push_placeholder_quad: id={}, pos=({:.1}, {:.1}), size=({:.1}, {:.1}), opacity={:.2}, total={}",
+            id, position.0, position.1, size.0, size.1, opacity, s.placeholders.len()
+        );
         // Cap total placeholders to avoid unbounded growth
         if s.placeholders.len() > MAX_PLACEHOLDERS {
             if let Some((&victim, _)) = s.placeholders.iter().next() {
@@ -198,7 +247,15 @@ pub struct OverlayRect {
 pub fn queue_overlay_fill(id: u64, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
     let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
     if let Ok(mut s) = state.lock() {
-        s.overlay_rects.push(OverlayRect { id, x, y, w, h, color, radius: 0.0 });
+        s.overlay_rects.push(OverlayRect {
+            id,
+            x,
+            y,
+            w,
+            h,
+            color,
+            radius: 0.0,
+        });
         // Cap overlays to a reasonable number per frame
         let len = s.overlay_rects.len();
         if len > 4096 {
@@ -208,15 +265,133 @@ pub fn queue_overlay_fill(id: u64, x: f32, y: f32, w: f32, h: f32, color: [f32; 
     }
 }
 
-pub fn queue_overlay_fill_rounded(id: u64, x: f32, y: f32, w: f32, h: f32, color: [f32; 4], radius: f32) {
+pub fn queue_overlay_fill_rounded(
+    id: u64,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [f32; 4],
+    radius: f32,
+) {
     let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
     if let Ok(mut s) = state.lock() {
-        s.overlay_rects.push(OverlayRect { id, x, y, w, h, color, radius });
+        s.overlay_rects.push(OverlayRect {
+            id,
+            x,
+            y,
+            w,
+            h,
+            color,
+            radius,
+        });
         let len = s.overlay_rects.len();
         if len > 4096 {
             let drop_n = len - 4096;
             s.overlay_rects.drain(0..drop_n);
         }
+    }
+}
+
+/// Adds a window to the Z-order stack
+///
+/// This should be called when a new window is created.
+pub fn add_window_to_stack(window_id: u64) {
+    let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+    if let Ok(mut s) = state.lock() {
+        s.window_stack.push(window_id);
+        debug!(
+            "Added window {} to stack (total: {})",
+            window_id,
+            s.window_stack.len()
+        );
+    }
+}
+
+/// Removes a window from the Z-order stack
+///
+/// This should be called when a window is destroyed.
+pub fn remove_window_from_stack(window_id: u64) {
+    let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+    if let Ok(mut s) = state.lock() {
+        s.window_stack.remove(window_id);
+        debug!(
+            "Removed window {} from stack (remaining: {})",
+            window_id,
+            s.window_stack.len()
+        );
+    }
+}
+
+/// Raises a window to the top of the Z-order stack
+///
+/// This should be called when a window gains focus.
+pub fn raise_window_to_top(window_id: u64) {
+    let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+    if let Ok(mut s) = state.lock() {
+        if s.window_stack.raise_to_top(window_id) {
+            debug!("Raised window {} to top", window_id);
+        }
+    }
+}
+
+/// Gets the current window render order (bottom to top)
+pub fn get_window_render_order() -> Vec<u64> {
+    let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+    if let Ok(s) = state.lock() {
+        s.window_stack.render_order().to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Marks an entire window as damaged (needs full repaint)
+///
+/// This should be called when a window receives a new buffer commit.
+pub fn mark_window_damaged(window_id: u64) {
+    let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+    if let Ok(mut s) = state.lock() {
+        s.frame_damage.mark_window_damaged(window_id);
+        debug!("Marked window {} as fully damaged", window_id);
+    }
+}
+
+/// Adds damage for a specific region of a window
+///
+/// # Arguments
+///
+/// * `window_id` - The window ID
+/// * `x`, `y` - Region position in window coordinates
+/// * `width`, `height` - Region size
+pub fn add_window_damage_region(window_id: u64, x: i32, y: i32, width: u32, height: u32) {
+    let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+    if let Ok(mut s) = state.lock() {
+        let region = damage::DamageRegion::new(x, y, width, height);
+        s.frame_damage.add_window_damage(window_id, region);
+        debug!(
+            "Added damage region to window {}: {}x{} at ({},{})",
+            window_id, width, height, x, y
+        );
+    }
+}
+
+/// Checks if there is any damage that needs rendering
+pub fn has_pending_damage() -> bool {
+    let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+    if let Ok(s) = state.lock() {
+        s.frame_damage.has_any_damage()
+    } else {
+        false
+    }
+}
+
+/// Clears all damage after rendering
+///
+/// This should be called after a frame has been successfully rendered.
+pub fn clear_frame_damage() {
+    let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+    if let Ok(mut s) = state.lock() {
+        s.frame_damage.clear();
     }
 }
 
@@ -334,7 +509,9 @@ impl AxiomRenderer {
                         .unwrap_or(caps.formats[0]);
                     // Choose present mode: honor AXIOM_PRESENT_MODE if set and supported, else default to FIFO
                     let present_mode = {
-                        let override_pm = std::env::var("AXIOM_PRESENT_MODE").ok().map(|s| s.to_lowercase());
+                        let override_pm = std::env::var("AXIOM_PRESENT_MODE")
+                            .ok()
+                            .map(|s| s.to_lowercase());
                         let pick = match override_pm.as_deref() {
                             Some("mailbox") => Some(wgpu::PresentMode::Mailbox),
                             Some("immediate") => Some(wgpu::PresentMode::Immediate),
@@ -345,7 +522,10 @@ impl AxiomRenderer {
                             if caps.present_modes.contains(&req) {
                                 req
                             } else {
-                                warn!("Requested present mode {:?} not supported; falling back", req);
+                                warn!(
+                                    "Requested present mode {:?} not supported; falling back",
+                                    req
+                                );
                                 // fallback to FIFO if available
                                 if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
                                     wgpu::PresentMode::Fifo
@@ -501,6 +681,7 @@ impl AxiomRenderer {
                     queue: headless.queue,
                     size: (width, height),
                     windows: Vec::new(),
+                    window_id_to_index: HashMap::new(),
                     surface_compatible: false,
                     pipeline: None,
                     bind_group_layout: None,
@@ -511,9 +692,11 @@ impl AxiomRenderer {
                     shadow_uniform: None,
                     shadow_bind_group: None,
                     overlays: Vec::new(),
-                    pipeline_cache: HashMap::new(),
                     texture_pool: HashMap::new(),
                     uniform_pool: Vec::new(),
+                    pipeline_cache: HashMap::new(),
+                    window_stack: None,
+                    frame_damage: None,
                 });
             };
 
@@ -594,6 +777,7 @@ impl AxiomRenderer {
             queue: Arc::new(queue),
             size: (width, height),
             windows: Vec::new(),
+            window_id_to_index: HashMap::new(),
             surface_compatible,
             pipeline,
             bind_group_layout: bgl,
@@ -607,6 +791,8 @@ impl AxiomRenderer {
             pipeline_cache: HashMap::new(),
             texture_pool: HashMap::new(),
             uniform_pool: Vec::new(),
+            window_stack: None,
+            frame_damage: None,
         })
     }
 
@@ -662,6 +848,7 @@ impl AxiomRenderer {
             queue: Arc::new(queue),
             size: (1920, 1080), // Default size for headless
             windows: Vec::new(),
+            window_id_to_index: HashMap::new(),
             surface_compatible: false,
             pipeline: None,
             bind_group_layout: None,
@@ -675,6 +862,8 @@ impl AxiomRenderer {
             pipeline_cache: HashMap::new(),
             texture_pool: HashMap::new(),
             uniform_pool: Vec::new(),
+            window_stack: None,
+            frame_damage: None,
         })
     }
 
@@ -705,7 +894,9 @@ impl AxiomRenderer {
             damage_regions: Vec::new(),
         };
 
+        let index = self.windows.len();
         self.windows.push(window);
+        self.window_id_to_index.insert(id, index);
         Ok(())
     }
 
@@ -723,12 +914,20 @@ impl AxiomRenderer {
                 || w.size != size
                 || (w.opacity - opacity).abs() > f32::EPSILON
             {
+                info!(
+                    "🔄 upsert_window_rect: updating window {} pos=({:.1}, {:.1}) size=({:.1}, {:.1}) opacity={:.2}",
+                    id, position.0, position.1, size.0, size.1, opacity
+                );
                 w.position = position;
                 w.size = size;
                 w.opacity = opacity;
                 w.dirty = true;
             }
         } else {
+            info!(
+                "✨ upsert_window_rect: adding NEW window {} pos=({:.1}, {:.1}) size=({:.1}, {:.1}) opacity={:.2}",
+                id, position.0, position.1, size.0, size.1, opacity
+            );
             let window = RenderedWindow {
                 id,
                 position,
@@ -743,10 +942,54 @@ impl AxiomRenderer {
                 tex_size: None,
                 damage_regions: Vec::new(),
             };
+            let index = self.windows.len();
             self.windows.push(window);
+            self.window_id_to_index.insert(id, index);
         }
     }
 
+    /// Rebuilds the window_id_to_index mapping from the current windows Vec.
+    ///
+    /// This should be called after any operation that changes window indices
+    /// (such as removal or reordering).
+    fn rebuild_window_index(&mut self) {
+        self.window_id_to_index.clear();
+        for (idx, window) in self.windows.iter().enumerate() {
+            self.window_id_to_index.insert(window.id, idx);
+        }
+        debug!(
+            "🔧 Rebuilt window_id_to_index map: {} windows",
+            self.windows.len()
+        );
+    }
+
+    /// Remove a window from the renderer.
+    ///
+    /// This removes the window entirely, freeing all associated GPU resources.
+    pub fn remove_window(&mut self, window_id: u64) -> bool {
+        if let Some(idx) = self.window_id_to_index.get(&window_id).copied() {
+            let window = self.windows.remove(idx);
+
+            // Return resources to pools
+            if let (Some(tex), Some((tw, th))) = (window.texture, window.tex_size) {
+                let key = (tw, th, TextureFormat::Rgba8UnormSrgb);
+                self.texture_pool.entry(key).or_default().push(tex);
+            }
+            if let Some(ubuf) = window.uniform {
+                self.uniform_pool.push(ubuf);
+            }
+
+            // Rebuild index map since indices have shifted
+            self.rebuild_window_index();
+
+            info!("🗑️ Removed window {} from renderer", window_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Upload texture data for a window.
     /// Update window texture with actual pixel data
     pub fn update_window_texture(
         &mut self,
@@ -811,6 +1054,32 @@ impl AxiomRenderer {
             }
             // Upload pixel data to GPU
             let texture_ref = window.texture.as_ref().unwrap();
+
+            // Calculate aligned bytes per row (must be multiple of 256 for wgpu)
+            let unaligned_bytes_per_row = 4 * width;
+            let aligned_bytes_per_row = ((unaligned_bytes_per_row + 255) / 256) * 256;
+
+            // If input data is tightly packed, repack with padding
+            let aligned_data = if aligned_bytes_per_row != unaligned_bytes_per_row {
+                let mut aligned = Vec::with_capacity((aligned_bytes_per_row * height) as usize);
+                for row in 0..height {
+                    let src_offset = (row * unaligned_bytes_per_row) as usize;
+                    let src_end = src_offset + unaligned_bytes_per_row as usize;
+                    if src_end <= data.len() {
+                        aligned.extend_from_slice(&data[src_offset..src_end]);
+                        // Add padding to reach alignment
+                        aligned.resize(
+                            aligned.len()
+                                + (aligned_bytes_per_row - unaligned_bytes_per_row) as usize,
+                            0,
+                        );
+                    }
+                }
+                aligned
+            } else {
+                data.to_vec()
+            };
+
             self.queue.write_texture(
                 ImageCopyTexture {
                     aspect: TextureAspect::All,
@@ -818,10 +1087,10 @@ impl AxiomRenderer {
                     mip_level: 0,
                     origin: Origin3d::ZERO,
                 },
-                data,
+                &aligned_data,
                 ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * width),
+                    bytes_per_row: Some(aligned_bytes_per_row),
                     rows_per_image: Some(height),
                 },
                 Extent3d {
@@ -878,6 +1147,32 @@ impl AxiomRenderer {
             }
             let texture_ref = window.texture.as_ref().unwrap();
             let (x, y, w, h) = rect;
+
+            // Calculate aligned bytes per row (must be multiple of 256 for wgpu)
+            let unaligned_bytes_per_row = 4 * w;
+            let aligned_bytes_per_row = ((unaligned_bytes_per_row + 255) / 256) * 256;
+
+            // If input data is tightly packed, repack with padding
+            let aligned_bytes = if aligned_bytes_per_row != unaligned_bytes_per_row {
+                let mut aligned = Vec::with_capacity((aligned_bytes_per_row * h) as usize);
+                for row in 0..h {
+                    let src_offset = (row * unaligned_bytes_per_row) as usize;
+                    let src_end = src_offset + unaligned_bytes_per_row as usize;
+                    if src_end <= bytes.len() {
+                        aligned.extend_from_slice(&bytes[src_offset..src_end]);
+                        // Add padding to reach alignment
+                        aligned.resize(
+                            aligned.len()
+                                + (aligned_bytes_per_row - unaligned_bytes_per_row) as usize,
+                            0,
+                        );
+                    }
+                }
+                aligned
+            } else {
+                bytes.to_vec()
+            };
+
             self.queue.write_texture(
                 ImageCopyTexture {
                     aspect: TextureAspect::All,
@@ -885,10 +1180,10 @@ impl AxiomRenderer {
                     mip_level: 0,
                     origin: Origin3d { x, y, z: 0 },
                 },
-                bytes,
+                &aligned_bytes,
                 ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * w),
+                    bytes_per_row: Some(aligned_bytes_per_row),
                     rows_per_image: Some(h),
                 },
                 Extent3d {
@@ -903,6 +1198,52 @@ impl AxiomRenderer {
         Ok(())
     }
 
+    /// Process all pending texture updates from the global queue
+    pub fn process_pending_texture_updates(&mut self) -> Result<()> {
+        let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
+
+        let (pending_textures, pending_regions) = if let Ok(mut s) = state.lock() {
+            (
+                std::mem::take(&mut s.pending_textures),
+                std::mem::take(&mut s.pending_texture_regions),
+            )
+        } else {
+            return Ok(());
+        };
+
+        if !pending_textures.is_empty() {
+            debug!(
+                "📥 Processing {} pending texture updates",
+                pending_textures.len()
+            );
+        }
+
+        // Process full texture updates
+        for (id, data, width, height) in pending_textures {
+            self.update_window_texture(id, &data, width, height)?;
+        }
+
+        if !pending_regions.is_empty() {
+            debug!(
+                "📥 Processing {} pending region updates",
+                pending_regions.len()
+            );
+        }
+
+        // Process region updates
+        for region in pending_regions {
+            self.update_window_texture_region(
+                region.id,
+                region.full_size.0,
+                region.full_size.1,
+                region.rect,
+                &region.bytes,
+            )?;
+        }
+
+        Ok(())
+    }
+
     /// Render all windows (simplified for now - needs actual surface)
     pub fn render(&mut self) -> Result<()> {
         info!("🎨 Rendering {} windows to GPU", self.windows.len());
@@ -910,23 +1251,55 @@ impl AxiomRenderer {
         // For now, just validate that we have the GPU device and queue
         // In a real implementation, this would render to an actual surface
 
-        for window in &self.windows {
-            if window.texture_view.is_some() {
-                debug!("✅ Would render window {} with texture", window.id);
+        // Use WindowStack for proper Z-ordering if available
+        let render_order: Vec<u64> = if let Some(ref stack_arc) = self.window_stack {
+            if let Ok(stack) = stack_arc.lock() {
+                let order = stack.render_order().to_vec();
+                if !order.is_empty() {
+                    info!("🪟 Rendering in Z-order: {:?} (bottom to top)", order);
+                }
+                order
             } else {
-                debug!(
-                    "🟦 Rendering placeholder quad for window {} at ({:.1},{:.1}) size {:.1}x{:.1} opacity {:.2}",
-                    window.id, window.position.0, window.position.1, window.size.0, window.size.1, window.opacity
-                );
+                // Fallback to window IDs if lock fails
+                self.windows.iter().map(|w| w.id).collect()
+            }
+        } else {
+            // No stack available, use windows in current order
+            self.windows.iter().map(|w| w.id).collect()
+        };
+
+        // Render windows in Z-order (bottom to top)
+        for window_id in &render_order {
+            if let Some(&window_idx) = self.window_id_to_index.get(window_id) {
+                if let Some(window) = self.windows.get(window_idx) {
+                    if window.texture_view.is_some() {
+                        debug!("✅ Would render window {} with texture", window.id);
+                    } else {
+                        debug!(
+                            "🟦 Rendering solid rect for window {} at ({:.1},{:.1}) size {:.1}x{:.1} opacity {:.2}",
+                            window.id, window.position.0, window.position.1, window.size.0, window.size.1, window.opacity
+                        );
+                    }
+                }
             }
         }
 
         debug!("🖥️ Frame rendered with {} windows", self.windows.len());
+
         // Clear damage and reset dirty flags after a successful draw (headless)
         for win in &mut self.windows {
             win.damage_regions.clear();
             win.dirty = false;
         }
+
+        // Clear frame damage after successful render
+        if let Some(ref damage_arc) = self.frame_damage {
+            if let Ok(mut damage) = damage_arc.lock() {
+                damage.clear();
+                debug!("💥 Cleared frame damage after render");
+            }
+        }
+
         Ok(())
     }
 
@@ -951,7 +1324,12 @@ impl AxiomRenderer {
             .iter()
             .map(|&(x, y, w, h)| (x, y, w, h, 1))
             .collect();
-        self.render_to_surface_with_outputs_scaled(_surface, surface_texture, &with_scales, debug_overlay)
+        self.render_to_surface_with_outputs_scaled(
+            _surface,
+            surface_texture,
+            &with_scales,
+            debug_overlay,
+        )
     }
 
     /// Render all windows to a wgpu surface with per-output scissor rectangles
@@ -982,9 +1360,14 @@ impl AxiomRenderer {
                 label: Some("Render Encoder"),
             });
 
-        if let (Some(pipeline_ref), Some(bgl), Some(sampler)) =
-            (self.pipeline.as_ref().or_else(|| self.surface_format.and_then(|f| self.pipeline_cache.get(&f))), &self.bind_group_layout, &self.sampler)
-        {
+        if let (Some(pipeline_ref), Some(bgl), Some(sampler)) = (
+            self.pipeline.as_ref().or_else(|| {
+                self.surface_format
+                    .and_then(|f| self.pipeline_cache.get(&f))
+            }),
+            &self.bind_group_layout,
+            &self.sampler,
+        ) {
             let pipeline = pipeline_ref;
             // Pre-allocate buffers once per frame for all windows and draw
             // Flatten all quads into a single draw list
@@ -1079,7 +1462,102 @@ impl AxiomRenderer {
             let shadow_spread: f32 = 12.0;
             let shadow_offset: (f32, f32) = (4.0, 6.0);
 
-            for widx in 0..self.windows.len() {
+            // Compute output damage regions for scissor optimization
+            let mut output_damage_regions: Vec<damage::DamageRegion> = Vec::new();
+            let should_use_damage_optimization = if let Some(ref damage_arc) = self.frame_damage {
+                if let Ok(mut damage) = damage_arc.lock() {
+                    if damage.has_any_damage() {
+                        // Build window position and size maps for damage computation
+                        let mut positions: HashMap<u64, (i32, i32)> = HashMap::new();
+                        let mut sizes: HashMap<u64, (u32, u32)> = HashMap::new();
+
+                        for window in &self.windows {
+                            positions.insert(
+                                window.id,
+                                (window.position.0 as i32, window.position.1 as i32),
+                            );
+                            sizes.insert(window.id, (window.size.0 as u32, window.size.1 as u32));
+                        }
+
+                        // Compute output damage from per-window damage
+                        damage.compute_output_damage(&positions, &sizes);
+                        output_damage_regions = damage.output_regions().to_vec();
+
+                        if !output_damage_regions.is_empty() {
+                            // Calculate total damaged area for performance metrics
+                            let total_damage_area: u32 = output_damage_regions
+                                .iter()
+                                .map(|r| r.area())
+                                .sum();
+                            let screen_area = self.size.0 * self.size.1;
+                            let damage_percentage = (total_damage_area as f64 / screen_area as f64) * 100.0;
+                            
+                            info!(
+                                "💥 Frame has {} damage regions (area: {}/{} pixels, {:.1}% of screen)",
+                                output_damage_regions.len(),
+                                total_damage_area,
+                                screen_area,
+                                damage_percentage
+                            );
+                            true
+                        } else {
+                            debug!("💥 Damage computed but no output regions, full render");
+                            false
+                        }
+                    } else {
+                        debug!("💥 No damage this frame, returning early to skip rendering");
+                        // Early return - no damage means no need to render
+                        return Ok(());
+                    }
+                } else {
+                    debug!("💥 Could not lock frame damage, using full render");
+                    false
+                }
+            } else {
+                debug!("💥 No damage tracking available, using full render");
+                false
+            };
+
+            // Use WindowStack for proper Z-ordering (bottom to top)
+            let render_order: Vec<u64> = if let Some(ref stack_arc) = self.window_stack {
+                if let Ok(stack) = stack_arc.lock() {
+                    let order = stack.render_order().to_vec();
+                    if !order.is_empty() {
+                        info!(
+                            "🪟 Rendering {} windows in Z-order: {:?} (bottom to top)",
+                            order.len(),
+                            order
+                        );
+                    }
+                    order
+                } else {
+                    // Fallback if lock fails
+                    self.windows.iter().map(|w| w.id).collect()
+                }
+            } else {
+                // No stack available, use windows in current order
+                self.windows.iter().map(|w| w.id).collect()
+            };
+
+            // Iterate through windows in proper Z-order
+            for window_id in &render_order {
+                // Skip if window is fully occluded by opaque windows above it
+                if self.is_window_occluded(*window_id, &render_order) {
+                    continue;
+                }
+
+                // Map window ID to index in self.windows
+                let widx = match self.window_id_to_index.get(window_id) {
+                    Some(&idx) => idx,
+                    None => {
+                        warn!(
+                            "⚠️ Window {} in stack but not in windows Vec, skipping",
+                            *window_id
+                        );
+                        continue;
+                    }
+                };
+
                 // Short mutable borrow to ensure bind_group exists and fetch geometry
                 let geo = {
                     let window = &mut self.windows[widx];
@@ -1251,29 +1729,56 @@ impl AxiomRenderer {
             }
 
             // Append overlay fill quads (e.g., decorations) after windows to ensure they appear on top
-            let mut push_overlay_rect = |x: f32, y: f32, w: f32, h: f32, color: [f32; 4], radius: f32| {
-                let fw = self.size.0 as f32;
-                let fh = self.size.1 as f32;
-                let x0 = (x / fw) * 2.0 - 1.0;
-                let y0 = 1.0 - (y / fh) * 2.0;
-                let x1 = ((x + w) / fw) * 2.0 - 1.0;
-                let y1 = 1.0 - ((y + h) / fh) * 2.0;
-                let base = all_vertices.len() as u16;
-                all_vertices.extend_from_slice(&[
-                    Vertex { position: [x0, y1, 0.0], tex_coords: [0.0, 1.0] },
-                    Vertex { position: [x1, y1, 0.0], tex_coords: [1.0, 1.0] },
-                    Vertex { position: [x0, y0, 0.0], tex_coords: [0.0, 0.0] },
-                    Vertex { position: [x1, y0, 0.0], tex_coords: [1.0, 0.0] },
-                ]);
-                let first = all_indices.len() as u32;
-                all_indices.extend_from_slice(&[base, base+1, base+2, base+2, base+1, base+3]);
-                // Compute scissor rect in framebuffer space
-                let sx = x.floor().max(0.0) as u32;
-                let sy = y.floor().max(0.0) as u32;
-                let sw = (w.ceil() as u32).min(self.size.0.saturating_sub(sx));
-                let sh = (h.ceil() as u32).min(self.size.1.saturating_sub(sy));
-                draw_cmds.push((DrawKind::SolidFill { scissor: (sx, sy, sw, sh), color, radius }, first));
-            };
+            let mut push_overlay_rect =
+                |x: f32, y: f32, w: f32, h: f32, color: [f32; 4], radius: f32| {
+                    let fw = self.size.0 as f32;
+                    let fh = self.size.1 as f32;
+                    let x0 = (x / fw) * 2.0 - 1.0;
+                    let y0 = 1.0 - (y / fh) * 2.0;
+                    let x1 = ((x + w) / fw) * 2.0 - 1.0;
+                    let y1 = 1.0 - ((y + h) / fh) * 2.0;
+                    let base = all_vertices.len() as u16;
+                    all_vertices.extend_from_slice(&[
+                        Vertex {
+                            position: [x0, y1, 0.0],
+                            tex_coords: [0.0, 1.0],
+                        },
+                        Vertex {
+                            position: [x1, y1, 0.0],
+                            tex_coords: [1.0, 1.0],
+                        },
+                        Vertex {
+                            position: [x0, y0, 0.0],
+                            tex_coords: [0.0, 0.0],
+                        },
+                        Vertex {
+                            position: [x1, y0, 0.0],
+                            tex_coords: [1.0, 0.0],
+                        },
+                    ]);
+                    let first = all_indices.len() as u32;
+                    all_indices.extend_from_slice(&[
+                        base,
+                        base + 1,
+                        base + 2,
+                        base + 2,
+                        base + 1,
+                        base + 3,
+                    ]);
+                    // Compute scissor rect in framebuffer space
+                    let sx = x.floor().max(0.0) as u32;
+                    let sy = y.floor().max(0.0) as u32;
+                    let sw = (w.ceil() as u32).min(self.size.0.saturating_sub(sx));
+                    let sh = (h.ceil() as u32).min(self.size.1.saturating_sub(sy));
+                    draw_cmds.push((
+                        DrawKind::SolidFill {
+                            scissor: (sx, sy, sw, sh),
+                            color,
+                            radius,
+                        },
+                        first,
+                    ));
+                };
             for ov in std::mem::take(&mut self.overlays) {
                 push_overlay_rect(ov.x, ov.y, ov.w, ov.h, ov.color, ov.radius);
             }
@@ -1320,6 +1825,15 @@ impl AxiomRenderer {
                     rpass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint16);
 
                     let shadow_opacity: f32 = 0.3;
+                    
+                    // Track render statistics for performance monitoring
+                    let mut render_stats = RenderStats {
+                        total_draw_calls: 0,
+                        scissor_optimized_draws: 0,
+                        full_window_draws: 0,
+                        windows_rendered: 0,
+                        windows_occluded: render_order.len() - draw_cmds.iter().filter(|(k, _)| matches!(k, DrawKind::Window { .. })).count(),
+                    };
 
                     for (kind, first_index) in draw_cmds.iter().copied() {
                         match kind {
@@ -1382,20 +1896,90 @@ impl AxiomRenderer {
                             }
                             DrawKind::Window { widx } => {
                                 // Snapshot needed state for scissor regions
-                                let (bind_group, wxu, wyu, regions) = {
+                                let (bind_group, wxu, wyu, wwidth, wheight, regions) = {
                                     let win = &self.windows[widx];
                                     (
                                         win.bind_group.as_ref().expect("bind group set"),
                                         win.position.0 as u32,
                                         win.position.1 as u32,
+                                        win.size.0 as u32,
+                                        win.size.1 as u32,
                                         win.damage_regions.clone(),
                                     )
                                 };
 
                                 rpass.set_bind_group(0, bind_group, &[]);
-                                if regions.is_empty() {
+                                
+                                // Apply damage-aware rendering if we have computed damage regions
+                                if should_use_damage_optimization && !output_damage_regions.is_empty() {
+                                    // Render only the damaged regions that intersect this window
+                                    render_stats.windows_rendered += 1;
+                                    let mut damage_draws = 0;
+                                    
+                                    for damage_region in &output_damage_regions {
+                                        // Compute intersection between window and damage region
+                                        let win_x1 = wxu as i32;
+                                        let win_y1 = wyu as i32;
+                                        let win_x2 = win_x1 + wwidth as i32;
+                                        let win_y2 = win_y1 + wheight as i32;
+                                        
+                                        let dmg_x1 = damage_region.x;
+                                        let dmg_y1 = damage_region.y;
+                                        let dmg_x2 = dmg_x1 + damage_region.width as i32;
+                                        let dmg_y2 = dmg_y1 + damage_region.height as i32;
+                                        
+                                        // Compute intersection
+                                        let intersect_x1 = win_x1.max(dmg_x1);
+                                        let intersect_y1 = win_y1.max(dmg_y1);
+                                        let intersect_x2 = win_x2.min(dmg_x2);
+                                        let intersect_y2 = win_y2.min(dmg_y2);
+                                        
+                                        // Skip if no intersection
+                                        if intersect_x1 >= intersect_x2 || intersect_y1 >= intersect_y2 {
+                                            continue;
+                                        }
+                                        
+                                        // Apply scissor for this damage region
+                                        let scissor_x = intersect_x1.max(0) as u32;
+                                        let scissor_y = intersect_y1.max(0) as u32;
+                                        let scissor_w = (intersect_x2 - intersect_x1).min(self.size.0 as i32 - scissor_x as i32).max(0) as u32;
+                                        let scissor_h = (intersect_y2 - intersect_y1).min(self.size.1 as i32 - scissor_y as i32).max(0) as u32;
+                                        
+                                        if scissor_w == 0 || scissor_h == 0 {
+                                            continue;
+                                        }
+                                        
+                                        if use_outputs {
+                                            for &(ox, oy, ow, oh, _scale) in outputs {
+                                                let ix = ox.max(scissor_x);
+                                                let iy = oy.max(scissor_y);
+                                                let ix2 = ox.saturating_add(ow).min(scissor_x.saturating_add(scissor_w));
+                                                let iy2 = oy.saturating_add(oh).min(scissor_y.saturating_add(scissor_h));
+                                                let iw = ix2.saturating_sub(ix);
+                                                let ih = iy2.saturating_sub(iy);
+                                                if iw == 0 || ih == 0 {
+                                                    continue;
+                                                }
+                                                rpass.set_scissor_rect(ix, iy, iw, ih);
+                                                rpass.draw_indexed(first_index..first_index + 6, 0, 0..1);
+                                                render_stats.total_draw_calls += 1;
+                                                damage_draws += 1;
+                                            }
+                                        } else {
+                                            rpass.set_scissor_rect(scissor_x, scissor_y, scissor_w, scissor_h);
+                                            rpass.draw_indexed(first_index..first_index + 6, 0, 0..1);
+                                            render_stats.total_draw_calls += 1;
+                                            damage_draws += 1;
+                                        }
+                                    }
+                                    render_stats.scissor_optimized_draws += damage_draws;
+                                } else if regions.is_empty() {
+                                    // Fallback to full-window rendering (no per-window damage)
+                                    render_stats.windows_rendered += 1;
+                                    render_stats.full_window_draws += 1;
+                                    
                                     if use_outputs {
-for &(ox, oy, ow, oh, _scale) in outputs {
+                                        for &(ox, oy, ow, oh, _scale) in outputs {
                                             // Intersect full framebuffer with output rect => output rect
                                             rpass.set_scissor_rect(ox, oy, ow, oh);
                                             rpass.draw_indexed(
@@ -1403,10 +1987,12 @@ for &(ox, oy, ow, oh, _scale) in outputs {
                                                 0,
                                                 0..1,
                                             );
+                                            render_stats.total_draw_calls += 1;
                                         }
                                     } else {
                                         rpass.set_scissor_rect(0, 0, self.size.0, self.size.1);
                                         rpass.draw_indexed(first_index..first_index + 6, 0, 0..1);
+                                        render_stats.total_draw_calls += 1;
                                     }
                                 } else {
                                     for (dx, dy, dw, dh) in regions.into_iter() {
@@ -1450,37 +2036,76 @@ for &(ox, oy, ow, oh, _scale) in outputs {
                                     }
                                 }
                             }
-                            DrawKind::SolidFill { scissor, color, radius } => {
-                                if let (Some(shadow_bg), Some(sh_ubuf)) = (&self.shadow_bind_group, &self.shadow_uniform) {
+                            DrawKind::SolidFill {
+                                scissor,
+                                color,
+                                radius,
+                            } => {
+                                if let (Some(shadow_bg), Some(sh_ubuf)) =
+                                    (&self.shadow_bind_group, &self.shadow_uniform)
+                                {
                                     // Encode solid fill via mode=2 and color in params2.yzw; alpha in params.x
                                     let w_px = scissor.2 as f32;
                                     let h_px = scissor.3 as f32;
                                     let fill_params: [f32; 4] = [color[3], radius, w_px, h_px];
                                     let mode_val = if radius > 0.0 { 3.0 } else { 2.0 };
-                                    let fill_params2: [f32; 4] = [mode_val, color[0], color[1], color[2]];
-                                    self.queue.write_buffer(sh_ubuf, 0, bytemuck::cast_slice(&fill_params));
-                                    self.queue.write_buffer(sh_ubuf, 16, bytemuck::cast_slice(&fill_params2));
+                                    let fill_params2: [f32; 4] =
+                                        [mode_val, color[0], color[1], color[2]];
+                                    self.queue.write_buffer(
+                                        sh_ubuf,
+                                        0,
+                                        bytemuck::cast_slice(&fill_params),
+                                    );
+                                    self.queue.write_buffer(
+                                        sh_ubuf,
+                                        16,
+                                        bytemuck::cast_slice(&fill_params2),
+                                    );
                                     if use_outputs {
                                         for &(ox, oy, ow, oh, _scale) in outputs {
                                             let ix = ox.max(scissor.0);
                                             let iy = oy.max(scissor.1);
-                                            let ix2 = ox.saturating_add(ow).min(scissor.0.saturating_add(scissor.2));
-                                            let iy2 = oy.saturating_add(oh).min(scissor.1.saturating_add(scissor.3));
+                                            let ix2 = ox
+                                                .saturating_add(ow)
+                                                .min(scissor.0.saturating_add(scissor.2));
+                                            let iy2 = oy
+                                                .saturating_add(oh)
+                                                .min(scissor.1.saturating_add(scissor.3));
                                             let iw = ix2.saturating_sub(ix);
                                             let ih = iy2.saturating_sub(iy);
-                                            if iw == 0 || ih == 0 { continue; }
+                                            if iw == 0 || ih == 0 {
+                                                continue;
+                                            }
                                             rpass.set_scissor_rect(ix, iy, iw, ih);
                                             rpass.set_bind_group(0, shadow_bg, &[]);
-                                            rpass.draw_indexed(first_index..first_index+6, 0, 0..1);
+                                            rpass.draw_indexed(
+                                                first_index..first_index + 6,
+                                                0,
+                                                0..1,
+                                            );
                                         }
                                     } else {
-                                        rpass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
+                                        rpass.set_scissor_rect(
+                                            scissor.0, scissor.1, scissor.2, scissor.3,
+                                        );
                                         rpass.set_bind_group(0, shadow_bg, &[]);
-                                        rpass.draw_indexed(first_index..first_index+6, 0, 0..1);
+                                        rpass.draw_indexed(first_index..first_index + 6, 0, 0..1);
                                     }
                                 }
                             }
                         }
+                    }
+                    
+                    // Log render statistics for performance monitoring
+                    if should_use_damage_optimization {
+                        info!(
+                            "📊 Render stats: {} windows rendered ({} occluded), {} total draw calls ({} damage-optimized, {} full-window)",
+                            render_stats.windows_rendered,
+                            render_stats.windows_occluded,
+                            render_stats.total_draw_calls,
+                            render_stats.scissor_optimized_draws,
+                            render_stats.full_window_draws
+                        );
                     }
                 }
             }
@@ -1493,6 +2118,18 @@ for &(ox, oy, ow, oh, _scale) in outputs {
         for win in &mut self.windows {
             win.damage_regions.clear();
             win.dirty = false;
+        }
+
+        // Clear frame damage after successful render
+        if let Some(ref damage_arc) = self.frame_damage {
+            if let Ok(mut damage) = damage_arc.lock() {
+                let had_damage = damage.has_any_damage();
+                let frame_num = damage.frame_number();
+                damage.clear();
+                if had_damage {
+                    debug!("💥 Cleared frame damage after render (frame {})", frame_num);
+                }
+            }
         }
 
         info!("✅ Rendered {} windows to surface", self.windows.len());
@@ -1571,12 +2208,54 @@ for &(ox, oy, ow, oh, _scale) in outputs {
                 }
                 keep_ids = Some(ks);
 
+                info!(
+                    "🔄 sync_from_shared: found {} placeholders, {} pending textures, {} pending regions",
+                    s.placeholders.len(),
+                    s.pending_textures.len(),
+                    s.pending_texture_regions.len()
+                );
+
                 for (id, (pos, size, opacity)) in s.placeholders.iter() {
                     self.upsert_window_rect(*id, *pos, *size, *opacity);
                 }
                 let updates: Vec<_> = s.pending_textures.drain(..).collect();
                 let region_updates: Vec<_> = s.pending_texture_regions.drain(..).collect();
                 let overlays: Vec<_> = s.overlay_rects.drain(..).collect();
+
+                // Sync window stack for Z-ordering
+                let stack_clone = s.window_stack.clone();
+                if self.window_stack.is_none() {
+                    self.window_stack = Some(Arc::new(Mutex::new(stack_clone.clone())));
+                    info!(
+                        "🪟 Initialized window_stack with {} windows",
+                        stack_clone.len()
+                    );
+                } else if let Some(ref stack_arc) = self.window_stack {
+                    if let Ok(mut local_stack) = stack_arc.lock() {
+                        *local_stack = stack_clone.clone();
+                        debug!(
+                            "🪟 Synced window_stack: {} windows in Z-order",
+                            stack_clone.len()
+                        );
+                    }
+                }
+
+                // Sync frame damage for optimization
+                let damage_clone = s.frame_damage.clone();
+                if self.frame_damage.is_none() {
+                    self.frame_damage = Some(Arc::new(Mutex::new(damage_clone.clone())));
+                    if damage_clone.has_any_damage() {
+                        info!("💥 Initialized frame_damage with pending damage");
+                    }
+                } else if let Some(ref damage_arc) = self.frame_damage {
+                    if let Ok(mut local_damage) = damage_arc.lock() {
+                        *local_damage = damage_clone.clone();
+                        if damage_clone.has_any_damage() {
+                            debug!("💥 Synced frame_damage: has pending damage");
+                        }
+                    }
+                }
+
                 drop(s);
                 // Batch flush updates using a single encoder
                 let _ = self.flush_batched_texture_updates(updates, region_updates);
@@ -1584,10 +2263,27 @@ for &(ox, oy, ow, oh, _scale) in outputs {
                 self.overlays = overlays;
             }
         }
-        // After syncing, trim textures that are not currently referenced by placeholders
+        // After syncing, remove windows that are no longer in placeholders
         if let Some(keep) = keep_ids {
+            // First trim textures for windows not in keep set
             let _ = self.trim_textures_except(&keep);
+
+            // Then remove windows that are not in the keep set
+            let windows_to_remove: Vec<u64> = self
+                .windows
+                .iter()
+                .filter(|w| !keep.contains(&w.id))
+                .map(|w| w.id)
+                .collect();
+
+            for window_id in windows_to_remove {
+                self.remove_window(window_id);
+            }
         }
+        info!(
+            "🔄 sync_from_shared complete: renderer now has {} windows",
+            self.windows.len()
+        );
     }
 
     /// Start a simple headless render loop at ~60 FPS for development
@@ -1687,14 +2383,45 @@ impl AxiomRenderer {
         }
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Axiom Texture Uploads") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Axiom Texture Uploads"),
+            });
+
+        // Helper: align bytes per row to 256-byte boundary
+        let align_bytes_per_row = |unaligned: u32| -> u32 { ((unaligned + 255) / 256) * 256 };
+
+        // Helper: repack data with row padding if needed
+        let repack_with_padding = |data: &[u8], w: u32, h: u32| -> Vec<u8> {
+            let unaligned_bpr = 4 * w;
+            let aligned_bpr = align_bytes_per_row(unaligned_bpr);
+            if aligned_bpr == unaligned_bpr {
+                return data.to_vec();
+            }
+            let mut aligned = Vec::with_capacity((aligned_bpr * h) as usize);
+            for row in 0..h {
+                let src_offset = (row * unaligned_bpr) as usize;
+                let src_end = src_offset + unaligned_bpr as usize;
+                if src_end <= data.len() {
+                    aligned.extend_from_slice(&data[src_offset..src_end]);
+                    aligned.resize(aligned.len() + (aligned_bpr - unaligned_bpr) as usize, 0);
+                }
+            }
+            aligned
+        };
 
         // Helper: ensure texture exists and size matches
         let ensure_texture = |win: &mut RenderedWindow, w: u32, h: u32| {
-            let recreate = match win.tex_size { Some((tw, th)) => !(tw == w && th == h), None => true };
+            let recreate = match win.tex_size {
+                Some((tw, th)) => !(tw == w && th == h),
+                None => true,
+            };
             if recreate {
                 let texture = self.device.create_texture(&TextureDescriptor {
-                    size: Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    size: Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: TextureDimension::D2,
@@ -1704,7 +2431,10 @@ impl AxiomRenderer {
                     view_formats: &[],
                 });
                 win.texture = Some(texture);
-                win.texture_view = win.texture.as_ref().map(|t| t.create_view(&TextureViewDescriptor::default()));
+                win.texture_view = win
+                    .texture
+                    .as_ref()
+                    .map(|t| t.create_view(&TextureViewDescriptor::default()));
                 win.uniform = None;
                 win.bind_group = None;
                 win.tex_size = Some((w, h));
@@ -1715,19 +2445,23 @@ impl AxiomRenderer {
         for (id, data, w, h) in updates.into_iter() {
             if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
                 ensure_texture(win, w, h);
-                let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Axiom Staging Full"),
-                    contents: &data,
-                    usage: wgpu::BufferUsages::COPY_SRC,
-                });
+                let aligned_data = repack_with_padding(&data, w, h);
+                let aligned_bpr = align_bytes_per_row(4 * w);
+                let buf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Axiom Staging Full"),
+                        contents: &aligned_data,
+                        usage: wgpu::BufferUsages::COPY_SRC,
+                    });
                 let texture_ref = win.texture.as_ref().unwrap();
                 encoder.copy_buffer_to_texture(
                     wgpu::ImageCopyBuffer {
                         buffer: &buf,
                         layout: wgpu::ImageDataLayout {
                             offset: 0,
-bytes_per_row: Some(4 * w),
-rows_per_image: Some(h),
+                            bytes_per_row: Some(aligned_bpr),
+                            rows_per_image: Some(h),
                         },
                     },
                     wgpu::ImageCopyTexture {
@@ -1736,7 +2470,11 @@ rows_per_image: Some(h),
                         origin: Origin3d::ZERO,
                         aspect: TextureAspect::All,
                     },
-                    Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
                 );
                 win.dirty = true;
                 win.damage_regions.clear();
@@ -1746,21 +2484,26 @@ rows_per_image: Some(h),
         // Region updates
         for up in region_updates.into_iter() {
             if let Some(win) = self.windows.iter_mut().find(|w| w.id == up.id) {
-                ensure_texture(win, up.full_size.0, up.full_size.1);
+                let (fw, fh) = up.full_size;
+                ensure_texture(win, fw, fh);
                 let (x, y, w, h) = up.rect;
-                let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Axiom Staging Region"),
-                    contents: &up.bytes,
-                    usage: wgpu::BufferUsages::COPY_SRC,
-                });
+                let aligned_bytes = repack_with_padding(&up.bytes, w, h);
+                let aligned_bpr = align_bytes_per_row(4 * w);
+                let buf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Axiom Staging Region"),
+                        contents: &aligned_bytes,
+                        usage: wgpu::BufferUsages::COPY_SRC,
+                    });
                 let texture_ref = win.texture.as_ref().unwrap();
                 encoder.copy_buffer_to_texture(
                     wgpu::ImageCopyBuffer {
                         buffer: &buf,
                         layout: wgpu::ImageDataLayout {
                             offset: 0,
-bytes_per_row: Some(4 * w),
-rows_per_image: Some(h),
+                            bytes_per_row: Some(aligned_bpr),
+                            rows_per_image: Some(h),
                         },
                     },
                     wgpu::ImageCopyTexture {
@@ -1769,7 +2512,11 @@ rows_per_image: Some(h),
                         origin: Origin3d { x, y, z: 0 },
                         aspect: TextureAspect::All,
                     },
-                    Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
                 );
                 win.dirty = true;
                 win.damage_regions.push(up.rect);
@@ -1778,6 +2525,66 @@ rows_per_image: Some(h),
 
         self.queue.submit(std::iter::once(encoder.finish()));
         Ok(())
+    }
+
+    /// Checks if a window is fully occluded by opaque windows above it in Z-order
+    fn is_window_occluded(&self, window_id: u64, render_order: &[u64]) -> bool {
+        // Find position of this window in Z-order
+        let window_pos = match render_order.iter().position(|&id| id == window_id) {
+            Some(pos) => pos,
+            None => return false,
+        };
+
+        let window_idx = match self.window_id_to_index.get(&window_id) {
+            Some(&idx) => idx,
+            None => return false,
+        };
+
+        let window = &self.windows[window_idx];
+        let window_rect = (
+            window.position.0 as i32,
+            window.position.1 as i32,
+            window.size.0 as u32,
+            window.size.1 as u32,
+        );
+
+        // Check all windows above this one in Z-order
+        for &upper_id in &render_order[window_pos + 1..] {
+            if let Some(&upper_idx) = self.window_id_to_index.get(&upper_id) {
+                let upper = &self.windows[upper_idx];
+
+                // Skip if upper window is transparent
+                if upper.opacity < 1.0 {
+                    continue;
+                }
+
+                // Check if upper window fully covers this window
+                let upper_rect = (
+                    upper.position.0 as i32,
+                    upper.position.1 as i32,
+                    upper.size.0 as u32,
+                    upper.size.1 as u32,
+                );
+
+                if Self::rect_contains(upper_rect, window_rect) {
+                    debug!(
+                        "🚫 Window {} fully occluded by window {}",
+                        window_id, upper_id
+                    );
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Helper: Check if rect1 fully contains rect2
+    fn rect_contains(rect1: (i32, i32, u32, u32), rect2: (i32, i32, u32, u32)) -> bool {
+        let (x1, y1, w1, h1) = rect1;
+        let (x2, y2, w2, h2) = rect2;
+
+        x2 >= x1 && y2 >= y1 && x2 + w2 as i32 <= x1 + w1 as i32 && y2 + h2 as i32 <= y1 + h1 as i32
     }
 
     /// Detect whether the system is currently on battery power (Linux power_supply sysfs)

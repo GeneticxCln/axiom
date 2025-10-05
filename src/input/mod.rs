@@ -433,7 +433,10 @@ impl InputManager {
 
     /// Return keyboard repeat parameters (delay in ms, rate in Hz)
     pub fn repeat_params(&self) -> (u32, u32) {
-        (self.input_config.keyboard_repeat_delay, self.input_config.keyboard_repeat_rate)
+        (
+            self.input_config.keyboard_repeat_delay,
+            self.input_config.keyboard_repeat_rate,
+        )
     }
 
     /// Whether natural scrolling is enabled
