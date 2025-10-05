@@ -4272,7 +4272,6 @@ impl Dispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()> for CompositorState {
                 data_init.init(params_id, DmabufParamsData::default());
             }
             zwp_linux_dmabuf_v1::Request::GetDefaultFeedback { id } => {
-<<<<<<< HEAD
                 // Create feedback object and emit main_device + format_table + tranche + done
                 let fb: zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 =
                     data_init.init(id, ());
@@ -4345,34 +4344,6 @@ impl Dispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()> for CompositorState {
                 debug!("linux-dmabuf v4: surface feedback with tranche emitted");
             }
             _ => {}
-=======
-                data_init.init(id, DmabufFeedbackData::default());
-            }
-            zwp_linux_dmabuf_v1::Request::GetSurfaceFeedback { id, .. } => {
-                data_init.init(id, DmabufFeedbackData::default());
-            }
-            zwp_linux_dmabuf_v1::Request::Destroy => {}
-            _ => {}
-        }
-    }
-}
-
-#[derive(Default, Debug)]
-struct DmabufFeedbackData;
-
-impl Dispatch<zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1, DmabufFeedbackData> for CompositorState {
-    fn request(
-        _state: &mut Self,
-        _client: &Client,
-        _resource: &zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1,
-        request: zwp_linux_dmabuf_feedback_v1::Request,
-        _data: &DmabufFeedbackData,
-        _dhandle: &DisplayHandle,
-        _data_init: &mut DataInit<'_, Self>,
-    ) {
-        if let zwp_linux_dmabuf_feedback_v1::Request::Destroy = request {
-            // All cleanup is handled by destructors
->>>>>>> 0b89aedfbd4c004d93ad053fe0ede854970da104
         }
     }
 }

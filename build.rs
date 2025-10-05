@@ -21,6 +21,8 @@ fn main() {
         }
     }
 
-    // Tell cargo to re-run if git HEAD changes
+    // Tell cargo to re-run if git HEAD or refs change
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/heads");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
 }

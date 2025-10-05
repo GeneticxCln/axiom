@@ -91,7 +91,7 @@ axiom/
 
 ### ✅ What's New in Phase 2 (COMPLETE!)
 
-- **✅ Smithay Integration**: Real Wayland compositor framework with Smithay 0.3.0
+- **✅ Smithay Integration**: Real Wayland compositor framework with Smithay 0.7.0
 - **✅ Backend Architecture**: Functional backend with proper initialization and shutdown
 - **✅ Window Management**: Enhanced AxiomWindow wrapper with properties and lifecycle
 - **✅ Event Loop Integration**: Main compositor loop coordinating all subsystems
@@ -162,8 +162,9 @@ cargo build --release
 # Run in development mode
 ./target/debug/axiom --debug --windowed
 
-# Run in production
-sudo ./target/release/axiom
+# Run the compositor
+# Note: For DRM/KMS access, configure udev rules or use systemd-logind instead of running as root
+./target/release/axiom
 ```
 
 ### Configuration Precedence
