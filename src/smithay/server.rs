@@ -21,9 +21,7 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use wayland_protocols::wp::linux_dmabuf::zv1::server::{
-    zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1, zwp_linux_dmabuf_v1,
-};
+use wayland_protocols::wp::linux_dmabuf::zv1::server::{zwp_linux_dmabuf_feedback_v1, zwp_linux_buffer_params_v1, zwp_linux_dmabuf_v1};
 use wayland_protocols::wp::presentation_time::server::{wp_presentation, wp_presentation_feedback};
 use wayland_protocols::wp::primary_selection::zv1::server::{
     zwp_primary_selection_device_manager_v1, zwp_primary_selection_device_v1,
@@ -49,6 +47,7 @@ use wayland_server::{
 };
 use wgpu;
 use xkbcommon::xkb;
+use tiny_skia;
 
 const CURSOR_ID: u64 = 9_000_000u64;
 const CURSOR_W: u32 = 24;
@@ -4176,31 +4175,29 @@ fn update_modifiers(state: &mut CompositorState, modifiers: &[String]) {
 
 // linux-dmabuf global
 
-fn generate_cursor_rgba(w: u32, h: u32) -> Option<Vec<u8>> {
-    if w == 0 || h == 0 {
-        return None;
-    }
-    let mut buf = vec![0u8; (w * h * 4) as usize];
-    let cx = (w / 2) as i32;
-    let cy = (h / 2) as i32;
-    let t: i32 = 2; // thickness
-    for y in 0..h as i32 {
-        for x in 0..w as i32 {
-            let idx = ((y as u32 * w + x as u32) * 4) as usize;
-            let is_vert = (x - cx).abs() <= t;
-            let is_hori = (y - cy).abs() <= t;
-            if is_vert || is_hori {
-                // white crosshair with slight alpha
-                buf[idx] = 255;
-                buf[idx + 1] = 255;
-                buf[idx + 2] = 255;
-                buf[idx + 3] = 255;
-            } else {
-                buf[idx + 3] = 0;
-            }
-        }
-    }
-    Some(buf)
+fn generate_cursor_rgba(width: u32, height: u32) -> Option<Vec<u8>> {
+    let mut pixmap = tiny_skia::Pixmap::new(width, height)?;
+    pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.move_to(0.0, 0.0);
+    pb.line_to(width as f32, height as f32);
+    pb.move_to(width as f32, 0.0);
+    pb.line_to(0.0, height as f32);
+    let path = pb.finish().unwrap();
+
+    let paint = tiny_skia::Paint {
+        shader: tiny_skia::Shader::SolidColor(tiny_skia::Color::from_rgba8(0, 0, 0, 220)),
+        anti_alias: true,
+        ..Default::default()
+    };
+    let stroke = tiny_skia::Stroke {
+        width: 2.5,
+        line_cap: tiny_skia::LineCap::Round,
+        line_join: tiny_skia::LineJoin::Round,
+        ..Default::default()
+    };
+    pixmap.stroke_path(&path, &paint, &stroke, tiny_skia::Transform::identity(), None);
+    Some(pixmap.data().to_vec())
 }
 
 // linux-dmabuf global
@@ -4275,6 +4272,7 @@ impl Dispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()> for CompositorState {
                 data_init.init(params_id, DmabufParamsData::default());
             }
             zwp_linux_dmabuf_v1::Request::GetDefaultFeedback { id } => {
+<<<<<<< HEAD
                 // Create feedback object and emit main_device + format_table + tranche + done
                 let fb: zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 =
                     data_init.init(id, ());
@@ -4347,6 +4345,34 @@ impl Dispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()> for CompositorState {
                 debug!("linux-dmabuf v4: surface feedback with tranche emitted");
             }
             _ => {}
+=======
+                data_init.init(id, DmabufFeedbackData::default());
+            }
+            zwp_linux_dmabuf_v1::Request::GetSurfaceFeedback { id, .. } => {
+                data_init.init(id, DmabufFeedbackData::default());
+            }
+            zwp_linux_dmabuf_v1::Request::Destroy => {}
+            _ => {}
+        }
+    }
+}
+
+#[derive(Default, Debug)]
+struct DmabufFeedbackData;
+
+impl Dispatch<zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1, DmabufFeedbackData> for CompositorState {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1,
+        request: zwp_linux_dmabuf_feedback_v1::Request,
+        _data: &DmabufFeedbackData,
+        _dhandle: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        if let zwp_linux_dmabuf_feedback_v1::Request::Destroy = request {
+            // All cleanup is handled by destructors
+>>>>>>> 0b89aedfbd4c004d93ad053fe0ede854970da104
         }
     }
 }

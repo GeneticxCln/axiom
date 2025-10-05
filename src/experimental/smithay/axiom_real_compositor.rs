@@ -31,6 +31,7 @@ use crate::decoration::DecorationManager;
 use crate::effects::EffectsEngine;
 use crate::input::{CompositorAction, InputEvent, InputManager};
 use crate::ipc::AxiomIPCServer;
+use crate::renderer::queue_texture_update;
 use crate::window::{AxiomWindow, WindowManager};
 use crate::workspace::ScrollableWorkspaces;
 
@@ -81,6 +82,7 @@ pub struct AxiomState {
     // ID tracking
     next_window_id: u32,
     surface_to_window: HashMap<u32, u32>,
+    xdg_surface_to_wl_surface: HashMap<u32, u32>,
 }
 
 /// Wayland surface with Axiom integration
@@ -743,14 +745,35 @@ impl Dispatch<wl_surface::WlSurface, ()> for AxiomState {
                 }
                 wl_surface::Request::Commit => {
                     surface.committed = true;
-                    info!("✅ Surface {} committed - REAL CONTENT READY!", surface_id);
 
                     // If this surface belongs to a window, trigger updates
                     if let Some(window_id) = surface.window_id {
                         if let Some(window_state) = state.windows.get_mut(&window_id) {
-                            // Update the Axiom window system
-                            // This is where simulation becomes reality!
-                            info!("🔄 Updating Axiom systems for real window {}", window_id);
+                            // === REAL RENDERING INTEGRATION ===
+                            if let Some(buffer) = &surface.buffer {
+                                if let Err(err) = wl_shm::with_buffer_contents(buffer, |ptr, len, data| {
+                                    info!(
+                                        "🖼️ Accessing SHM buffer for window {}: {}x{} ({} bytes)",
+                                        window_id, data.width, data.height, len
+                                    );
+                                    // Copy data and send to renderer
+                                    let mut buffer_data = vec![0; len];
+                                    buffer_data.copy_from_slice(unsafe {
+                                        std::slice::from_raw_parts(ptr, len)
+                                    });
+
+                                    // Queue the texture update for the renderer
+                                    queue_texture_update(
+                                        window_state.axiom_window_id,
+                                        buffer_data,
+                                        data.width as u32,
+                                        data.height as u32,
+                                    );
+                                })
+                                {
+                                    warn!("Failed to access buffer contents: {:?}", err);
+                                }
+                            }
                         }
                     }
                 }
@@ -799,7 +822,7 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for AxiomState {
             xdg_wm_base::Request::GetXdgSurface { id, surface } => {
                 let xdg_surface = data_init.init(id, ());
 
-                // Find the surface and create window state
+                // Find the internal ID of the wl_surface
                 let surface_id = state.surfaces.iter().find_map(|(id, s)| {
                     if s.surface == surface {
                         Some(*id)
@@ -810,7 +833,10 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for AxiomState {
 
                 if let Some(surface_id) = surface_id {
                     info!("🪟 Creating XDG surface for surface {}", surface_id);
-                    // The window will be fully created when get_toplevel is called
+                    // Map the xdg_surface object's ID to our internal wl_surface ID
+                    state
+                        .xdg_surface_to_wl_surface
+                        .insert(xdg_surface.id().protocol_id(), surface_id);
                 }
             }
             _ => {}
@@ -846,17 +872,28 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for AxiomState {
                 // Add to workspace - this triggers your sophisticated workspace logic!
                 state.workspace_manager.write().add_window(axiom_window_id);
 
-                // Create window state (we need to get the actual wl_surface, not xdg_surface)
-                let wl_surface = state
-                    .surfaces
-                    .values()
-                    .find(|s| s.window_id == Some(window_id))
-                    .map(|s| s.surface.clone())
-                    .unwrap_or_else(|| {
-                        // Fallback: create a dummy surface reference
-                        // In a real implementation, we'd track this properly
-                        state.surfaces.values().next().unwrap().surface.clone()
-                    });
+                // --- Correctly find the wl_surface and associate it with the new window ---
+                let wl_surface_id = state
+                    .xdg_surface_to_wl_surface
+                    .get(&resource.id().protocol_id())
+                    .copied();
+
+                let wl_surface = if let Some(id) = wl_surface_id {
+                    if let Some(axiom_surface) = state.surfaces.get_mut(&id) {
+                        // Associate the AxiomSurface with our new window ID
+                        axiom_surface.window_id = Some(window_id);
+                        // Also update the reverse map
+                        state.surface_to_window.insert(id, window_id);
+                        axiom_surface.surface.clone()
+                    } else {
+                        // This should not happen if the state is consistent
+                        warn!("Could not find AxiomSurface for a known XDG surface");
+                        return;
+                    }
+                } else {
+                    warn!("Could not find wl_surface for a given xdg_surface");
+                    return;
+                };
 
                 let window_state = AxiomWindowState {
                     surface: wl_surface,
