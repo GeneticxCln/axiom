@@ -46,11 +46,13 @@ jobs:
           RUSTFLAGS: "-D warnings"
         run: |
           cargo clippy --lib --no-default-features --features smithay -- -D warnings
-      - name: cargo clippy (report all targets across matrix, non-fatal)
+      - name: cargo clippy (all targets, fail on warnings)
+        env:
+          RUSTFLAGS: "-D warnings"
         run: |
           for FEATURES in "" "--no-default-features --features smithay" "--no-default-features --features smithay,wgpu-present"; do \
             echo "Running clippy for: $FEATURES"; \
-            cargo clippy --all-targets $FEATURES || true; \
+            cargo clippy --all-targets $FEATURES -- -D warnings; \
           done
 
   test:
@@ -93,3 +95,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Report future incompatibilities
         run: cargo report future-incompatibilities --id 1
+
+  integration-minimal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libwayland-dev wayland-protocols xvfb build-essential
+      - name: Run minimal Wayland server integration test
+        run: |
+          xvfb-run -a bash ./test_wayland_server.sh
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimal-server-logs
+          path: |
+            test_logs/**
+            *.log
+            tests/*.log
