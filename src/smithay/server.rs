@@ -2851,7 +2851,7 @@ fn detect_main_device_dev() -> (u32, u32) {
 fn create_memfd_and_write(data: &str) -> std::io::Result<OwnedFd> {
     // Use memfd where available; fall back to anonymous tmp file
     let name = CString::new("axiom-xkb-keymap").unwrap();
-    let fd = unsafe { libc::memfd_create(name.as_ptr(), 0) };
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -2864,7 +2864,7 @@ fn create_memfd_and_write(data: &str) -> std::io::Result<OwnedFd> {
 #[cfg(target_os = "linux")]
 fn create_memfd_and_write_bytes(data: &[u8]) -> std::io::Result<OwnedFd> {
     let name = CString::new("axiom-bytes").unwrap();
-    let fd = unsafe { libc::memfd_create(name.as_ptr(), 0) };
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }

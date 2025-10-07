@@ -146,11 +146,15 @@ fn create_ctx() -> Option<VkCtx> {
 }
 
 fn get_ctx() -> Option<std::sync::MutexGuard<'static, VkCtx>> {
-    let m = CTX.get_or_init(|| Mutex::new(create_ctx().expect("Vulkan init failed")));
-    // If create_ctx failed, the expect() will panic; instead, guard: re-initialize with graceful None
-    // But since OnceLock cannot reset, we avoid None path here by creating on first call.
-    // In practice, if init fails, this process likely lacks Vulkan support anyway.
-    m.lock().ok()
+    // Non-panicking initialization: if Vulkan init fails, return None and avoid poisoning OnceLock
+    if CTX.get().is_none() {
+        if let Some(ctx) = create_ctx() {
+            let _ = CTX.set(Mutex::new(ctx));
+        } else {
+            return None;
+        }
+    }
+    CTX.get().and_then(|m| m.lock().ok())
 }
 
 fn map_fourcc_to_vk_format(fourcc: u32) -> Option<(vk::Format, bool)> {
@@ -201,6 +205,9 @@ pub fn import_rgba_from_dmabuf(
     let dup_fd = unsafe { libc::dup(fd.as_raw_fd()) };
     if dup_fd < 0 {
         return None;
+    } else {
+        // Ensure duplicated fd does not leak across exec boundaries
+        unsafe { let _ = libc::fcntl(dup_fd, libc::F_SETFD, libc::FD_CLOEXEC); }
     }
 
     let image_tiling = vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT;

@@ -59,11 +59,11 @@ fn start_output_control_server(tx: std::sync::mpsc::Sender<crate::smithay::serve
     let listener = match UnixListener::bind(&sock_path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("failed to bind control socket {}: {}", sock_path, e);
+            error!("failed to bind control socket {}: {}", sock_path, e);
             return;
         }
     };
-    eprintln!("axiom control socket listening at {}", sock_path);
+    info!("axiom control socket listening at {}", sock_path);
 
     thread::spawn(move || {
         for stream_res in listener.incoming() {
@@ -359,16 +359,18 @@ async fn main() -> Result<()> {
         let (size_tx, size_rx) = std::sync::mpsc::channel::<crate::smithay::server::SizeUpdate>();
         let (redraw_tx, redraw_rx) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
-            let _ = env_logger::try_init();
-            let wm = Arc::new(RwLock::new(
-                WindowManager::new(&cfg_clone.window).expect("wm"),
-            ));
-            let ws = Arc::new(RwLock::new(
-                ScrollableWorkspaces::new(&cfg_clone.workspace).expect("ws"),
-            ));
-            let im = Arc::new(RwLock::new(
-                InputManager::new(&cfg_clone.input, &cfg_clone.bindings).expect("im"),
-            ));
+                        let wm = match WindowManager::new(&cfg_clone.window) {
+                Ok(w) => Arc::new(RwLock::new(w)),
+                Err(e) => { error!("Failed to initialize WindowManager: {}", e); return; }
+            };
+            let ws = match ScrollableWorkspaces::new(&cfg_clone.workspace) {
+                Ok(w) => Arc::new(RwLock::new(w)),
+                Err(e) => { error!("Failed to initialize ScrollableWorkspaces: {}", e); return; }
+            };
+            let im = match InputManager::new(&cfg_clone.input, &cfg_clone.bindings) {
+                Ok(m) => Arc::new(RwLock::new(m)),
+                Err(e) => { error!("Failed to initialize InputManager: {}", e); return; }
+            };
             let clip = Arc::new(RwLock::new(ClipboardManager::new()));
             let input_rx = crate::smithay::input_backend::init_libinput_backend()
                 .or_else(crate::smithay::server::CompositorServer::spawn_evdev_input_channel);
@@ -400,8 +402,11 @@ async fn main() -> Result<()> {
                 selected_backends,
                 outputs_init,
                 Some(outputs_rx),
-            )
-            .expect("server");
+            );
+            let server = match server {
+                Ok(s) => s,
+                Err(e) => { error!("Failed to create CompositorServer: {}", e); return; }
+            };
             let _ = server.run();
         });
 
@@ -439,14 +444,20 @@ async fn main() -> Result<()> {
                 Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
                 Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
                     if new_size.width > 0 && new_size.height > 0 {
-                        renderer = pollster::block_on(crate::renderer::AxiomRenderer::new_with_instance(
+                        match pollster::block_on(crate::renderer::AxiomRenderer::new_with_instance(
                             &instance,
                             Some(&surface),
                             new_size.width,
                             new_size.height,
-                        ))
-                        .expect("recreate renderer");
-                        let _ = size_tx.send(crate::smithay::server::SizeUpdate { width: new_size.width, height: new_size.height, scale: window.scale_factor() as i32, name: window.current_monitor().and_then(|m| m.name()), model: None });
+                        )) {
+                            Ok(new_renderer) => {
+                                renderer = new_renderer;
+                                let _ = size_tx.send(crate::smithay::server::SizeUpdate { width: new_size.width, height: new_size.height, scale: window.scale_factor() as i32, name: window.current_monitor().and_then(|m| m.name()), model: None });
+                            }
+                            Err(e) => {
+                                error!("Failed to recreate renderer: {}", e);
+                            }
+                        }
                         window.request_redraw();
                     }
                 }
@@ -479,7 +490,7 @@ async fn main() -> Result<()> {
                             // Only render if we have windows, otherwise just clear and present once
                             if has_content {
                                 if let Err(e) = renderer.render_to_surface_with_outputs(&surface, &frame, &outputs_rects, debug_overlay) {
-                                    eprintln!("render error: {}", e);
+                                    error!("render error: {}", e);
                                 }
                                 frame.present();
                                 

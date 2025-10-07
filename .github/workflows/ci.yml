@@ -18,6 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -32,6 +33,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -69,6 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -83,6 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
       - name: Run cargo-deny (advisories)
@@ -93,6 +97,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Report future incompatibilities
         run: cargo report future-incompatibilities --id 1
 
@@ -101,6 +106,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -114,6 +120,34 @@ jobs:
         with:
           name: minimal-server-logs
           path: |
+            test_logs/**
+            *.log
+            tests/*.log
+
+  integration-shm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies (Wayland + X11 + build tools)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config build-essential xvfb \
+            wayland-protocols libwayland-dev libxkbcommon-dev \
+            libx11-dev libxi-dev libxcursor-dev libxrandr-dev libx11-xcb-dev \
+            libgl1-mesa-dev
+      - name: Run SHM rendering validation (xvfb)
+        run: |
+          xvfb-run -a bash ./test_shm_rendering.sh
+      - name: Upload SHM test logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shm-rendering-logs
+          path: |
+            test_logs_shm/**
             test_logs/**
             *.log
             tests/*.log
