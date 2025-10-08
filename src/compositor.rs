@@ -571,6 +571,13 @@ impl AxiomCompositor {
             active_effects
         );
 
+        // Broadcast rate-limited performance metrics via IPC
+        let frame_time_ms: f32 = (frame_time.as_secs_f32() * 1000.0).max(0.0);
+        let active_windows = self.workspace_manager.active_window_count() as u32;
+        let current_workspace = self.workspace_manager.focused_column_index();
+        self.ipc_server
+            .maybe_broadcast_performance_metrics(frame_time_ms, active_windows, current_workspace);
+
         Ok(())
     }
 

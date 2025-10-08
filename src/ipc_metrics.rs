@@ -180,7 +180,7 @@ impl MetricsCollector {
             effects_quality: self.effects_quality_history.back()
                 .copied()
                 .unwrap_or(100.0),
-            workspace_scroll_speed: 1.0, // TODO: Get from workspace manager
+            workspace_scroll_speed: crate::workspace::get_global_scroll_speed() as f32,
         }
     }
     
@@ -194,7 +194,7 @@ impl MetricsCollector {
             fps: 1000.0 / self.calculate_average(&self.frame_time_history).max(1.0),
             window_count: self.calculate_average(&self.window_count_history) as u32,
             effects_quality: self.calculate_average(&self.effects_quality_history),
-            workspace_scroll_speed: 1.0,
+            workspace_scroll_speed: crate::workspace::get_global_scroll_speed() as f32,
         }
     }
     
@@ -208,7 +208,7 @@ impl MetricsCollector {
             fps: 1000.0 / self.calculate_min(&self.frame_time_history).max(1.0),
             window_count: self.calculate_peak(&self.window_count_history) as u32,
             effects_quality: self.calculate_min(&self.effects_quality_history),
-            workspace_scroll_speed: 1.0,
+            workspace_scroll_speed: crate::workspace::get_global_scroll_speed() as f32,
         }
     }
     

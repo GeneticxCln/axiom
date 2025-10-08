@@ -7,9 +7,31 @@ use anyhow::Result;
 use log::{debug, info};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use std::sync::{Mutex, OnceLock};
 
 use crate::config::WorkspaceConfig;
 use crate::window::Rectangle;
+
+// Global snapshot of workspace scroll speed for metrics
+static GLOBAL_SCROLL_SPEED: OnceLock<Mutex<f64>> = OnceLock::new();
+
+/// Update global scroll speed snapshot
+pub fn set_global_scroll_speed(speed: f64) {
+    let cell = GLOBAL_SCROLL_SPEED.get_or_init(|| Mutex::new(1.0));
+    match cell.lock() {
+        Ok(mut guard) => { *guard = speed.clamp(0.01, 10.0); }
+        Err(poisoned) => { *poisoned.into_inner() = speed.clamp(0.01, 10.0); }
+    }
+}
+
+/// Read global scroll speed snapshot
+pub fn get_global_scroll_speed() -> f64 {
+    let cell = GLOBAL_SCROLL_SPEED.get_or_init(|| Mutex::new(1.0));
+    match cell.lock() {
+        Ok(guard) => *guard,
+        Err(poisoned) => *poisoned.into_inner(),
+    }
+}
 
 /// Represents a workspace column in the scrollable view
 #[derive(Debug, Clone)]
@@ -127,7 +149,13 @@ impl ScrollableWorkspaces {
     pub fn set_scroll_speed(&mut self, speed: f64) {
         let clamped = speed.clamp(0.01, 10.0);
         self.config.scroll_speed = clamped;
+        set_global_scroll_speed(clamped);
         info!("⚙️ Updated workspace scroll_speed to {:.2}", clamped);
+    }
+
+    /// Get the current workspace scroll speed
+    pub fn scroll_speed(&self) -> f64 {
+        self.config.scroll_speed
     }
 
     /// Check if a window exists in any column
@@ -159,6 +187,8 @@ impl ScrollableWorkspaces {
             reserved_left: 0.0,
         };
 
+        // Sync global scroll speed snapshot
+        set_global_scroll_speed(workspace_manager.config.scroll_speed);
         // Create the initial workspace column
         workspace_manager.ensure_column(0);
 
