@@ -411,6 +411,9 @@ impl FrameDamage {
             }
         }
 
+        // Coalesce overlapping/adjacent output regions to reduce render work
+        self.merge_output_regions();
+
         self.output_damage_valid = true;
     }
 
@@ -419,6 +422,27 @@ impl FrameDamage {
     /// You must call `compute_output_damage()` first.
     pub fn output_regions(&self) -> &[DamageRegion] {
         &self.output_regions
+    }
+
+    /// Merge overlapping or adjacent output damage regions (screen space)
+    pub fn merge_output_regions(&mut self) {
+        if self.output_regions.len() <= 1 {
+            return;
+        }
+        // Sort by scanline then x for deterministic merging
+        self.output_regions.sort_by_key(|r| (r.y, r.x));
+        let mut merged: Vec<DamageRegion> = Vec::with_capacity(self.output_regions.len());
+        let mut current = self.output_regions[0];
+        for r in &self.output_regions[1..] {
+            if current.intersects(r) || current.is_adjacent(r, 10) {
+                current = current.union(r);
+            } else {
+                merged.push(current);
+                current = *r;
+            }
+        }
+        merged.push(current);
+        self.output_regions = merged;
     }
 
     /// Clears all damage after rendering

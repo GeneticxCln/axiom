@@ -358,6 +358,25 @@ async fn main() -> Result<()> {
         let (present_tx, present_rx) = std::sync::mpsc::channel::<PresentEvent>();
         let (size_tx, size_rx) = std::sync::mpsc::channel::<crate::smithay::server::SizeUpdate>();
         let (redraw_tx, redraw_rx) = std::sync::mpsc::channel::<()>();
+        // Start IPC server in a background Tokio runtime and keep it alive
+        let ipc_server = std::sync::Arc::new(std::sync::Mutex::new(crate::ipc::AxiomIPCServer::new()));
+        crate::ipc::AxiomIPCServer::set_config_snapshot(config.clone());
+        let ipc_server_for_thread = ipc_server.clone();
+        std::thread::spawn(move || {
+            match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+                Ok(rt) => {
+                    rt.block_on(async move {
+                        if let Ok(mut guard) = ipc_server_for_thread.lock() {
+                            if let Err(e) = guard.start().await {
+                                error!("Failed to start IPC server: {}", e);
+                            }
+                        }
+                        loop { tokio::time::sleep(std::time::Duration::from_secs(3600)).await; }
+                    });
+                }
+                Err(e) => error!("Failed to create Tokio runtime for IPC server: {}", e),
+            }
+        });
         std::thread::spawn(move || {
                         let wm = match WindowManager::new(&cfg_clone.window) {
                 Ok(w) => Arc::new(RwLock::new(w)),
@@ -438,8 +457,9 @@ async fn main() -> Result<()> {
             size.height,
         ))?;
 
+        let mut last_frame_time_inst = std::time::Instant::now();
         // Run the event loop on the main thread
-        return Ok(event_loop.run(|event, elwt| {
+        return Ok(event_loop.run(move |event, elwt| {
             match event {
                 Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
                 Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
@@ -514,6 +534,16 @@ async fn main() -> Result<()> {
                                 let outputs_count = outputs_init_main.as_ref().map(|v| v.len()).unwrap_or(1);
                                 for idx in 0..outputs_count {
                                     let _ = present_tx.send(PresentEvent { tv_sec_hi, tv_sec_lo, tv_nsec, refresh_ns, flags, output_idx: Some(idx) });
+                                }
+
+                                // Broadcast IPC performance metrics (rate-limited inside IPC)
+                                if let Ok(mut guard) = ipc_server.lock() {
+                                    let now_inst = std::time::Instant::now();
+                                    let frame_time_ms = (now_inst.duration_since(last_frame_time_inst).as_secs_f32() * 1000.0).max(0.0);
+                                    last_frame_time_inst = now_inst;
+                                    let active_windows = renderer.window_count() as u32;
+                                    let current_workspace = 0; // server thread owns workspace index
+                                    guard.maybe_broadcast_performance_metrics(frame_time_ms, active_windows, current_workspace);
                                 }
                             } else {
                                 // No windows yet - just drop the frame without presenting to avoid wgpu errors
