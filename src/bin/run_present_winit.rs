@@ -407,6 +407,9 @@ fn main() -> Result<()> {
         size.height.max(1),
     ))?;
 
+    // Request initial redraw to display the window
+    window.request_redraw();
+
     // Enter event loop
     Ok(event_loop.run(|event, elwt| {
         match event {
@@ -421,14 +424,10 @@ fn main() -> Result<()> {
             } => {
                 size = new_size;
                 if size.width > 0 && size.height > 0 {
-                    // Recreate renderer for new size
-                    renderer = pollster::block_on(AxiomRenderer::new_with_instance(
-                        &instance,
-                        Some(&surface),
-                        size.width,
-                        size.height,
-                    ))
-                    .expect("recreate renderer");
+                    // Resize existing renderer (much more efficient than recreating)
+                    if let Err(e) = renderer.resize(Some(&surface), size.width, size.height) {
+                        eprintln!("renderer resize error: {}", e);
+                    }
 
                     // Send size update to server (primary output)
                     let _ = size_tx.send(SizeUpdate {
@@ -500,9 +499,14 @@ fn main() -> Result<()> {
                     last_monitors_fingerprint = Some(s);
                 }
 
-                // Drain redraw requests from server and redraw once
-                while redraw_rx.try_recv().is_ok() {}
-                window.request_redraw();
+                // Only request redraw if server has sent redraw requests
+                let mut needs_redraw = false;
+                while redraw_rx.try_recv().is_ok() {
+                    needs_redraw = true;
+                }
+                if needs_redraw {
+                    window.request_redraw();
+                }
             }
 
             Event::WindowEvent {

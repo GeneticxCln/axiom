@@ -158,7 +158,7 @@ pub fn push_placeholder_quad(id: u64, position: (f32, f32), size: (f32, f32), op
     let state = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
     if let Ok(mut s) = state.lock() {
         s.placeholders.insert(id, (position, size, opacity));
-        info!(
+        debug!(
             "➕ push_placeholder_quad: id={}, pos=({:.1}, {:.1}), size=({:.1}, {:.1}), opacity={:.2}, total={}",
             id, position.0, position.1, size.0, size.1, opacity, s.placeholders.len()
         );
@@ -872,6 +872,47 @@ impl AxiomRenderer {
         Self::new_headless_with_backends(wgpu::Backends::all()).await
     }
 
+    /// Resize the renderer by updating dimensions and reconfiguring the surface if needed
+    ///
+    /// This is much more efficient than recreating the entire renderer on window resize.
+    pub fn resize(&mut self, surface: Option<&wgpu::Surface<'_>>, width: u32, height: u32) -> Result<()> {
+        info!("📐 Resizing renderer to {}x{}", width, height);
+        self.size = (width, height);
+        
+        // If we have a surface and are surface-compatible, reconfigure it
+        if self.surface_compatible {
+            if let Some(s) = surface {
+                if let Some(format) = self.surface_format {
+                    let present_mode = {
+                        let override_pm = std::env::var("AXIOM_PRESENT_MODE")
+                            .ok()
+                            .map(|s| s.to_lowercase());
+                        match override_pm.as_deref() {
+                            Some("mailbox") => wgpu::PresentMode::Mailbox,
+                            Some("immediate") => wgpu::PresentMode::Immediate,
+                            Some("fifo") | _ => wgpu::PresentMode::Fifo,
+                        }
+                    };
+                    
+                    let config = wgpu::SurfaceConfiguration {
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        format,
+                        width,
+                        height,
+                        present_mode,
+                        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                        view_formats: vec![],
+                        desired_maximum_frame_latency: 2,
+                    };
+                    s.configure(&self.device, &config);
+                    info!("✅ Surface reconfigured for new size");
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
     /// Add a window to be rendered
     pub fn add_window(&mut self, id: u64, position: (f32, f32), size: (f32, f32)) -> Result<()> {
         info!(
@@ -914,7 +955,7 @@ impl AxiomRenderer {
                 || w.size != size
                 || (w.opacity - opacity).abs() > f32::EPSILON
             {
-                info!(
+                debug!(
                     "🔄 upsert_window_rect: updating window {} pos=({:.1}, {:.1}) size=({:.1}, {:.1}) opacity={:.2}",
                     id, position.0, position.1, size.0, size.1, opacity
                 );
@@ -924,7 +965,7 @@ impl AxiomRenderer {
                 w.dirty = true;
             }
         } else {
-            info!(
+            debug!(
                 "✨ upsert_window_rect: adding NEW window {} pos=({:.1}, {:.1}) size=({:.1}, {:.1}) opacity={:.2}",
                 id, position.0, position.1, size.0, size.1, opacity
             );
@@ -1102,7 +1143,7 @@ impl AxiomRenderer {
 
             window.dirty = true;
             window.damage_regions.clear();
-            info!("✅ Updated texture for window {}", window_id);
+            debug!("✅ Updated texture for window {}", window_id);
         }
 
         Ok(())
@@ -1246,7 +1287,7 @@ impl AxiomRenderer {
 
     /// Render all windows (simplified for now - needs actual surface)
     pub fn render(&mut self) -> Result<()> {
-        info!("🎨 Rendering {} windows to GPU", self.windows.len());
+        debug!("🎨 Rendering {} windows to GPU", self.windows.len());
 
         // For now, just validate that we have the GPU device and queue
         // In a real implementation, this would render to an actual surface
@@ -1492,7 +1533,7 @@ impl AxiomRenderer {
                             let screen_area = self.size.0 * self.size.1;
                             let damage_percentage = (total_damage_area as f64 / screen_area as f64) * 100.0;
                             
-                            info!(
+                            debug!(
                                 "💥 Frame has {} damage regions (area: {}/{} pixels, {:.1}% of screen)",
                                 output_damage_regions.len(),
                                 total_damage_area,
@@ -1523,7 +1564,7 @@ impl AxiomRenderer {
                 if let Ok(stack) = stack_arc.lock() {
                     let order = stack.render_order().to_vec();
                     if !order.is_empty() {
-                        info!(
+                        debug!(
                             "🪟 Rendering {} windows in Z-order: {:?} (bottom to top)",
                             order.len(),
                             order
