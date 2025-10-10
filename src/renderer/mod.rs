@@ -7,6 +7,7 @@
 
 pub mod batching;
 pub mod damage;
+pub mod frame_pacing;
 pub mod texture_pool;
 pub mod window_stack;
 
