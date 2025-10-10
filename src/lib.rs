@@ -11,6 +11,7 @@ pub mod input;
 pub mod ipc;
 pub mod protocol;
 pub mod renderer;
+pub mod screencopy;
 pub mod window;
 pub mod workspace;
 pub mod xwayland;
