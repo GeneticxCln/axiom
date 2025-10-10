@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+pub mod batching;
 pub mod damage;
 pub mod window_stack;
 
