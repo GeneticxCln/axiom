@@ -40,10 +40,15 @@
 //! }
 //! ```
 
+pub mod error_injection;
 pub mod xdg_shell_validation;
 
 // Re-export commonly used types
 pub use xdg_shell_validation::{
     ProtocolError, ProtocolWarning, ValidatorStats, XdgRole, XdgShellValidator,
     XdgSurfaceState, XdgSurfaceValidation,
+};
+
+pub use error_injection::{
+    ErrorInjector, InjectionResult, ProtocolViolation, ClientTimeoutSimulator,
 };
