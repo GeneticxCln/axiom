@@ -555,7 +555,7 @@ impl VisualTestContext {
         height: u32,
         radius: f32,
         intensity: f32,
-        horizontal: bool,
+        _horizontal: bool,
     ) -> Result<Vec<u8>> {
         // For now, delegate to full blur - can be optimized later
         self.apply_blur_effect(input_data, width, height, radius, intensity)

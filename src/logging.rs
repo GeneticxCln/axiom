@@ -54,7 +54,7 @@
 //! logger.end_span(span);
 //! ```
 
-use log::{debug, error, info, trace, warn};
+use log::{debug, info, trace};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;

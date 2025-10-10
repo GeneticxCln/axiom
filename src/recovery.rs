@@ -52,7 +52,7 @@
 //! }
 //! ```
 
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs::{self, File};

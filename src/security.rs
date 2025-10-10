@@ -163,10 +163,6 @@ struct ClientResources {
     pub windows: usize,
     /// Number of surfaces
     pub surfaces: usize,
-    /// Number of buffers
-    pub buffers: usize,
-    /// Estimated memory usage
-    pub memory_usage: u64,
 }
 
 impl ClientResources {
@@ -174,8 +170,6 @@ impl ClientResources {
         Self {
             windows: 0,
             surfaces: 0,
-            buffers: 0,
-            memory_usage: 0,
         }
     }
 }

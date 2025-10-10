@@ -40,11 +40,17 @@ use std::sync::{Arc, Mutex};
 
 /// Common MIME types for clipboard
 pub mod mime_types {
+    #[allow(dead_code)]
     pub const TEXT_PLAIN: &str = "text/plain";
+    #[allow(dead_code)]
     pub const TEXT_PLAIN_UTF8: &str = "text/plain;charset=utf-8";
+    #[allow(dead_code)]
     pub const TEXT_HTML: &str = "text/html";
+    #[allow(dead_code)]
     pub const TEXT_URI_LIST: &str = "text/uri-list";
+    #[allow(dead_code)]
     pub const IMAGE_PNG: &str = "image/png";
+    #[allow(dead_code)]
     pub const IMAGE_JPEG: &str = "image/jpeg";
 }
 
@@ -347,6 +353,7 @@ pub struct ClipboardStats {
 }
 
 /// Thread-safe clipboard manager wrapper
+#[allow(dead_code)]
 pub type SharedClipboard = Arc<Mutex<ClipboardManager>>;
 
 #[cfg(test)]

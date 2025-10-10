@@ -3,7 +3,7 @@
 use axiom::effects::shaders::ShaderManager;
 use axiom::effects::shadow::{ShadowQuality, ShadowRenderer};
 use axiom::effects::ShadowParams;
-use axiom::visual_tests::{VisualTestConfig, VisualTestRunner};
+use axiom::visual_tests::{ComparisonResult, VisualTestConfig, VisualTestRunner};
 use cgmath::Vector2;
 use std::sync::Arc;
 
@@ -90,7 +90,19 @@ async fn render_shadow_golden(
         .await
         .expect("Visual test run failed");
 
-    assert!(result.passed, "Golden comparison failed: diff={}", result.difference);
+    match result {
+        ComparisonResult::Match | ComparisonResult::NewBaseline => {
+            // Test passed or new baseline created
+        }
+        ComparisonResult::Mismatch { difference, different_pixels, total_pixels } => {
+            panic!(
+                "Golden comparison failed: {:.2}% difference ({}/{} pixels)",
+                difference * 100.0,
+                different_pixels,
+                total_pixels
+            );
+        }
+    }
 }
 
 #[tokio::test]

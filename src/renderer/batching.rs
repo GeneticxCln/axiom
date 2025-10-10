@@ -34,8 +34,7 @@
 use log::{debug, warn};
 use std::collections::HashMap;
 use wgpu::{
-    BindGroup, Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Device, Queue,
-    RenderPipeline, TextureFormat, TextureView,
+    Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Device, Queue, TextureFormat, TextureView,
 };
 use cgmath::{Matrix4, Vector2};
 
