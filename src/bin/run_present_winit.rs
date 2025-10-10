@@ -13,7 +13,6 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::EventLoop;
-use winit::window::Fullscreen;
 
 // Axiom imports
 use axiom::clipboard::ClipboardManager;
@@ -226,7 +225,7 @@ fn main() -> Result<()> {
     window.focus_window();  // Request focus
 
     // Get window size (use regular windowed mode for better compatibility)
-    let mut size = window.inner_size();
+    let size = window.inner_size();
     let monitor = window
         .current_monitor()
         .or_else(|| event_loop.primary_monitor())

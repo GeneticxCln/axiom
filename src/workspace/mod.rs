@@ -25,6 +25,7 @@ pub fn set_global_scroll_speed(speed: f64) {
 }
 
 /// Read global scroll speed snapshot
+#[allow(dead_code)]
 pub fn get_global_scroll_speed() -> f64 {
     let cell = GLOBAL_SCROLL_SPEED.get_or_init(|| Mutex::new(1.0));
     match cell.lock() {

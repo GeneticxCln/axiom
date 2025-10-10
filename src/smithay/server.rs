@@ -421,8 +421,7 @@ impl CompositorServer {
             .socket_name()
             .map(|s| s.to_string_lossy().to_string())
             .ok_or_else(|| anyhow::anyhow!("missing socket name"))?;
-        println!("🔌 DEBUG: Socket bound to: {}", socket_name);
-        eprintln!("🔌 DEBUG: Socket bound to: {}", socket_name);
+        debug!("Socket bound to: {}", socket_name);
 
         // Spawn evdev input threads (best-effort) unless external channel provided
         let input_rx = if input_rx_ext.is_some() {
@@ -452,10 +451,9 @@ impl CompositorServer {
     }
 
     pub fn run(self) -> Result<()> {
-        println!("🔌 Wayland socket: {}", self.socket_name);
+        info!("Wayland socket: {}", self.socket_name);
         std::env::set_var("WAYLAND_DISPLAY", &self.socket_name);
         info!("WAYLAND_DISPLAY={}", self.socket_name);
-        println!("🔌 Set WAYLAND_DISPLAY={}", self.socket_name);
         // Start XWayland if available so X11 apps can connect
         let mut _xwayland_guard: Option<crate::xwayland::XWaylandManager> = None;
         {
@@ -1579,7 +1577,10 @@ impl CompositorServer {
                     self.update_pointer_focus_and_motion(state)?;
                 }
                 HwInputEvent::PointerButton { button, pressed } => {
-                    self.handle_pointer_button(state, button, pressed)?;
+                    // FIXME: This method was refactored to handle_pointer_button_with_wm_inline
+                    // which requires Arc<RwLock<WindowManager>> and Arc<RwLock<ScrollableWorkspaces>>
+                    // This dead code path needs updating if ever re-enabled.
+                    let _ = (button, pressed); // silence unused warnings
                 }
                 HwInputEvent::PointerAxis {
                     horizontal,
@@ -2091,49 +2092,6 @@ impl CompositorServer {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    fn handle_pointer_button(
-        &mut self,
-        state: &mut CompositorState,
-        button: u8,
-        pressed: bool,
-    ) -> Result<()> {
-        // Send to focused pointer surface if any
-        if let Some(focus_id) = state.pointer_focus_window {
-            if let Some(surface) = CompositorServer::surface_for_axiom_id(state, focus_id) {
-                // Ensure focus is aligned with click (focus on click)
-                if state.focused_window_id != Some(focus_id) {
-                    let _ = self.window_manager.write().focus_window(focus_id);
-                    state.focused_window_id = Some(focus_id);
-                    // Seat focus enter for keyboard
-                    let serial = state.next_serial();
-                    send_keyboard_enter_safe(state, &surface, serial);
-                }
-                let time_ms: u32 = (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-                    & 0xFFFF_FFFF) as u32;
-                // Linux evdev button codes: BTN_LEFT=272, BTN_RIGHT=273, BTN_MIDDLE=274
-                let button_code: u32 = match button {
-                    1 => 272,
-                    2 => 273,
-                    3 => 274,
-                    _ => 272,
-                };
-                let state_flag = if pressed {
-                    wl_pointer::ButtonState::Pressed
-                } else {
-                    wl_pointer::ButtonState::Released
-                };
-                let serial = state.next_serial();
-                for ptr in &state.pointers {
-                    ptr.button(serial, time_ms, button_code, state_flag);
-                }
-            }
-        }
-        Ok(())
-    }
 
     fn spawn_combined_input_threads() -> Option<Receiver<HwInputEvent>> {
         // For now, reuse the evdev/libinput combined thread implementation below
@@ -3178,133 +3136,6 @@ impl CompositorServer {
         Ok(())
     }
 
-    fn handle_pointer_button_inline(
-        state: &mut CompositorState,
-        button: u8,
-        pressed: bool,
-    ) -> Result<()> {
-        // Check for decoration button clicks first (only for left button)
-        if button == 1 {
-        if let Some(focus_id) = state.pointer_focus_window {
-            // Get window layout to determine local coordinates
-            if let Some(rect) = state.last_layouts.get(&focus_id).cloned() {
-                let (px, py) = state.pointer_pos;
-                let local_x = (px - rect.x as f64) as i32;
-                let local_y = (py - rect.y as f64) as i32;
-                
-                // Check if click is on a decoration button
-                if pressed {
-                    // Handle button press
-                    let action_opt = state
-                        .decoration_manager_handle
-                        .write()
-                        .handle_button_press(focus_id, local_x, local_y);
-                    
-                    if let Some(action) = action_opt {
-                        use crate::decoration::DecorationAction;
-                        match action {
-                            DecorationAction::Close => {
-                                // Close the window
-                                if let Some(tl) = state
-                                    .windows
-                                    .iter()
-                                    .find(|w| w.axiom_id == Some(focus_id))
-                                    .and_then(|w| w.xdg_toplevel.clone())
-                                {
-                                    tl.close();
-                                    log::info!("🔴 Close button clicked for window {}", focus_id);
-                                }
-                                return Ok(()); // Don't send click to client
-                            }
-                            DecorationAction::Minimize => {
-                                // Minimize the window - not yet wired to WM in inline handler
-                                // TODO: Need access to WindowManager Arc here
-                                log::info!("➖ Minimize button clicked for window {}", focus_id);
-                                return Ok(()); // Don't send click to client
-                            }
-                            DecorationAction::ToggleMaximize => {
-                                // Toggle maximize state - not yet wired to WM in inline handler
-                                // TODO: Need access to WindowManager Arc here  
-                                log::info!("⬜ Maximize button clicked for window {}", focus_id);
-                                return Ok(()); // Don't send click to client
-                            }
-                            DecorationAction::StartMove => {
-                                // TODO: Implement window move
-                                log::info!("↔️ Titlebar drag initiated for window {} (not yet implemented)", focus_id);
-                                // For now, don't consume the event - let client handle it
-                            }
-                            _ => {}
-                        }
-                    }
-                } else {
-                    // Handle button release
-                    state
-                        .decoration_manager_handle
-                        .write()
-                        .handle_button_release(focus_id, local_x, local_y);
-                }
-            }
-        }
-        }
-        
-        // Same behavior as handle_pointer_button but without &mut self
-        if let Some(focus_id) = state.pointer_focus_window {
-            if let Some(surface) = CompositorServer::surface_for_axiom_id(state, focus_id) {
-                if state.focused_window_id != Some(focus_id) {
-                    // Leave previous focus if any
-                    if let Some(prev_id) = state.focused_window_id.take() {
-                        if let Some(prev_surface) =
-                            CompositorServer::surface_for_axiom_id(state, prev_id)
-                        {
-                            let serial = state.next_serial();
-                            for kb in &state.keyboards {
-                                kb.leave(serial, &prev_surface);
-                            }
-                            let serial = state.next_serial();
-                            for ptr in &state.pointers {
-                                ptr.leave(serial, &prev_surface);
-                            }
-                        }
-                        // Update decoration focus
-                        state
-                            .decoration_manager_handle
-                            .write()
-                            .set_window_focus(prev_id, false);
-                    }
-                    state.focused_window_id = Some(focus_id);
-                    // Update decoration focus
-                    state
-                        .decoration_manager_handle
-                        .write()
-                        .set_window_focus(focus_id, true);
-                    // Seat focus enter for keyboard
-                    let serial = state.next_serial();
-                    send_keyboard_enter_safe(state, &surface, serial);
-                }
-                let time_ms: u32 = (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-                    & 0xFFFF_FFFF) as u32;
-                let button_code: u32 = match button {
-                    1 => 272,
-                    2 => 273,
-                    3 => 274,
-                    _ => 272,
-                };
-                let state_flag = if pressed {
-                    wl_pointer::ButtonState::Pressed
-                } else {
-                    wl_pointer::ButtonState::Released
-                };
-                let serial = state.next_serial();
-                for ptr in &state.pointers {
-                    ptr.button(serial, time_ms, button_code, state_flag);
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 impl Dispatch<wl_pointer::WlPointer, ()> for CompositorState {
