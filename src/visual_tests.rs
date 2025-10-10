@@ -306,6 +306,11 @@ impl VisualTestRunner {
     fn save_golden(&self, data: &[u8]) -> Result<()> {
         std::fs::create_dir_all(&self.config.golden_dir)?;
         let path = self.get_golden_path();
+        
+        // Create parent directories if needed (for hierarchical test names)
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
         // Use tiny-skia or image crate to save PNG
         // For now, save raw RGBA data

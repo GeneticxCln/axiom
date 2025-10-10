@@ -88,8 +88,7 @@ pub mod smithay;
 #[cfg(feature = "dmabuf-vulkan")]
 pub mod dmabuf_vulkan;
 
-// Visual testing infrastructure
-#[cfg(any(test, feature = "visual-tests"))]
+// Visual testing infrastructure (always available for tests)
 pub mod visual_tests;
 
 /// Version information
