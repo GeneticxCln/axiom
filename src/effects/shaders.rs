@@ -228,6 +228,26 @@ const gaussian_weights = array<f32, 9>(
     0.0947416, 0.118318, 0.0947416
 );
 
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    var out: VertexOutput;
+    
+    // Generate fullscreen quad from vertex index (0-5)
+    let x = f32(i32(vertex_index & 1u) ^ i32(vertex_index >> 1u & 1u));
+    let y = f32(i32(vertex_index >> 1u & 1u));
+    
+    // Fullscreen quad in NDC space (-1 to 1)
+    let position = vec2<f32>(x * 2.0 - 1.0, y * 2.0 - 1.0);
+    
+    // UV coords (0 to 1)
+    let tex_coords = vec2<f32>(x, y);
+    
+    out.clip_position = vec4<f32>(position, 0.0, 1.0);
+    out.tex_coords = tex_coords;
+    
+    return out;
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let tex_offset = 1.0 / blur.texture_size;
@@ -279,6 +299,26 @@ const gaussian_weights = array<f32, 9>(
     0.118318, 0.147761, 0.118318,  
     0.0947416, 0.118318, 0.0947416
 );
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    var out: VertexOutput;
+    
+    // Generate fullscreen quad from vertex index (0-5)
+    let x = f32(i32(vertex_index & 1u) ^ i32(vertex_index >> 1u & 1u));
+    let y = f32(i32(vertex_index >> 1u & 1u));
+    
+    // Fullscreen quad in NDC space (-1 to 1)
+    let position = vec2<f32>(x * 2.0 - 1.0, y * 2.0 - 1.0);
+    
+    // UV coords (0 to 1)
+    let tex_coords = vec2<f32>(x, y);
+    
+    out.clip_position = vec4<f32>(position, 0.0, 1.0);
+    out.tex_coords = tex_coords;
+    
+    return out;
+}
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {

@@ -17,46 +17,40 @@ use wgpu::{
 /// Configuration for visual tests
 #[derive(Debug, Clone)]
 pub struct VisualTestConfig {
-    /// Test name for reference image naming
-    pub test_name: String,
     /// Width of test render target
     pub width: u32,
     /// Height of test render target
     pub height: u32,
     /// Tolerance for fuzzy comparison (0.0 = exact, 1.0 = any difference allowed)
     pub tolerance: f32,
-    /// Whether to save diff images on failure
-    pub save_diffs: bool,
     /// Base directory for golden images
-    pub golden_dir: PathBuf,
+    pub golden_dir: String,
 }
 
 impl Default for VisualTestConfig {
     fn default() -> Self {
         Self {
-            test_name: "unnamed_test".to_string(),
             width: 800,
             height: 600,
             tolerance: 0.01, // 1% tolerance by default
-            save_diffs: true,
-            golden_dir: PathBuf::from("tests/golden_images"),
+            golden_dir: "tests/golden_images".to_string(),
         }
     }
 }
 
 /// Result of a visual test comparison
-#[derive(Debug, Clone)]
-pub struct ComparisonResult {
-    /// Whether the test passed
-    pub passed: bool,
-    /// Difference metric (0.0 = identical, 1.0 = completely different)
-    pub difference: f32,
-    /// Number of pixels that differed
-    pub different_pixels: usize,
-    /// Total number of pixels
-    pub total_pixels: usize,
-    /// Path to diff image if saved
-    pub diff_image_path: Option<PathBuf>,
+#[derive(Debug, Clone, PartialEq)]
+pub enum ComparisonResult {
+    /// Test passed - images match within tolerance
+    Match,
+    /// Test failed - images differ beyond tolerance
+    Mismatch {
+        difference: f32,
+        different_pixels: usize,
+        total_pixels: usize,
+    },
+    /// Golden image doesn't exist - saved new baseline
+    NewBaseline,
 }
 
 /// Helper for capturing rendered frames as images
@@ -397,6 +391,235 @@ impl VisualTestRunner {
 
         log::info!("🔄 Updated golden image for '{}'", self.config.test_name);
         Ok(())
+    }
+}
+
+/// Visual test context with blur effect support
+pub struct VisualTestContext {
+    device: std::sync::Arc<Device>,
+    queue: std::sync::Arc<Queue>,
+    config: VisualTestConfig,
+    shader_manager: Option<std::sync::Arc<crate::effects::shaders::ShaderManager>>,
+}
+
+impl VisualTestContext {
+    /// Create a new visual test context with GPU support
+    pub async fn new(config: VisualTestConfig) -> Result<Self> {
+        // Create GPU instance and device
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .await
+            .context("Failed to find suitable GPU adapter")?;
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("Visual Test Device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                },
+                None,
+            )
+            .await
+            .context("Failed to create GPU device")?;
+
+        let device = std::sync::Arc::new(device);
+        let queue = std::sync::Arc::new(queue);
+
+        // Initialize shader manager
+        let mut shader_manager = crate::effects::shaders::ShaderManager::new(device.clone());
+        shader_manager.compile_all_shaders()?;
+        let shader_manager = std::sync::Arc::new(shader_manager);
+
+        Ok(Self {
+            device,
+            queue,
+            config,
+            shader_manager: Some(shader_manager),
+        })
+    }
+
+    /// Apply blur effect to an image
+    pub async fn apply_blur_effect(
+        &mut self,
+        input_data: &[u8],
+        width: u32,
+        height: u32,
+        radius: f32,
+        intensity: f32,
+    ) -> Result<Vec<u8>> {
+        use crate::effects::blur::{BlurRenderer, BlurType, BlurParams};
+
+        // Create blur renderer
+        let blur_params = BlurParams {
+            blur_type: BlurType::Gaussian { radius, intensity },
+            enabled: true,
+            adaptive_quality: false,
+            performance_scale: 1.0,
+        };
+
+        let mut blur_renderer = BlurRenderer::new(
+            self.device.clone(),
+            self.queue.clone(),
+            self.shader_manager.as_ref().unwrap().clone(),
+            blur_params,
+        )?;
+
+        // Create input texture from data
+        let input_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Blur Input Texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // Upload input data
+        self.queue.write_texture(
+            input_texture.as_image_copy(),
+            input_data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // Create output texture
+        let output_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Blur Output Texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        // Apply blur effect
+        blur_renderer.apply_blur(&input_texture, &output_texture, width, height)?;
+
+        // Capture result
+        let capture = FrameCapture::new(self.device.clone(), self.queue.clone(), width, height);
+        capture.capture_texture(&output_texture).await
+    }
+
+    /// Apply single blur pass (horizontal or vertical)
+    pub async fn apply_blur_pass(
+        &mut self,
+        input_data: &[u8],
+        width: u32,
+        height: u32,
+        radius: f32,
+        intensity: f32,
+        horizontal: bool,
+    ) -> Result<Vec<u8>> {
+        // For now, delegate to full blur - can be optimized later
+        self.apply_blur_effect(input_data, width, height, radius, intensity)
+            .await
+    }
+
+    /// Compare rendered result with golden image
+    pub fn compare_with_golden(
+        &self,
+        golden_name: &str,
+        result_data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<ComparisonResult> {
+        let golden_path = PathBuf::from(&self.config.golden_dir).join(golden_name);
+
+        // Create parent directories if needed
+        if let Some(parent) = golden_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        if !golden_path.exists() {
+            // Save as new baseline
+            self.save_image(&golden_path, result_data, width, height)?;
+            log::info!("📸 Saved new golden image: {:?}", golden_path);
+            return Ok(ComparisonResult::NewBaseline);
+        }
+
+        // Load golden image
+        let golden_data = self.load_image(&golden_path)?;
+
+        // Compare
+        let total_pixels = (width * height) as usize;
+        let mut different_pixels = 0;
+        let mut total_difference = 0.0f32;
+
+        for i in (0..result_data.len().min(golden_data.len())).step_by(4) {
+            let r_diff = (result_data[i] as f32 - golden_data[i] as f32).abs() / 255.0;
+            let g_diff = (result_data[i + 1] as f32 - golden_data[i + 1] as f32).abs() / 255.0;
+            let b_diff = (result_data[i + 2] as f32 - golden_data[i + 2] as f32).abs() / 255.0;
+            let a_diff = (result_data[i + 3] as f32 - golden_data[i + 3] as f32).abs() / 255.0;
+
+            let pixel_diff = (r_diff + g_diff + b_diff + a_diff) / 4.0;
+            total_difference += pixel_diff;
+
+            if pixel_diff > 0.01 {
+                different_pixels += 1;
+            }
+        }
+
+        let average_difference = total_difference / total_pixels as f32;
+
+        if average_difference <= self.config.tolerance {
+            Ok(ComparisonResult::Match)
+        } else {
+            Ok(ComparisonResult::Mismatch {
+                difference: average_difference,
+                different_pixels,
+                total_pixels,
+            })
+        }
+    }
+
+    /// Save image to PNG file
+    fn save_image(&self, path: &PathBuf, data: &[u8], width: u32, height: u32) -> Result<()> {
+        let mut encoder = png::Encoder::new(std::fs::File::create(path)?, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(data)?;
+        Ok(())
+    }
+
+    /// Load image from PNG file
+    fn load_image(&self, path: &PathBuf) -> Result<Vec<u8>> {
+        let decoder = png::Decoder::new(std::fs::File::open(path)?);
+        let mut reader = decoder.read_info()?;
+        let mut buf = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf)?;
+        buf.truncate(info.buffer_size());
+        Ok(buf)
     }
 }
 

@@ -18,7 +18,7 @@ use wgpu::{Device, Queue};
 
 // Shader modules
 mod animations;
-mod blur;
+pub mod blur;
 pub mod shaders;
 pub mod shadow;
 
