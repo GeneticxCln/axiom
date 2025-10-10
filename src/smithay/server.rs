@@ -3276,13 +3276,16 @@ fn send_selection_to_device(
     let selection = if state.selection.is_some() {
         state.selection.clone()
     } else {
-        let clip = state.clipboard.read().get_selection();
-        clip.map(|text| SelectionState::Server {
-            text,
-            mime_types: vec![
-                "text/plain;charset=utf-8".to_string(),
-                "text/plain".to_string(),
-            ],
+        // Get text/plain data from clipboard manager
+        let clip = state.clipboard.read().get_selection("text/plain");
+        clip.and_then(|data| {
+            String::from_utf8(data).ok().map(|text| SelectionState::Server {
+                text,
+                mime_types: vec![
+                    "text/plain;charset=utf-8".to_string(),
+                    "text/plain".to_string(),
+                ],
+            })
         })
     };
 
@@ -3556,13 +3559,15 @@ fn send_primary_selection_to_device(
     } else {
         // Optional fallback to server clipboard. Some apps rely on independent primary selection,
         // but this fallback improves UX until a separate manager is added.
-        let clip = state.clipboard.read().get_selection();
-        clip.map(|text| PrimarySelectionState::Server {
-            text,
-            mime_types: vec![
-                "text/plain;charset=utf-8".to_string(),
-                "text/plain".to_string(),
-            ],
+        let clip = state.clipboard.read().get_selection("text/plain");
+        clip.and_then(|data| {
+            String::from_utf8(data).ok().map(|text| PrimarySelectionState::Server {
+                text,
+                mime_types: vec![
+                    "text/plain;charset=utf-8".to_string(),
+                    "text/plain".to_string(),
+                ],
+            })
         })
     };
     let Some(sel) = selection else {

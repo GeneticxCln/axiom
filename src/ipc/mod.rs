@@ -570,7 +570,12 @@ impl AxiomIPCServer {
                 CLIPBOARD.get_or_init(|| std::sync::Mutex::new(ClipboardManager::new()));
                 if let Some(cell) = CLIPBOARD.get() {
                     if let Ok(mut mgr) = cell.lock() {
-                        mgr.set_selection(data);
+                        // Create a new data source with text/plain MIME type
+                        let source_id = mgr.create_source(vec!["text/plain".to_string()]);
+                        // Set the data for the source
+                        mgr.set_source_data(source_id, "text/plain".to_string(), data.into_bytes());
+                        // Set as current selection
+                        mgr.set_selection(source_id);
                     }
                 }
                 let ack = AxiomMessage::UserEvent {
@@ -585,8 +590,11 @@ impl AxiomIPCServer {
                 let mut payload = serde_json::Value::Null;
                 if let Some(cell) = CLIPBOARD.get() {
                     if let Ok(mgr) = cell.lock() {
-                        if let Some(text) = mgr.get_selection() {
-                            payload = serde_json::json!({"data": text});
+                        // Get text/plain data from selection
+                        if let Some(data) = mgr.get_selection("text/plain") {
+                            if let Ok(text) = String::from_utf8(data) {
+                                payload = serde_json::json!({"data": text});
+                            }
                         }
                     }
                 }
