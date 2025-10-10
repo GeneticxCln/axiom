@@ -600,6 +600,38 @@ impl DecorationManager {
             corner_radius = effects.corner_radius;
         }
 
+        // Calculate button positions based on actual window width
+        let mut buttons = decoration.buttons.clone();
+        let button_size = self.theme.button_size;
+        let titlebar_height = self.theme.titlebar_height;
+        let button_y = (titlebar_height - button_size) / 2;
+        let window_width = window_rect.width;
+        let button_margin = 8;
+
+        // Close button (rightmost)
+        buttons.close.bounds = Rectangle {
+            x: (window_width - button_size - button_margin) as i32,
+            y: button_y as i32,
+            width: button_size,
+            height: button_size,
+        };
+
+        // Maximize button
+        buttons.maximize.bounds = Rectangle {
+            x: (window_width - (button_size + button_margin) * 2) as i32,
+            y: button_y as i32,
+            width: button_size,
+            height: button_size,
+        };
+
+        // Minimize button
+        buttons.minimize.bounds = Rectangle {
+            x: (window_width - (button_size + button_margin) * 3) as i32,
+            y: button_y as i32,
+            width: button_size,
+            height: button_size,
+        };
+
         let render_data = DecorationRenderData::ServerSide {
             titlebar_rect: Rectangle {
                 x: window_rect.x,
@@ -629,7 +661,7 @@ impl DecorationManager {
                 text_color[3] * opacity,
             ],
             font_size: self.theme.font_size,
-            buttons: decoration.buttons.clone(),
+            buttons,
         };
 
         debug!(

@@ -273,6 +273,35 @@ pub struct BindingsConfig {
     /// Drag resize chord modifier(s)
     #[serde(default)]
     pub drag_resize_modifier: String,
+
+    // New tiling keybindings
+    /// Cycle layout mode for focused workspace
+    #[serde(default = "BindingsConfig::default_cycle_layout")]
+    pub cycle_layout: String,
+
+    /// Focus next window in column
+    #[serde(default = "BindingsConfig::default_focus_next")]
+    pub focus_next_window: String,
+
+    /// Focus previous window in column
+    #[serde(default = "BindingsConfig::default_focus_prev")]
+    pub focus_previous_window: String,
+
+    /// Move focused window up in stack
+    #[serde(default = "BindingsConfig::default_move_up")]
+    pub move_window_up: String,
+
+    /// Move focused window down in stack
+    #[serde(default = "BindingsConfig::default_move_down")]
+    pub move_window_down: String,
+
+    /// Swap focused window with previous
+    #[serde(default = "BindingsConfig::default_swap_up")]
+    pub swap_window_up: String,
+
+    /// Swap focused window with next
+    #[serde(default = "BindingsConfig::default_swap_down")]
+    pub swap_window_down: String,
 }
 
 /// XWayland configuration
@@ -421,7 +450,38 @@ impl Default for BindingsConfig {
             mouse_middle: String::new(),
             drag_move_modifier: String::from("Super"),
             drag_resize_modifier: String::new(),
+            cycle_layout: Self::default_cycle_layout(),
+            focus_next_window: Self::default_focus_next(),
+            focus_previous_window: Self::default_focus_prev(),
+            move_window_up: Self::default_move_up(),
+            move_window_down: Self::default_move_down(),
+            swap_window_up: Self::default_swap_up(),
+            swap_window_down: Self::default_swap_down(),
         }
+    }
+}
+
+impl BindingsConfig {
+    fn default_cycle_layout() -> String {
+        "Super+L".to_string()
+    }
+    fn default_focus_next() -> String {
+        "Super+J".to_string()
+    }
+    fn default_focus_prev() -> String {
+        "Super+K".to_string()
+    }
+    fn default_move_up() -> String {
+        "Super+Shift+K".to_string()
+    }
+    fn default_move_down() -> String {
+        "Super+Shift+J".to_string()
+    }
+    fn default_swap_up() -> String {
+        "Super+Ctrl+K".to_string()
+    }
+    fn default_swap_down() -> String {
+        "Super+Ctrl+J".to_string()
     }
 }
 

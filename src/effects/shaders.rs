@@ -299,9 +299,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Drop shadow shader
+/// Drop shadow shader with complete vertex and fragment stages
 const DROP_SHADOW_SHADER: &str = r#"
 // Drop shadow rendering shader
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) tex_coords: vec2<f32>,
+}
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coords: vec2<f32>,
@@ -318,6 +323,21 @@ struct ShadowUniforms {
 
 @group(0) @binding(0)
 var<uniform> shadow: ShadowUniforms;
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    
+    // Pass through position for shadow quad rendering
+    out.clip_position = vec4<f32>(input.position, 0.0, 1.0);
+    out.tex_coords = input.tex_coords;
+    
+    // World position for distance calculations in fragment shader
+    // Map from UV space to pixel space centered at origin
+    out.world_position = (input.tex_coords - vec2<f32>(0.5)) * shadow.window_size;
+    
+    return out;
+}
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {

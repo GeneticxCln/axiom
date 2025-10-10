@@ -187,6 +187,59 @@ sudo pacman -S rust wayland wayland-protocols pkg-config
 sudo dnf install rust cargo wayland-devel wayland-protocols-devel
 ```
 
+### smithay-full system dependencies (optional)
+
+To run a full backend with DRM/KMS, libinput, and udev, additional system libraries and permissions are required. Package names vary by distro; below are common sets:
+
+- Ubuntu/Debian:
+  - sudo apt install libdrm-dev libgbm-dev libinput-dev libudev-dev libxkbcommon-dev
+  - Optional (session/seat management): libseat-dev or logind integration
+- Arch Linux:
+  - sudo pacman -S libdrm libgbm libinput systemd-libs libxkbcommon
+- Fedora:
+  - sudo dnf install libdrm-devel mesa-libgbm-devel libinput-devel systemd-devel libxkbcommon-devel
+
+Note:
+- Access to input (libinput) and DRM nodes requires proper udev rules and seat/session management. For development, prefer the windowed on-screen mode or headless server to avoid permission issues.
+
+### Feature matrix and build examples
+
+- smithay (default): Enables Wayland compositor server (smithay/wayland_frontend)
+- smithay-minimal: Minimal Wayland server binary (run_minimal_wayland)
+- smithay-full: Adds drm, udev, libinput, session, renderer_gl, xwayland, backend_winit
+- wgpu-present (default): Enables on-screen presentation via winit + wgpu
+- gpu-nvml (optional): NVIDIA GPU metrics (requires libnvidia-ml)
+- dmabuf-vulkan (optional): Vulkan-based dmabuf import path (ash + libloading)
+- demo/examples: Gates demo/test binaries and examples
+
+Build examples:
+- Default (server + presenter):
+  - cargo run --release
+- Minimal Wayland server:
+  - cargo run --release --features "smithay-minimal" --bin run_minimal_wayland
+- Presenter-only path (explicit):
+  - cargo run --release --features "smithay wgpu-present" --bin run_present_winit
+- Full backend (ensure system deps and permissions):
+  - cargo build --release --features "smithay-full"
+- Disable defaults (fallback compositor path):
+  - cargo run --release --no-default-features --bin axiom
+
+Runtime flags:
+- --backend auto|vulkan|gl to select WGPU backends
+- --present-mode auto|fifo|mailbox|immediate (overrides via AXIOM_PRESENT_MODE)
+- --outputs "WIDTHxHEIGHT@SCALE+X,Y;..." to define logical outputs
+- --debug-outputs to overlay output rectangles
+- --split-frame-callbacks to gate callbacks across overlapped outputs
+- --headless to run without on-screen presentation
+
+### Runtime dynamic outputs control
+
+Axiom provides a control socket for dynamic output add/remove while running. See the guide:
+
+- docs/guides/OUTPUT_CONTROL_SOCKET.md
+
+This enables testing multi-output scissoring and presentation feedback without restarting the compositor.
+
 ## ⚙️ Configuration
 
 Tip: you can start with the example configuration:

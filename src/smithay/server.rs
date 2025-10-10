@@ -421,6 +421,8 @@ impl CompositorServer {
             .socket_name()
             .map(|s| s.to_string_lossy().to_string())
             .ok_or_else(|| anyhow::anyhow!("missing socket name"))?;
+        println!("🔌 DEBUG: Socket bound to: {}", socket_name);
+        eprintln!("🔌 DEBUG: Socket bound to: {}", socket_name);
 
         // Spawn evdev input threads (best-effort) unless external channel provided
         let input_rx = if input_rx_ext.is_some() {
@@ -450,8 +452,10 @@ impl CompositorServer {
     }
 
     pub fn run(self) -> Result<()> {
+        println!("🔌 Wayland socket: {}", self.socket_name);
         std::env::set_var("WAYLAND_DISPLAY", &self.socket_name);
         info!("WAYLAND_DISPLAY={}", self.socket_name);
+        println!("🔌 Set WAYLAND_DISPLAY={}", self.socket_name);
         // Start XWayland if available so X11 apps can connect
         let mut _xwayland_guard: Option<crate::xwayland::XWaylandManager> = None;
         {
@@ -697,8 +701,8 @@ impl CompositorServer {
                                         );
                                 }
                                 HwInputEvent::PointerButton { button, pressed } => {
-                                    let _ = CompositorServer::handle_pointer_button_inline(
-                                        data, button, pressed,
+                                    let _ = CompositorServer::handle_pointer_button_with_wm_inline(
+                                        data, &wm2, &ws2, button, pressed,
                                     );
                                 }
                                 HwInputEvent::PointerAxis {
@@ -807,6 +811,36 @@ impl CompositorServer {
                                                             }
                                                         }
                                                     }
+                                                }
+                                                CompositorAction::CycleLayoutMode => {
+                                                    ws2.write().cycle_layout_mode();
+                                                    let _ = apply_layouts_inline(data, &wm2, &ws2);
+                                                }
+                                                CompositorAction::FocusNextWindow => {
+                                                    if let Some(window_id) = ws2.write().focus_next_window_in_column() {
+                                                        let _ = wm2.write().focus_window(window_id);
+                                                    }
+                                                }
+                                                CompositorAction::FocusPreviousWindow => {
+                                                    if let Some(window_id) = ws2.write().focus_previous_window_in_column() {
+                                                        let _ = wm2.write().focus_window(window_id);
+                                                    }
+                                                }
+                                                CompositorAction::MoveWindowUp => {
+                                                    let _ = ws2.write().move_focused_window_up();
+                                                    let _ = apply_layouts_inline(data, &wm2, &ws2);
+                                                }
+                                                CompositorAction::MoveWindowDown => {
+                                                    let _ = ws2.write().move_focused_window_down();
+                                                    let _ = apply_layouts_inline(data, &wm2, &ws2);
+                                                }
+                                                CompositorAction::SwapWindowUp => {
+                                                    let _ = ws2.write().move_focused_window_up();
+                                                    let _ = apply_layouts_inline(data, &wm2, &ws2);
+                                                }
+                                                CompositorAction::SwapWindowDown => {
+                                                    let _ = ws2.write().move_focused_window_down();
+                                                    let _ = apply_layouts_inline(data, &wm2, &ws2);
                                                 }
                                                 _ => {}
                                             }
@@ -1298,7 +1332,7 @@ Ok(OutputOp::Remove { index }) => {
                                     let _ = CompositorServer::update_pointer_focus_and_motion_inline(data);
                                 }
                                 HwInputEvent::PointerButton { button, pressed } => {
-                                    let _ = CompositorServer::handle_pointer_button_inline(data, button, pressed);
+                                    let _ = CompositorServer::handle_pointer_button_with_wm_inline(data, &wm, &ws, button, pressed);
                                 }
                                 HwInputEvent::PointerAxis { horizontal, vertical } => {
                                     let time_ms: u32 = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() & 0xFFFF_FFFF) as u32;
@@ -2157,6 +2191,12 @@ impl CompositorServer {
             }
         }
         if let Some((id, (lx, ly))) = target {
+            // Update decoration button hover states
+            state
+                .decoration_manager_handle
+                .write()
+                .handle_mouse_motion(id, lx as i32, ly as i32);
+            
             if state.pointer_focus_window != Some(id) {
                 if let Some(prev_id) = state.pointer_focus_window.take() {
                     if let Some(prev_surface) =
@@ -2729,7 +2769,10 @@ impl GlobalDispatch<wl_seat::WlSeat, ()> for CompositorState {
                 | wl_seat::Capability::Pointer
                 | wl_seat::Capability::Touch,
         );
-        seat.name(state.seat_name.clone());
+        // name() event is only available in wl_seat version 2+
+        if seat.version() >= 2 {
+            seat.name(state.seat_name.clone());
+        }
     }
 }
 impl Dispatch<wl_seat::WlSeat, ()> for CompositorState {
@@ -2989,11 +3032,221 @@ impl CompositorServer {
             .collect()
     }
 
+    fn handle_pointer_button_with_wm_inline(
+        state: &mut CompositorState,
+        wm: &Arc<RwLock<crate::window::WindowManager>>,
+        ws: &Arc<RwLock<crate::workspace::ScrollableWorkspaces>>,
+        button: u8,
+        pressed: bool,
+    ) -> Result<()> {
+        // Check for decoration button clicks first (only for left button)
+        if button == 1 {
+        if let Some(focus_id) = state.pointer_focus_window {
+            // Get window layout to determine local coordinates
+            if let Some(rect) = state.last_layouts.get(&focus_id).cloned() {
+                let (px, py) = state.pointer_pos;
+                let local_x = (px - rect.x as f64) as i32;
+                let local_y = (py - rect.y as f64) as i32;
+                
+                // Check if click is on a decoration button
+                if pressed {
+                    // Handle button press
+                    let action_opt = state
+                        .decoration_manager_handle
+                        .write()
+                        .handle_button_press(focus_id, local_x, local_y);
+                    
+                    if let Some(action) = action_opt {
+                        use crate::decoration::DecorationAction;
+                        match action {
+                            DecorationAction::Close => {
+                                // Close the window
+                                if let Some(tl) = state
+                                    .windows
+                                    .iter()
+                                    .find(|w| w.axiom_id == Some(focus_id))
+                                    .and_then(|w| w.xdg_toplevel.clone())
+                                {
+                                    tl.close();
+                                    log::info!("🔴 Close button clicked for window {}", focus_id);
+                                }
+                                return Ok(()); // Don't send click to client
+                            }
+                            DecorationAction::Minimize => {
+                                // Minimize the window
+                                if let Ok(()) = wm.write().minimize_window(focus_id) {
+                                    let _ = apply_layouts_inline(state, wm, ws);
+                                    log::info!("➖ Minimized window {}", focus_id);
+                                }
+                                return Ok(()); // Don't send click to client
+                            }
+                            DecorationAction::ToggleMaximize => {
+                                // Toggle maximize state
+                                let is_maximized = wm.read()
+                                    .get_window(focus_id)
+                                    .map(|w| w.properties.maximized)
+                                    .unwrap_or(false);
+                                
+                                if is_maximized {
+                                    if let Ok(()) = wm.write().restore_window(focus_id) {
+                                        let _ = apply_layouts_inline(state, wm, ws);
+                                        log::info!("⬜ Restored window {}", focus_id);
+                                    }
+                                } else {
+                                    if let Ok(()) = wm.write().maximize_window(focus_id) {
+                                        let _ = apply_layouts_inline(state, wm, ws);
+                                        log::info!("⬜ Maximized window {}", focus_id);
+                                    }
+                                }
+                                return Ok(()); // Don't send click to client
+                            }
+                            DecorationAction::StartMove => {
+                                // TODO: Implement window move
+                                log::info!("↔️ Titlebar drag initiated for window {} (not yet implemented)", focus_id);
+                                // For now, don't consume the event - let client handle it
+                            }
+                            _ => {}
+                        }
+                    }
+                } else {
+                    // Handle button release
+                    state
+                        .decoration_manager_handle
+                        .write()
+                        .handle_button_release(focus_id, local_x, local_y);
+                }
+            }
+        }
+        }
+        
+        // Same behavior as handle_pointer_button but without &mut self
+        if let Some(focus_id) = state.pointer_focus_window {
+            if let Some(surface) = CompositorServer::surface_for_axiom_id(state, focus_id) {
+                if state.focused_window_id != Some(focus_id) {
+                    // Leave previous focus if any
+                    if let Some(prev_id) = state.focused_window_id.take() {
+                        if let Some(prev_surface) =
+                            CompositorServer::surface_for_axiom_id(state, prev_id)
+                        {
+                            let serial = state.next_serial();
+                            for kb in &state.keyboards {
+                                kb.leave(serial, &prev_surface);
+                            }
+                            let serial = state.next_serial();
+                            for ptr in &state.pointers {
+                                ptr.leave(serial, &prev_surface);
+                            }
+                        }
+                        // Update decoration focus
+                        state
+                            .decoration_manager_handle
+                            .write()
+                            .set_window_focus(prev_id, false);
+                    }
+                    state.focused_window_id = Some(focus_id);
+                    // Update decoration focus
+                    state
+                        .decoration_manager_handle
+                        .write()
+                        .set_window_focus(focus_id, true);
+                    // Seat focus enter for keyboard
+                    let serial = state.next_serial();
+                    send_keyboard_enter_safe(state, &surface, serial);
+                }
+                let time_ms: u32 = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    & 0xFFFF_FFFF) as u32;
+                let button_code: u32 = match button {
+                    1 => 272,
+                    2 => 273,
+                    3 => 274,
+                    _ => 272,
+                };
+                let state_flag = if pressed {
+                    wl_pointer::ButtonState::Pressed
+                } else {
+                    wl_pointer::ButtonState::Released
+                };
+                let serial = state.next_serial();
+                for ptr in &state.pointers {
+                    ptr.button(serial, time_ms, button_code, state_flag);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn handle_pointer_button_inline(
         state: &mut CompositorState,
         button: u8,
         pressed: bool,
     ) -> Result<()> {
+        // Check for decoration button clicks first (only for left button)
+        if button == 1 {
+        if let Some(focus_id) = state.pointer_focus_window {
+            // Get window layout to determine local coordinates
+            if let Some(rect) = state.last_layouts.get(&focus_id).cloned() {
+                let (px, py) = state.pointer_pos;
+                let local_x = (px - rect.x as f64) as i32;
+                let local_y = (py - rect.y as f64) as i32;
+                
+                // Check if click is on a decoration button
+                if pressed {
+                    // Handle button press
+                    let action_opt = state
+                        .decoration_manager_handle
+                        .write()
+                        .handle_button_press(focus_id, local_x, local_y);
+                    
+                    if let Some(action) = action_opt {
+                        use crate::decoration::DecorationAction;
+                        match action {
+                            DecorationAction::Close => {
+                                // Close the window
+                                if let Some(tl) = state
+                                    .windows
+                                    .iter()
+                                    .find(|w| w.axiom_id == Some(focus_id))
+                                    .and_then(|w| w.xdg_toplevel.clone())
+                                {
+                                    tl.close();
+                                    log::info!("🔴 Close button clicked for window {}", focus_id);
+                                }
+                                return Ok(()); // Don't send click to client
+                            }
+                            DecorationAction::Minimize => {
+                                // Minimize the window - not yet wired to WM in inline handler
+                                // TODO: Need access to WindowManager Arc here
+                                log::info!("➖ Minimize button clicked for window {}", focus_id);
+                                return Ok(()); // Don't send click to client
+                            }
+                            DecorationAction::ToggleMaximize => {
+                                // Toggle maximize state - not yet wired to WM in inline handler
+                                // TODO: Need access to WindowManager Arc here  
+                                log::info!("⬜ Maximize button clicked for window {}", focus_id);
+                                return Ok(()); // Don't send click to client
+                            }
+                            DecorationAction::StartMove => {
+                                // TODO: Implement window move
+                                log::info!("↔️ Titlebar drag initiated for window {} (not yet implemented)", focus_id);
+                                // For now, don't consume the event - let client handle it
+                            }
+                            _ => {}
+                        }
+                    }
+                } else {
+                    // Handle button release
+                    state
+                        .decoration_manager_handle
+                        .write()
+                        .handle_button_release(focus_id, local_x, local_y);
+                }
+            }
+        }
+        }
+        
         // Same behavior as handle_pointer_button but without &mut self
         if let Some(focus_id) = state.pointer_focus_window {
             if let Some(surface) = CompositorServer::surface_for_axiom_id(state, focus_id) {
@@ -5970,7 +6223,7 @@ fn apply_layouts_inline(
                     title,
                     text_color,
                     font_size,
-                    ..
+                    buttons,
                 }) = dm.render_decorations(id, rect.clone(), None)
                 {
                     // Titlebar
@@ -5994,6 +6247,176 @@ fn apply_layouts_inline(
                             font_size,
                             text_color,
                         );
+                        
+                        // Render titlebar buttons
+                        let theme = dm.theme();
+                        
+                        // Close button
+                        if buttons.close.visible {
+                            let btn = &buttons.close;
+                            let btn_color = if btn.pressed {
+                                theme.close_pressed
+                            } else if btn.hovered {
+                                theme.close_hovered
+                            } else {
+                                theme.close_normal
+                            };
+                            
+                            let abs_x = titlebar_rect.x + btn.bounds.x;
+                            let abs_y = titlebar_rect.y + btn.bounds.y;
+                            
+                            // Draw button background
+                            crate::renderer::queue_overlay_fill_rounded(
+                                id,
+                                abs_x as f32,
+                                abs_y as f32,
+                                btn.bounds.width as f32,
+                                btn.bounds.height as f32,
+                                btn_color,
+                                4.0, // smaller corner radius for buttons
+                            );
+                            
+                            // Draw X icon (two diagonal lines)
+                            let icon_size = btn.bounds.width as f32 * 0.4;
+                            let icon_x = abs_x as f32 + (btn.bounds.width as f32 - icon_size) / 2.0;
+                            let icon_y = abs_y as f32 + (btn.bounds.height as f32 - icon_size) / 2.0;
+                            let line_width = 2.0;
+                            
+                            // Draw X using small filled rects
+                            // Diagonal line 1 (top-left to bottom-right)
+                            for i in 0..((icon_size as i32) / 2) {
+                                let px = icon_x + (i as f32) * 2.0;
+                                let py = icon_y + (i as f32) * 2.0;
+                                crate::renderer::queue_overlay_fill(
+                                    id,
+                                    px,
+                                    py,
+                                    line_width,
+                                    line_width,
+                                    [1.0, 1.0, 1.0, 1.0],
+                                );
+                            }
+                            // Diagonal line 2 (top-right to bottom-left)
+                            for i in 0..((icon_size as i32) / 2) {
+                                let px = icon_x + icon_size - (i as f32) * 2.0;
+                                let py = icon_y + (i as f32) * 2.0;
+                                crate::renderer::queue_overlay_fill(
+                                    id,
+                                    px,
+                                    py,
+                                    line_width,
+                                    line_width,
+                                    [1.0, 1.0, 1.0, 1.0],
+                                );
+                            }
+                        }
+                        
+                        // Maximize button
+                        if buttons.maximize.visible {
+                            let btn = &buttons.maximize;
+                            let btn_color = if btn.pressed {
+                                theme.button_pressed
+                            } else if btn.hovered {
+                                theme.button_hovered
+                            } else {
+                                theme.button_normal
+                            };
+                            
+                            let abs_x = titlebar_rect.x + btn.bounds.x;
+                            let abs_y = titlebar_rect.y + btn.bounds.y;
+                            
+                            // Draw button background
+                            crate::renderer::queue_overlay_fill_rounded(
+                                id,
+                                abs_x as f32,
+                                abs_y as f32,
+                                btn.bounds.width as f32,
+                                btn.bounds.height as f32,
+                                btn_color,
+                                4.0,
+                            );
+                            
+                            // Draw maximize icon (square)
+                            let icon_size = btn.bounds.width as f32 * 0.5;
+                            let icon_x = abs_x as f32 + (btn.bounds.width as f32 - icon_size) / 2.0;
+                            let icon_y = abs_y as f32 + (btn.bounds.height as f32 - icon_size) / 2.0;
+                            let border_width = 2.0;
+                            
+                            // Draw square outline
+                            crate::renderer::queue_overlay_fill(
+                                id,
+                                icon_x,
+                                icon_y,
+                                icon_size,
+                                border_width,
+                                [1.0, 1.0, 1.0, 1.0],
+                            ); // top
+                            crate::renderer::queue_overlay_fill(
+                                id,
+                                icon_x,
+                                icon_y + icon_size - border_width,
+                                icon_size,
+                                border_width,
+                                [1.0, 1.0, 1.0, 1.0],
+                            ); // bottom
+                            crate::renderer::queue_overlay_fill(
+                                id,
+                                icon_x,
+                                icon_y,
+                                border_width,
+                                icon_size,
+                                [1.0, 1.0, 1.0, 1.0],
+                            ); // left
+                            crate::renderer::queue_overlay_fill(
+                                id,
+                                icon_x + icon_size - border_width,
+                                icon_y,
+                                border_width,
+                                icon_size,
+                                [1.0, 1.0, 1.0, 1.0],
+                            ); // right
+                        }
+                        
+                        // Minimize button
+                        if buttons.minimize.visible {
+                            let btn = &buttons.minimize;
+                            let btn_color = if btn.pressed {
+                                theme.button_pressed
+                            } else if btn.hovered {
+                                theme.button_hovered
+                            } else {
+                                theme.button_normal
+                            };
+                            
+                            let abs_x = titlebar_rect.x + btn.bounds.x;
+                            let abs_y = titlebar_rect.y + btn.bounds.y;
+                            
+                            // Draw button background
+                            crate::renderer::queue_overlay_fill_rounded(
+                                id,
+                                abs_x as f32,
+                                abs_y as f32,
+                                btn.bounds.width as f32,
+                                btn.bounds.height as f32,
+                                btn_color,
+                                4.0,
+                            );
+                            
+                            // Draw minimize icon (horizontal line)
+                            let icon_width = btn.bounds.width as f32 * 0.5;
+                            let icon_x = abs_x as f32 + (btn.bounds.width as f32 - icon_width) / 2.0;
+                            let icon_y = abs_y as f32 + btn.bounds.height as f32 / 2.0;
+                            let line_height = 2.0;
+                            
+                            crate::renderer::queue_overlay_fill(
+                                id,
+                                icon_x,
+                                icon_y,
+                                icon_width,
+                                line_height,
+                                [1.0, 1.0, 1.0, 1.0],
+                            );
+                        }
                     }
                     // Borders (skip top if titlebar present)
                     let bw = border_width as i32;

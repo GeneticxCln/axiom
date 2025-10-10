@@ -88,6 +88,10 @@ pub mod smithay;
 #[cfg(feature = "dmabuf-vulkan")]
 pub mod dmabuf_vulkan;
 
+// Visual testing infrastructure
+#[cfg(any(test, feature = "visual-tests"))]
+pub mod visual_tests;
+
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

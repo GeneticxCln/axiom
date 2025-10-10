@@ -431,9 +431,9 @@ async fn main() -> Result<()> {
 
         // Create window and wgpu surface on the main thread
         let event_loop = EventLoop::new()?;
-        let window = winit::window::WindowBuilder::new()
+        let window = Arc::new(winit::window::WindowBuilder::new()
             .with_title("Axiom Compositor")
-            .build(&event_loop)?;
+            .build(&event_loop)?);
 
         // Create wgpu surface
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -441,8 +441,9 @@ async fn main() -> Result<()> {
             ..Default::default()
         });
         // Create surface for the window
-        let surface = instance.create_surface(&window)?;
-        let size = window.inner_size();
+        let surface = instance.create_surface(window.clone())?;
+        let mut window_size = window.inner_size();
+        let _window_id = window.id();
 
         // Apply present mode override via environment for renderer selection
         let pm = cli.present_mode.to_lowercase();
@@ -453,8 +454,8 @@ async fn main() -> Result<()> {
         let mut renderer = pollster::block_on(crate::renderer::AxiomRenderer::new_with_instance(
             &instance,
             Some(&surface),
-            size.width,
-            size.height,
+            window_size.width,
+            window_size.height,
         ))?;
 
         let mut last_frame_time_inst = std::time::Instant::now();
@@ -464,27 +465,26 @@ async fn main() -> Result<()> {
                 Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => elwt.exit(),
                 Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
                     if new_size.width > 0 && new_size.height > 0 {
-                        match pollster::block_on(crate::renderer::AxiomRenderer::new_with_instance(
-                            &instance,
-                            Some(&surface),
-                            new_size.width,
-                            new_size.height,
-                        )) {
-                            Ok(new_renderer) => {
-                                renderer = new_renderer;
-                                let _ = size_tx.send(crate::smithay::server::SizeUpdate { width: new_size.width, height: new_size.height, scale: window.scale_factor() as i32, name: window.current_monitor().and_then(|m| m.name()), model: None });
+                        match renderer.resize(Some(&surface), new_size.width, new_size.height) {
+                            Ok(()) => {
+                                window_size = new_size;
+                                let _ = size_tx.send(crate::smithay::server::SizeUpdate { width: new_size.width, height: new_size.height, scale: 1, name: None, model: None });
                             }
                             Err(e) => {
-                                error!("Failed to recreate renderer: {}", e);
+                                error!("Failed to resize renderer: {}", e);
                             }
                         }
-                        window.request_redraw();
+                        elwt.set_control_flow(winit::event_loop::ControlFlow::Poll);
                     }
                 }
                 Event::AboutToWait => {
-                    // If the compositor requested a redraw, drain once and redraw
-                    while redraw_rx.try_recv().is_ok() { /* drain */ }
-                    window.request_redraw();
+                    // If the compositor requested a redraw, request a window redraw
+                    let mut needs_redraw = false;
+                    while redraw_rx.try_recv().is_ok() { needs_redraw = true; }
+                    if needs_redraw {
+                        window.request_redraw();
+                    }
+                    elwt.set_control_flow(winit::event_loop::ControlFlow::Poll);
                 }
                 Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                     // Sync from shared render state and draw
@@ -503,7 +503,7 @@ async fn main() -> Result<()> {
                                         .map(|o| (o.pos_x.max(0) as u32, o.pos_y.max(0) as u32, o.width.max(0) as u32, o.height.max(0) as u32))
                                         .collect()
                                 })
-                                .unwrap_or_else(|| vec![(0, 0, size.width, size.height)]);
+                                .unwrap_or_else(|| vec![(0, 0, window_size.width, window_size.height)]);
 
                             let debug_overlay = std::env::var("AXIOM_DEBUG_OUTPUTS").ok().map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
                             
@@ -521,14 +521,7 @@ async fn main() -> Result<()> {
                                 let tv_sec_hi: u32 = (tv_sec >> 32) as u32;
                                 let tv_sec_lo: u32 = (tv_sec & 0xFFFF_FFFF) as u32;
                                 // Query monitor refresh if available
-                                let refresh_ns: u32 = window.current_monitor()
-                                    .and_then(|m| m.refresh_rate_millihertz())
-                                    .map(|mhz| {
-                                        // ns per frame = 1e9 / (mhz/1000) = 1e12 / mhz
-                                        let ns = 1_000_000_000_000u64 / (mhz as u64);
-                                        ns.clamp(8_000_000, 33_333_333) as u32 // clamp between 120Hz and 30Hz typical bounds
-                                    })
-                                    .unwrap_or(16_666_666);
+                                let refresh_ns: u32 = 16_666_666; // Default to 60Hz
                                 // Flags: vsync + hw clock
                                 let flags: u32 = (wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync | wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock).bits();
                                 let outputs_count = outputs_init_main.as_ref().map(|v| v.len()).unwrap_or(1);

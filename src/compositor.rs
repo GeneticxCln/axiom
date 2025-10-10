@@ -377,6 +377,38 @@ impl AxiomCompositor {
                 info!("💼 Input triggered: Quit compositor");
                 self.shutdown().await?;
             }
+            CompositorAction::CycleLayoutMode => {
+                debug!("🎨 Input triggered: Cycle layout mode");
+                self.workspace_manager.cycle_layout_mode();
+            }
+            CompositorAction::FocusNextWindow => {
+                debug!("🎨 Input triggered: Focus next window");
+                if let Some(window_id) = self.workspace_manager.focus_next_window_in_column() {
+                    let _ = self.window_manager.focus_window(window_id);
+                }
+            }
+            CompositorAction::FocusPreviousWindow => {
+                debug!("🎨 Input triggered: Focus previous window");
+                if let Some(window_id) = self.workspace_manager.focus_previous_window_in_column() {
+                    let _ = self.window_manager.focus_window(window_id);
+                }
+            }
+            CompositorAction::MoveWindowUp => {
+                debug!("🎨 Input triggered: Move window up");
+                let _ = self.workspace_manager.move_focused_window_up();
+            }
+            CompositorAction::MoveWindowDown => {
+                debug!("🎨 Input triggered: Move window down");
+                let _ = self.workspace_manager.move_focused_window_down();
+            }
+            CompositorAction::SwapWindowUp => {
+                debug!("🎨 Input triggered: Swap window up");
+                let _ = self.workspace_manager.move_focused_window_up();
+            }
+            CompositorAction::SwapWindowDown => {
+                debug!("🎨 Input triggered: Swap window down");
+                let _ = self.workspace_manager.move_focused_window_down();
+            }
             CompositorAction::Custom(command) => {
                 debug!("🎨 Input triggered custom command: {}", command);
                 let trimmed = command.trim();

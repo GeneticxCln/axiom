@@ -317,6 +317,7 @@ dependencies = [
  "mockall",
  "nvml-wrapper",
  "parking_lot",
+ "png",
  "pollster",
  "proptest",
  "quickcheck",

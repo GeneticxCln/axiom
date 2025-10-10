@@ -20,7 +20,7 @@ use wgpu::{Device, Queue};
 mod animations;
 mod blur;
 pub mod shaders;
-mod shadow;
+pub mod shadow;
 
 /// Different types of animations
 #[derive(Debug, Clone, PartialEq)]

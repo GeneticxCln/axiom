@@ -33,6 +33,27 @@ pub fn get_global_scroll_speed() -> f64 {
     }
 }
 
+/// Layout mode for arranging windows within a column
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutMode {
+    /// Stack windows vertically (default)
+    Vertical,
+    /// Stack windows horizontally
+    Horizontal,
+    /// Master window on left, stack on right
+    MasterStack,
+    /// Grid layout (auto-arranges in rows/columns)
+    Grid,
+    /// Spiral layout (fibonacci-style)
+    Spiral,
+}
+
+impl Default for LayoutMode {
+    fn default() -> Self {
+        LayoutMode::Vertical
+    }
+}
+
 /// Represents a workspace column in the scrollable view
 #[derive(Debug, Clone)]
 pub struct WorkspaceColumn {
@@ -50,6 +71,16 @@ pub struct WorkspaceColumn {
 
     /// Last time this column was accessed
     pub last_accessed: Instant,
+
+    /// Layout mode for this column
+    pub layout_mode: LayoutMode,
+
+    /// Window split ratios (for resizing within tiled layouts)
+    /// Maps window index to its size ratio (0.0 to 1.0)
+    pub split_ratios: HashMap<usize, f64>,
+
+    /// Currently focused window index within this column
+    pub focused_window_index: Option<usize>,
 }
 
 impl WorkspaceColumn {
@@ -60,6 +91,9 @@ impl WorkspaceColumn {
             windows: Vec::new(),
             active: false,
             last_accessed: Instant::now(),
+            layout_mode: LayoutMode::default(),
+            split_ratios: HashMap::new(),
+            focused_window_index: None,
         }
     }
 
@@ -417,24 +451,273 @@ impl ScrollableWorkspaces {
                     height: usable_height as u32,
                 };
 
-                // Calculate layout for windows in this column
+                // Calculate layout based on the column's layout mode
                 if !column.windows.is_empty() {
-                    let gap = self.config.gaps as i32;
-                    let window_height = (column_bounds.height as i32
-                        - (gap * (column.windows.len() as i32 + 1)))
-                        / column.windows.len() as i32;
-
-                    for (i, &window_id) in column.windows.iter().enumerate() {
-                        let y = column_bounds.y + gap + i as i32 * (window_height + gap);
-                        let window_rect = Rectangle {
-                            x: column_bounds.x + gap,
-                            y,
-                            width: column_bounds.width - 2 * gap as u32,
-                            height: window_height as u32,
-                        };
-                        layouts.insert(window_id, window_rect);
-                    }
+                    let window_layouts = self.calculate_column_layout(
+                        column,
+                        &column_bounds,
+                        self.config.gaps as i32,
+                    );
+                    layouts.extend(window_layouts);
                 }
+            }
+        }
+
+        layouts
+    }
+
+    /// Calculate layout for windows within a single column based on its layout mode
+    fn calculate_column_layout(
+        &self,
+        column: &WorkspaceColumn,
+        bounds: &Rectangle,
+        gap: i32,
+    ) -> HashMap<u64, Rectangle> {
+        match column.layout_mode {
+            LayoutMode::Vertical => self.layout_vertical(column, bounds, gap),
+            LayoutMode::Horizontal => self.layout_horizontal(column, bounds, gap),
+            LayoutMode::MasterStack => self.layout_master_stack(column, bounds, gap),
+            LayoutMode::Grid => self.layout_grid(column, bounds, gap),
+            LayoutMode::Spiral => self.layout_spiral(column, bounds, gap),
+        }
+    }
+
+    /// Vertical stacking layout (default)
+    fn layout_vertical(
+        &self,
+        column: &WorkspaceColumn,
+        bounds: &Rectangle,
+        gap: i32,
+    ) -> HashMap<u64, Rectangle> {
+        let mut layouts = HashMap::new();
+        let window_count = column.windows.len();
+        let total_gap_height = gap * (window_count as i32 + 1);
+        let available_height = (bounds.height as i32 - total_gap_height).max(1);
+        let window_height = available_height / window_count as i32;
+
+        for (i, &window_id) in column.windows.iter().enumerate() {
+            let y = bounds.y + gap + i as i32 * (window_height + gap);
+            let window_rect = Rectangle {
+                x: bounds.x + gap,
+                y,
+                width: (bounds.width as i32 - 2 * gap).max(1) as u32,
+                height: window_height.max(1) as u32,
+            };
+            layouts.insert(window_id, window_rect);
+        }
+
+        layouts
+    }
+
+    /// Horizontal stacking layout
+    fn layout_horizontal(
+        &self,
+        column: &WorkspaceColumn,
+        bounds: &Rectangle,
+        gap: i32,
+    ) -> HashMap<u64, Rectangle> {
+        let mut layouts = HashMap::new();
+        let window_count = column.windows.len();
+        let total_gap_width = gap * (window_count as i32 + 1);
+        let available_width = (bounds.width as i32 - total_gap_width).max(1);
+        let window_width = available_width / window_count as i32;
+
+        for (i, &window_id) in column.windows.iter().enumerate() {
+            let x = bounds.x + gap + i as i32 * (window_width + gap);
+            let window_rect = Rectangle {
+                x,
+                y: bounds.y + gap,
+                width: window_width.max(1) as u32,
+                height: (bounds.height as i32 - 2 * gap).max(1) as u32,
+            };
+            layouts.insert(window_id, window_rect);
+        }
+
+        layouts
+    }
+
+    /// Master-stack layout (one large master on left, stack on right)
+    fn layout_master_stack(
+        &self,
+        column: &WorkspaceColumn,
+        bounds: &Rectangle,
+        gap: i32,
+    ) -> HashMap<u64, Rectangle> {
+        let mut layouts = HashMap::new();
+        let window_count = column.windows.len();
+
+        if window_count == 0 {
+            return layouts;
+        }
+
+        if window_count == 1 {
+            // Single window fills entire space
+            let window_rect = Rectangle {
+                x: bounds.x + gap,
+                y: bounds.y + gap,
+                width: (bounds.width as i32 - 2 * gap).max(1) as u32,
+                height: (bounds.height as i32 - 2 * gap).max(1) as u32,
+            };
+            layouts.insert(column.windows[0], window_rect);
+            return layouts;
+        }
+
+        // Master window takes 50% of width, stack takes the rest
+        let master_width = (bounds.width as i32 - 3 * gap) / 2;
+        let stack_width = bounds.width as i32 - master_width - 3 * gap;
+
+        // Master window
+        let master_rect = Rectangle {
+            x: bounds.x + gap,
+            y: bounds.y + gap,
+            width: master_width.max(1) as u32,
+            height: (bounds.height as i32 - 2 * gap).max(1) as u32,
+        };
+        layouts.insert(column.windows[0], master_rect);
+
+        // Stack windows vertically on the right
+        let stack_window_count = window_count - 1;
+        let stack_height = (bounds.height as i32 - gap * (stack_window_count as i32 + 1))
+            / stack_window_count as i32;
+
+        for (i, &window_id) in column.windows[1..].iter().enumerate() {
+            let y = bounds.y + gap + i as i32 * (stack_height + gap);
+            let window_rect = Rectangle {
+                x: bounds.x + master_width + 2 * gap,
+                y,
+                width: stack_width.max(1) as u32,
+                height: stack_height.max(1) as u32,
+            };
+            layouts.insert(window_id, window_rect);
+        }
+
+        layouts
+    }
+
+    /// Grid layout (auto-arranges windows in optimal grid)
+    fn layout_grid(
+        &self,
+        column: &WorkspaceColumn,
+        bounds: &Rectangle,
+        gap: i32,
+    ) -> HashMap<u64, Rectangle> {
+        let mut layouts = HashMap::new();
+        let window_count = column.windows.len();
+
+        if window_count == 0 {
+            return layouts;
+        }
+
+        // Calculate optimal grid dimensions
+        let cols = (window_count as f64).sqrt().ceil() as usize;
+        let rows = (window_count as f64 / cols as f64).ceil() as usize;
+
+        let cell_width = (bounds.width as i32 - gap * (cols as i32 + 1)) / cols as i32;
+        let cell_height = (bounds.height as i32 - gap * (rows as i32 + 1)) / rows as i32;
+
+        for (idx, &window_id) in column.windows.iter().enumerate() {
+            let row = idx / cols;
+            let col = idx % cols;
+
+            let x = bounds.x + gap + col as i32 * (cell_width + gap);
+            let y = bounds.y + gap + row as i32 * (cell_height + gap);
+
+            let window_rect = Rectangle {
+                x,
+                y,
+                width: cell_width.max(1) as u32,
+                height: cell_height.max(1) as u32,
+            };
+            layouts.insert(window_id, window_rect);
+        }
+
+        layouts
+    }
+
+    /// Spiral layout (fibonacci-style tiling)
+    fn layout_spiral(
+        &self,
+        column: &WorkspaceColumn,
+        bounds: &Rectangle,
+        gap: i32,
+    ) -> HashMap<u64, Rectangle> {
+        let mut layouts = HashMap::new();
+        let window_count = column.windows.len();
+
+        if window_count == 0 {
+            return layouts;
+        }
+
+        if window_count == 1 {
+            let window_rect = Rectangle {
+                x: bounds.x + gap,
+                y: bounds.y + gap,
+                width: (bounds.width as i32 - 2 * gap).max(1) as u32,
+                height: (bounds.height as i32 - 2 * gap).max(1) as u32,
+            };
+            layouts.insert(column.windows[0], window_rect);
+            return layouts;
+        }
+
+        // For simplicity, spiral layout alternates between horizontal and vertical splits
+        let mut rects = vec![bounds.clone()];
+        let mut horizontal = true;
+
+        for i in 0..window_count {
+            if i >= rects.len() {
+                break;
+            }
+
+            let current = rects[i].clone();
+            let window_id = column.windows[i];
+
+            if i == window_count - 1 {
+                // Last window, use remaining space
+                let window_rect = Rectangle {
+                    x: current.x + gap,
+                    y: current.y + gap,
+                    width: (current.width as i32 - 2 * gap).max(1) as u32,
+                    height: (current.height as i32 - 2 * gap).max(1) as u32,
+                };
+                layouts.insert(window_id, window_rect);
+            } else {
+                // Split current rectangle
+                if horizontal {
+                    let half_height = current.height as i32 / 2;
+                    let window_rect = Rectangle {
+                        x: current.x + gap,
+                        y: current.y + gap,
+                        width: (current.width as i32 - 2 * gap).max(1) as u32,
+                        height: (half_height - gap).max(1) as u32,
+                    };
+                    layouts.insert(window_id, window_rect);
+
+                    // Remaining space for next windows
+                    rects.push(Rectangle {
+                        x: current.x,
+                        y: current.y + half_height,
+                        width: current.width,
+                        height: (current.height as i32 - half_height) as u32,
+                    });
+                } else {
+                    let half_width = current.width as i32 / 2;
+                    let window_rect = Rectangle {
+                        x: current.x + gap,
+                        y: current.y + gap,
+                        width: (half_width - gap).max(1) as u32,
+                        height: (current.height as i32 - 2 * gap).max(1) as u32,
+                    };
+                    layouts.insert(window_id, window_rect);
+
+                    // Remaining space for next windows
+                    rects.push(Rectangle {
+                        x: current.x + half_width,
+                        y: current.y,
+                        width: (current.width as i32 - half_width) as u32,
+                        height: current.height,
+                    });
+                }
+                horizontal = !horizontal;
             }
         }
 
@@ -599,6 +882,169 @@ impl ScrollableWorkspaces {
             }
             _ => 0.0,
         }
+    }
+
+    /// Cycle to the next layout mode for the focused column
+    pub fn cycle_layout_mode(&mut self) {
+        let focused_col_idx = self.focused_column;
+        let column = self.get_focused_column_mut();
+        column.layout_mode = match column.layout_mode {
+            LayoutMode::Vertical => LayoutMode::Horizontal,
+            LayoutMode::Horizontal => LayoutMode::MasterStack,
+            LayoutMode::MasterStack => LayoutMode::Grid,
+            LayoutMode::Grid => LayoutMode::Spiral,
+            LayoutMode::Spiral => LayoutMode::Vertical,
+        };
+        let new_mode = column.layout_mode;
+        info!(
+            "🔄 Cycled layout mode to {:?} for column {}",
+            new_mode, focused_col_idx
+        );
+    }
+
+    /// Set the layout mode for the focused column
+    pub fn set_layout_mode(&mut self, mode: LayoutMode) {
+        let focused_col_idx = self.focused_column;
+        let column = self.get_focused_column_mut();
+        column.layout_mode = mode;
+        info!(
+            "🎨 Set layout mode to {:?} for column {}",
+            mode, focused_col_idx
+        );
+    }
+
+    /// Get the current layout mode of the focused column
+    pub fn get_layout_mode(&self) -> LayoutMode {
+        self.get_focused_column()
+            .map(|c| c.layout_mode)
+            .unwrap_or(LayoutMode::Vertical)
+    }
+
+    /// Swap two windows within the focused column
+    pub fn swap_windows_in_column(&mut self, index_a: usize, index_b: usize) -> Result<()> {
+        let column = self.get_focused_column_mut();
+        
+        if index_a >= column.windows.len() || index_b >= column.windows.len() {
+            return Err(anyhow::anyhow!("Window indices out of bounds"));
+        }
+
+        column.windows.swap(index_a, index_b);
+        debug!(
+            "🔀 Swapped windows at indices {} and {} in column {}",
+            index_a, index_b, self.focused_column
+        );
+        Ok(())
+    }
+
+    /// Move a window within the focused column (change position)
+    pub fn move_window_in_column(&mut self, window_id: u64, new_index: usize) -> Result<()> {
+        let column = self.get_focused_column_mut();
+        
+        if let Some(old_index) = column.windows.iter().position(|&id| id == window_id) {
+            if new_index >= column.windows.len() {
+                return Err(anyhow::anyhow!("Target index out of bounds"));
+            }
+            
+            let window = column.windows.remove(old_index);
+            column.windows.insert(new_index, window);
+            
+            debug!(
+                "📦 Moved window {} from index {} to {} in column {}",
+                window_id, old_index, new_index, self.focused_column
+            );
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Window {} not found in focused column", window_id))
+        }
+    }
+
+    /// Focus the next window in the focused column
+    pub fn focus_next_window_in_column(&mut self) -> Option<u64> {
+        let column = self.get_focused_column_mut();
+        
+        if column.windows.is_empty() {
+            return None;
+        }
+        
+        let next_index = match column.focused_window_index {
+            Some(idx) => (idx + 1) % column.windows.len(),
+            None => 0,
+        };
+        
+        column.focused_window_index = Some(next_index);
+        let window_id = column.windows[next_index];
+        
+        debug!(
+            "👆 Focused next window {} (index {}) in column {}",
+            window_id, next_index, self.focused_column
+        );
+        
+        Some(window_id)
+    }
+
+    /// Focus the previous window in the focused column
+    pub fn focus_previous_window_in_column(&mut self) -> Option<u64> {
+        let column = self.get_focused_column_mut();
+        
+        if column.windows.is_empty() {
+            return None;
+        }
+        
+        let prev_index = match column.focused_window_index {
+            Some(idx) if idx > 0 => idx - 1,
+            _ => column.windows.len() - 1,
+        };
+        
+        column.focused_window_index = Some(prev_index);
+        let window_id = column.windows[prev_index];
+        
+        debug!(
+            "👆 Focused previous window {} (index {}) in column {}",
+            window_id, prev_index, self.focused_column
+        );
+        
+        Some(window_id)
+    }
+
+    /// Get the currently focused window ID in the focused column
+    pub fn get_focused_window_in_column(&self) -> Option<u64> {
+        self.get_focused_column().and_then(|column| {
+            column.focused_window_index
+                .and_then(|idx| column.windows.get(idx).copied())
+        })
+    }
+
+    /// Move the focused window up in the stack (swap with previous)
+    pub fn move_focused_window_up(&mut self) -> Result<()> {
+        let column = self.get_focused_column_mut();
+        
+        if let Some(focused_idx) = column.focused_window_index {
+            if focused_idx > 0 {
+                column.windows.swap(focused_idx, focused_idx - 1);
+                column.focused_window_index = Some(focused_idx - 1);
+                debug!("⬆️ Moved focused window up in column {}", self.focused_column);
+                return Ok(());
+            }
+        }
+        
+        Err(anyhow::anyhow!("Cannot move window up"))
+    }
+
+    /// Move the focused window down in the stack (swap with next)
+    pub fn move_focused_window_down(&mut self) -> Result<()> {
+        let column = self.get_focused_column_mut();
+        let window_count = column.windows.len();
+        
+        if let Some(focused_idx) = column.focused_window_index {
+            if focused_idx < window_count - 1 {
+                column.windows.swap(focused_idx, focused_idx + 1);
+                column.focused_window_index = Some(focused_idx + 1);
+                debug!("⬇️ Moved focused window down in column {}", self.focused_column);
+                return Ok(());
+            }
+        }
+        
+        Err(anyhow::anyhow!("Cannot move window down"))
     }
 
     pub fn shutdown(&mut self) -> Result<()> {

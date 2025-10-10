@@ -75,6 +75,15 @@ pub enum CompositorAction {
     Quit,
     #[allow(dead_code)]
     Custom(String),
+    
+    // New tiling actions
+    CycleLayoutMode,
+    FocusNextWindow,
+    FocusPreviousWindow,
+    MoveWindowUp,
+    MoveWindowDown,
+    SwapWindowUp,
+    SwapWindowDown,
 }
 
 /// Phase 3: Enhanced input manager with real processing
@@ -150,6 +159,36 @@ impl InputManager {
         key_bindings.insert(
             bindings_config.close_window.clone(),
             CompositorAction::CloseWindow,
+        );
+        
+        // New tiling keybindings
+        key_bindings.insert(
+            bindings_config.cycle_layout.clone(),
+            CompositorAction::CycleLayoutMode,
+        );
+        key_bindings.insert(
+            bindings_config.focus_next_window.clone(),
+            CompositorAction::FocusNextWindow,
+        );
+        key_bindings.insert(
+            bindings_config.focus_previous_window.clone(),
+            CompositorAction::FocusPreviousWindow,
+        );
+        key_bindings.insert(
+            bindings_config.move_window_up.clone(),
+            CompositorAction::MoveWindowUp,
+        );
+        key_bindings.insert(
+            bindings_config.move_window_down.clone(),
+            CompositorAction::MoveWindowDown,
+        );
+        key_bindings.insert(
+            bindings_config.swap_window_up.clone(),
+            CompositorAction::SwapWindowUp,
+        );
+        key_bindings.insert(
+            bindings_config.swap_window_down.clone(),
+            CompositorAction::SwapWindowDown,
         );
 
         // Parse mouse button bindings from config (optional)
