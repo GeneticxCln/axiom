@@ -7,6 +7,7 @@ pub mod compositor;
 pub mod config;
 pub mod decoration;
 pub mod effects;
+pub mod ime;
 pub mod input;
 pub mod ipc;
 pub mod protocol;
