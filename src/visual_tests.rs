@@ -24,7 +24,11 @@ pub struct VisualTestConfig {
     /// Tolerance for fuzzy comparison (0.0 = exact, 1.0 = any difference allowed)
     pub tolerance: f32,
     /// Base directory for golden images
-    pub golden_dir: String,
+    pub golden_dir: PathBuf,
+    /// Test name (for golden image naming)
+    pub test_name: String,
+    /// Whether to save diff images on failure
+    pub save_diffs: bool,
 }
 
 impl Default for VisualTestConfig {
@@ -33,7 +37,9 @@ impl Default for VisualTestConfig {
             width: 800,
             height: 600,
             tolerance: 0.01, // 1% tolerance by default
-            golden_dir: "tests/golden_images".to_string(),
+            golden_dir: PathBuf::from("tests/golden_images"),
+            test_name: "unnamed_test".to_string(),
+            save_diffs: true,
         }
     }
 }
@@ -220,13 +226,7 @@ impl VisualTestRunner {
             );
             self.save_golden(&captured_data)?;
 
-            return Ok(ComparisonResult {
-                passed: true,
-                difference: 0.0,
-                different_pixels: 0,
-                total_pixels: (self.config.width * self.config.height) as usize,
-                diff_image_path: None,
-            });
+            return Ok(ComparisonResult::NewBaseline);
         }
 
         // Load and compare
@@ -234,14 +234,16 @@ impl VisualTestRunner {
         let comparison = self.compare_images(&captured_data, &golden_data)?;
 
         // Save diff if requested and test failed
-        if !comparison.passed && self.config.save_diffs {
-            let diff_path = self.save_diff(&captured_data, &golden_data)?;
-            log::warn!(
-                "🔍 Visual test '{}' failed: {:.2}% difference, diff saved to {:?}",
-                self.config.test_name,
-                comparison.difference * 100.0,
-                diff_path
-            );
+        if let ComparisonResult::Mismatch { difference, .. } = &comparison {
+            if self.config.save_diffs {
+                let diff_path = self.save_diff(&captured_data, &golden_data)?;
+                log::warn!(
+                    "🔍 Visual test '{}' failed: {:.2}% difference, diff saved to {:?}",
+                    self.config.test_name,
+                    difference * 100.0,
+                    diff_path
+                );
+            }
         }
 
         Ok(comparison)
@@ -278,15 +280,16 @@ impl VisualTestRunner {
         }
 
         let average_difference = total_difference / total_pixels as f32;
-        let passed = average_difference <= self.config.tolerance;
 
-        Ok(ComparisonResult {
-            passed,
-            difference: average_difference,
-            different_pixels,
-            total_pixels,
-            diff_image_path: None,
-        })
+        if average_difference <= self.config.tolerance {
+            Ok(ComparisonResult::Match)
+        } else {
+            Ok(ComparisonResult::Mismatch {
+                difference: average_difference,
+                different_pixels,
+                total_pixels,
+            })
+        }
     }
 
     /// Get the path for the golden image
@@ -523,7 +526,21 @@ impl VisualTestContext {
         });
 
         // Apply blur effect
-        blur_renderer.apply_blur(&input_texture, &output_texture, width, height)?;
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Blur Apply Encoder"),
+        });
+        
+        let input_view = input_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        
+        blur_renderer.apply_blur(
+            &mut encoder,
+            &input_view,
+            &output_view,
+            cgmath::Vector2 { x: width, y: height },
+        )?;
+        
+        self.queue.submit(Some(encoder.finish()));
 
         // Capture result
         let capture = FrameCapture::new(self.device.clone(), self.queue.clone(), width, height);
@@ -645,15 +662,23 @@ mod tests {
     /// Test comparison result structure
     #[test]
     fn test_comparison_result() {
-        let result = ComparisonResult {
-            passed: true,
-            difference: 0.0,
-            different_pixels: 0,
-            total_pixels: 10000,
-            diff_image_path: None,
-        };
+        let match_result = ComparisonResult::Match;
+        assert!(matches!(match_result, ComparisonResult::Match));
 
-        assert!(result.passed);
-        assert_eq!(result.difference, 0.0);
+        let mismatch_result = ComparisonResult::Mismatch {
+            difference: 0.05,
+            different_pixels: 500,
+            total_pixels: 10000,
+        };
+        
+        match mismatch_result {
+            ComparisonResult::Mismatch { difference, .. } => {
+                assert_eq!(difference, 0.05);
+            }
+            _ => panic!("Expected mismatch result"),
+        }
+        
+        let new_baseline = ComparisonResult::NewBaseline;
+        assert!(matches!(new_baseline, ComparisonResult::NewBaseline));
     }
 }

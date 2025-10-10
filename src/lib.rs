@@ -9,6 +9,7 @@ pub mod decoration;
 pub mod effects;
 pub mod input;
 pub mod ipc;
+pub mod protocol;
 pub mod renderer;
 pub mod window;
 pub mod workspace;

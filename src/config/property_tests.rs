@@ -205,6 +205,13 @@ prop_compose! {
             mouse_middle: String::new(),
             drag_move_modifier: BindingsConfig::default().drag_move_modifier,
             drag_resize_modifier: BindingsConfig::default().drag_resize_modifier,
+            cycle_layout: BindingsConfig::default().cycle_layout,
+            focus_next_window: BindingsConfig::default().focus_next_window,
+            focus_previous_window: BindingsConfig::default().focus_previous_window,
+            move_window_up: BindingsConfig::default().move_window_up,
+            move_window_down: BindingsConfig::default().move_window_down,
+            swap_window_up: BindingsConfig::default().swap_window_up,
+            swap_window_down: BindingsConfig::default().swap_window_down,
         }
     }
 }
