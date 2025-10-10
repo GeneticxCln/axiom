@@ -7,6 +7,7 @@
 
 pub mod batching;
 pub mod damage;
+pub mod texture_pool;
 pub mod window_stack;
 
 use anyhow::Result;
