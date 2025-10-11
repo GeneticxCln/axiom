@@ -117,7 +117,7 @@ impl Default for WindowConstraints {
 
 // Backend window type
 
-// Minimal fallback backend window when experimental-smithay is disabled
+// Fallback backend window structure (used internally by window manager)
 #[derive(Debug, Clone, PartialEq)]
 pub struct BackendWindow {
     pub id: u64,

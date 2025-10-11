@@ -3,9 +3,8 @@
 //! This module contains the main AxiomCompositor struct and event loop.
 //! It coordinates between all subsystems: workspaces, effects, input, etc.
 //!
-//! This implementation can optionally use Smithay for proper Wayland compositor functionality
-//! with window management, surface handling, and protocol support when the
-//! `experimental-smithay` feature is enabled.
+//! The production Smithay backend provides full Wayland compositor functionality
+//! with window management, surface handling, and protocol support.
 
 use anyhow::{Context, Result};
 use log::{debug, info, warn};

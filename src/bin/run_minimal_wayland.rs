@@ -34,12 +34,17 @@ fn main() -> Result<()> {
     }
     let clip = Arc::new(RwLock::new(ClipboardManager::new()));
     let deco = Arc::new(RwLock::new(axiom::DecorationManager::new(&config.window)));
+    // Initialize security manager
+    let mut sec = axiom::security::SecurityManager::default();
+    sec.init().expect("Failed to initialize security manager");
+    let security = Arc::new(parking_lot::Mutex::new(sec));
     let server = CompositorServer::new(
         wm,
         ws,
         im,
         clip,
         deco,
+        security,
         /* present_rx */ None,
         /* size_rx */ None,
         /* redraw_tx */ None,

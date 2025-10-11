@@ -4,10 +4,15 @@
 //! applications and integrate with the existing Axiom systems.
 
 use anyhow::{Context, Result};
-use log::{debug, info};
+use log::{debug, info, warn};
+use std::os::fd::AsFd;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::ffi::CString;
+use std::fs::File;
+use std::io::Write;
+use std::os::fd::OwnedFd;
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::Arc;
 use wayland_server::Resource;
 
@@ -51,6 +56,13 @@ pub struct CompositorState {
     pub pending_callbacks: HashMap<u32, Vec<wl_callback::WlCallback>>,
     // Surfaces that committed since last present
     pub dirty_surfaces: HashSet<u32>,
+    // XKB keymap for keyboard
+    pub xkb_keymap_string: Option<String>,
+    // Current modifier state
+    pub mods_depressed: u32,
+    pub mods_latched: u32,
+    pub mods_locked: u32,
+    pub mods_group: u32,
 }
 
 /// Real surface with actual data
@@ -64,6 +76,14 @@ pub struct Surface {
     pub height: i32,
 }
 
+/// XDG surface role tracking to prevent role conflicts
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XdgRole {
+    None,
+    Toplevel,
+    Popup,
+}
+
 /// Real window that can be displayed
 pub struct Window {
     pub xdg_surface: xdg_surface::XdgSurface,
@@ -75,7 +95,17 @@ pub struct Window {
     pub y: i32,
     pub width: i32,
     pub height: i32,
-    pub configured_serial: Option<u32>,
+    /// Last serial sent in configure
+    pub last_configure_serial: Option<u32>,
+    /// Last serial acked by client
+    pub last_acked_serial: Option<u32>,
+    /// Whether client has acked latest configure
+    pub is_configured: bool,
+    /// Whether window is mapped (committed after ack)
+    pub is_mapped: bool,
+    /// XDG role assigned to this surface
+    pub xdg_role: XdgRole,
+    /// Whether we're waiting for first commit after ack
     pub pending_map: bool,
 }
 
@@ -88,6 +118,9 @@ pub struct OutputInfo {
 
 impl Default for CompositorState {
     fn default() -> Self {
+        // Build default US QWERTY keymap
+        let xkb_keymap_string = build_default_xkb_keymap();
+        
         Self {
             surfaces: Vec::new(),
             windows: Vec::new(),
@@ -105,6 +138,11 @@ impl Default for CompositorState {
             serial_counter: 1,
             pending_callbacks: HashMap::new(),
             dirty_surfaces: HashSet::new(),
+            xkb_keymap_string,
+            mods_depressed: 0,
+            mods_latched: 0,
+            mods_locked: 0,
+            mods_group: 0,
         }
     }
 }
@@ -175,6 +213,13 @@ pub struct AxiomCompositorState {
     pub next_window_id: u64,
 }
 
+/// Loop data for calloop event loop
+struct CompositorLoopData {
+    display_handle: DisplayHandle,
+    state: CompositorState,
+    present_interval: std::time::Duration,
+}
+
 /// Basic real backend for testing
 pub struct RealBackend {
     display: Display<CompositorState>,
@@ -243,61 +288,155 @@ impl RealBackend {
     }
 
     pub fn run(mut self) -> Result<()> {
-        info!("🎬 Starting REAL Wayland compositor event loop...");
+        use calloop::EventLoop;
+        use std::time::Duration;
+        
+        info!("🎬 Starting REAL Wayland compositor with calloop event loop...");
         info!(
             "   Clients can connect via WAYLAND_DISPLAY={}",
             self.socket_name
         );
 
-        let mut state = CompositorState::default();
-        let mut last_present = std::time::Instant::now();
-
-        // Simple event loop - accept clients and dispatch
-        loop {
-            // Accept new clients
-            if let Ok(Some(stream)) = self.listening_socket.accept() {
-                let _client = self
-                    .display
-                    .handle()
-                    .insert_client(stream, Arc::new(ClientDataImpl))
-                    .context("Failed to insert client")?;
-                info!("✅ Client connected!");
-            }
-
-            // Dispatch pending events
-            self.display.dispatch_clients(&mut state)?;
-            self.display.flush_clients()?;
-
-            // Simulated present tick: complete queued frame callbacks using output refresh cadence
-            let refresh_mhz = state.output_info.refresh.max(1) as u64; // millihertz
-            let present_ns = 1_000_000_000_000u64 / refresh_mhz; // ns per frame = 1e12 / mHz
-            let interval = std::time::Duration::from_nanos(present_ns);
-            if last_present.elapsed() >= interval {
+        let state = CompositorState::default();
+        
+        // Create calloop event loop
+        let mut event_loop: EventLoop<'_, CompositorLoopData> = EventLoop::try_new()
+            .context("Failed to create event loop")?;
+        let loop_handle = event_loop.handle();
+        
+        // Calculate present interval from refresh rate
+        let refresh_mhz = state.output_info.refresh.max(1) as u64;
+        let present_ns = 1_000_000_000_000u64 / refresh_mhz;
+        let present_interval = Duration::from_nanos(present_ns);
+        
+        info!("⏱️  Present interval: {:.2}ms ({} Hz)", 
+            present_interval.as_secs_f64() * 1000.0,
+            1000.0 / present_interval.as_millis().max(1) as f64
+        );
+        
+        // Set up listening socket as event source
+        let socket_source = calloop::generic::Generic::new(
+            self.listening_socket,
+            calloop::Interest::READ,
+            calloop::Mode::Level,
+        );
+        
+        loop_handle
+            .insert_source(socket_source, |_readiness, socket, data| {
+                // Accept new clients
+                if let Ok(Some(stream)) = socket.accept() {
+                    match data.display_handle.insert_client(stream, Arc::new(ClientDataImpl)) {
+                        Ok(_) => info!("✅ Client connected!"),
+                        Err(e) => warn!("Failed to insert client: {}", e),
+                    }
+                }
+                Ok(calloop::PostAction::Continue)
+            })
+            .context("Failed to register socket source")?;
+        
+        // Set up present timer for frame callbacks
+        let timer = calloop::timer::Timer::from_duration(present_interval);
+        loop_handle
+            .insert_source(timer, |_deadline, _timer, data| {
+                // Complete frame callbacks for dirty surfaces
                 let ts_ms: u32 = (std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis()
                     & 0xFFFF_FFFF) as u32;
-                // Complete callbacks only for surfaces that committed since last tick
-                let sids: Vec<u32> = state.dirty_surfaces.drain().collect();
+                
+                let sids: Vec<u32> = data.state.dirty_surfaces.drain().collect();
                 for sid in sids {
-                    if let Some(list) = state.pending_callbacks.get_mut(&sid) {
+                    if let Some(list) = data.state.pending_callbacks.get_mut(&sid) {
                         for cb in list.drain(..) {
                             cb.done(ts_ms);
                         }
                     }
                 }
-                last_present = std::time::Instant::now();
-            }
-
-            // Small sleep to avoid busy loop
-            std::thread::sleep(std::time::Duration::from_millis(1));
+                
+                // Return new timeout for next frame
+                calloop::timer::TimeoutAction::ToDuration(data.present_interval)
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to register present timer: {:?}", e))?;
+        
+        // Prepare loop data
+        let mut loop_data = CompositorLoopData {
+            display_handle: self.display.handle(),
+            state,
+            present_interval,
+        };
+        
+        info!("🎬 Calloop event loop starting...");
+        
+        // Main event loop
+        loop {
+            // Dispatch Wayland client events
+            self.display.dispatch_clients(&mut loop_data.state)
+                .context("Failed to dispatch clients")?;
+            self.display.flush_clients()
+                .context("Failed to flush clients")?;
+            
+            // Dispatch calloop events (socket accepts, timer ticks)
+            event_loop.dispatch(Some(Duration::from_millis(10)), &mut loop_data)
+                .context("Event loop error")?;
         }
     }
 
     pub fn socket_name(&self) -> &str {
         &self.socket_name
     }
+}
+
+/// Build a default XKB keymap (US layout)
+fn build_default_xkb_keymap() -> Option<String> {
+    use xkbcommon::xkb;
+    let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+    let keymap = xkb::Keymap::new_from_names(
+        &ctx,
+        &"",
+        &"",
+        &"us",
+        &"",
+        Some("".to_string()),
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )?;
+    Some(keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1))
+}
+
+/// Create a memfd and write keymap string to it
+#[cfg(target_os = "linux")]
+fn create_memfd_keymap(data: &str) -> std::io::Result<OwnedFd> {
+    let name = CString::new("axiom-xkb-keymap").unwrap();
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    file.write_all(data.as_bytes())?;
+    file.flush()?;
+    let size = data.len();
+    drop(file); // Close the file descriptor so it can be passed
+    let ofd = unsafe { OwnedFd::from_raw_fd(fd) };
+    info!("📋 Created XKB keymap memfd: {} bytes", size);
+    Ok(ofd)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_memfd_keymap(data: &str) -> std::io::Result<OwnedFd> {
+    use std::fs::OpenOptions;
+    use std::io::Seek;
+    let mut tmp = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open("/tmp/axiom-keymap")?;
+    tmp.write_all(data.as_bytes())?;
+    tmp.flush()?;
+    tmp.seek(std::io::SeekFrom::Start(0))?;
+    let fd = tmp.into_raw_fd();
+    let ofd = unsafe { OwnedFd::from_raw_fd(fd) };
+    Ok(ofd)
 }
 
 // Client data implementation
@@ -376,6 +515,10 @@ impl CompositorState {
                 let serial = self.next_serial();
                 for p in &self.pointers {
                     p.leave(serial, &prev);
+                    // Send frame after leave
+                    if p.version() >= 5 {
+                        p.frame();
+                    }
                 }
             }
             // set new focus and send enter
@@ -384,6 +527,10 @@ impl CompositorState {
             for p in &self.pointers {
                 // Surface-local coords: use current pointer_pos
                 p.enter(serial, surface, self.pointer_pos.0, self.pointer_pos.1);
+                // Send frame after enter
+                if p.version() >= 5 {
+                    p.frame();
+                }
             }
         }
     }
@@ -397,6 +544,10 @@ impl CompositorState {
             & 0xFFFF_FFFF) as u32;
         for p in &self.pointers {
             p.motion(time_ms, x, y);
+            // Send frame event to indicate end of pointer event batch
+            if p.version() >= 5 {
+                p.frame();
+            }
         }
     }
 
@@ -414,6 +565,10 @@ impl CompositorState {
         };
         for p in &self.pointers {
             p.button(serial, time_ms, button, state);
+            // Send frame event to indicate end of pointer event batch
+            if p.version() >= 5 {
+                p.frame();
+            }
         }
     }
 
@@ -485,14 +640,34 @@ impl CompositorState {
         modifiers: Vec<String>,
         input_mgr: Option<&mut InputManager>,
     ) {
+        // Update modifier state based on provided modifiers
+        self.update_modifiers(&modifiers);
+        
         // Broadcast to all wl_keyboard resources
         let serial = self.next_serial();
-        let time_ms = 0u32;
+        let time_ms = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() & 0xFFFF_FFFF) as u32;
         let state = if pressed {
             wl_keyboard::KeyState::Pressed
         } else {
             wl_keyboard::KeyState::Released
         };
+        
+        // Send modifiers first
+        let mod_serial = self.next_serial();
+        for kb in &self.keyboards {
+            kb.modifiers(
+                mod_serial,
+                self.mods_depressed,
+                self.mods_latched,
+                self.mods_locked,
+                self.mods_group,
+            );
+        }
+        
+        // Then send key event
         for kb in &self.keyboards {
             kb.key(serial, time_ms, keycode, state);
         }
@@ -517,6 +692,70 @@ impl CompositorState {
                 modifiers,
                 pressed,
             });
+        }
+    }
+    
+    fn update_modifiers(&mut self, modifiers: &[String]) {
+        // Simple modifier bitmask mapping (XKB standard positions)
+        // Shift=bit0, CapsLock=bit1, Ctrl=bit2, Alt=bit3, Mod2=bit4, Mod3=bit5, Super=bit6, Mod5=bit7
+        let mut depressed: u32 = 0;
+        
+        for m in modifiers {
+            match m.as_str() {
+                "Shift" => depressed |= 1 << 0,
+                "CapsLock" => depressed |= 1 << 1,
+                "Ctrl" | "Control" => depressed |= 1 << 2,
+                "Alt" => depressed |= 1 << 3,
+                "Mod2" => depressed |= 1 << 4,
+                "Mod3" => depressed |= 1 << 5,
+                "Super" | "Meta" => depressed |= 1 << 6,
+                "Mod5" | "AltGr" => depressed |= 1 << 7,
+                _ => {},
+            }
+        }
+        
+        self.mods_depressed = depressed;
+        // For simplicity, keep latched/locked/group at 0
+    }
+    
+    /// Send axis (scroll) events to all pointer resources
+    pub fn handle_pointer_axis(
+        &mut self,
+        horizontal_delta: f64,
+        vertical_delta: f64,
+        discrete_horizontal: Option<i32>,
+        discrete_vertical: Option<i32>,
+    ) {
+        let time_ms = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() & 0xFFFF_FFFF) as u32;
+        
+        for p in &self.pointers {
+            let version = p.version();
+            
+            // Send discrete scroll if available (v5+)
+            if version >= 5 {
+                if let Some(discrete_v) = discrete_vertical {
+                    p.axis_discrete(wl_pointer::Axis::VerticalScroll, discrete_v);
+                }
+                if let Some(discrete_h) = discrete_horizontal {
+                    p.axis_discrete(wl_pointer::Axis::HorizontalScroll, discrete_h);
+                }
+            }
+            
+            // Send continuous axis events
+            if vertical_delta.abs() > 0.001 {
+                p.axis(time_ms, wl_pointer::Axis::VerticalScroll, vertical_delta);
+            }
+            if horizontal_delta.abs() > 0.001 {
+                p.axis(time_ms, wl_pointer::Axis::HorizontalScroll, horizontal_delta);
+            }
+            
+            // Send frame to complete the event batch (v5+)
+            if version >= 5 {
+                p.frame();
+            }
         }
     }
 }
@@ -553,7 +792,7 @@ impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
                     .find(|s| &s.wl_surface == resource)
                 {
                     surface.committed = true;
-                    info!("✅ Surface committed and ready to render!");
+                    debug!("✅ Surface committed");
                 }
                 // Mark this surface dirty for next present tick
                 let sid = resource.id().protocol_id();
@@ -565,13 +804,36 @@ impl Dispatch<wl_surface::WlSurface, ()> for CompositorState {
                     .iter_mut()
                     .find(|w| w.wl_surface.as_ref() == Some(resource))
                 {
-                    if win.pending_map {
+                    // Check if window has a role assigned
+                    if win.xdg_role == XdgRole::None {
+                        warn!("⚠️ Commit on xdg_surface without role assignment");
+                        return;
+                    }
+                    
+                    // For toplevel/popup, require configure ack before first map
+                    if !win.is_mapped && win.pending_map {
+                        if !win.is_configured {
+                            warn!("❌ Client attempted to map window before acking configure!");
+                            // Protocol violation: must ack_configure before committing buffer
+                            return;
+                        }
+                        
+                        // Valid first map after configure ack
                         info!(
-                            "🗺️ Mapping window at ({}, {}) size {}x{}",
+                            "🗺️ Mapping {} at ({}, {}) size {}x{}",
+                            match win.xdg_role {
+                                XdgRole::Toplevel => "toplevel",
+                                XdgRole::Popup => "popup",
+                                XdgRole::None => "unknown",
+                            },
                             win.x, win.y, win.width, win.height
                         );
+                        win.is_mapped = true;
                         win.pending_map = false;
                         state.send_pointer_enter_if_needed(resource);
+                    } else if win.is_mapped {
+                        // Already mapped, just update
+                        debug!("🔄 Update commit for already-mapped window");
                     }
                 }
             }
@@ -756,7 +1018,11 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for CompositorState {
                     y: 100,
                     width: 800,
                     height: 600,
-                    configured_serial: None,
+                    last_configure_serial: None,
+                    last_acked_serial: None,
+                    is_configured: false,
+                    is_mapped: false,
+                    xdg_role: XdgRole::None,
                     pending_map: false,
                 });
             }
@@ -783,6 +1049,19 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for CompositorState {
     ) {
         match request {
             xdg_surface::Request::GetToplevel { id } => {
+                // Check if role already assigned
+                if let Some(win) = state
+                    .windows
+                    .iter()
+                    .find(|w| w.xdg_surface == *resource)
+                {
+                    if win.xdg_role != XdgRole::None {
+                        warn!("⚠️ Attempted to assign toplevel role to surface that already has role: {:?}", win.xdg_role);
+                        // Protocol error: role already assigned
+                        return;
+                    }
+                }
+                
                 let toplevel = data_init.init(id, ());
                 info!("🎉 REAL WINDOW CREATED! XDG Toplevel ready!");
 
@@ -793,15 +1072,30 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for CompositorState {
                     .rev()
                     .find(|w| w.xdg_surface == *resource && w.xdg_toplevel.is_none())
                 {
+                    // Assign toplevel role
+                    win.xdg_role = XdgRole::Toplevel;
                     win.xdg_toplevel = Some(toplevel.clone());
-                    // Send initial configure with suggested size and remember serial
-                    toplevel.configure(800, 600, vec![]);
-                    let serial = 1u32; // minimal serial tracking; could be incremented per configure
-                    win.configured_serial = Some(serial);
-                    resource.configure(serial);
+                    win.is_configured = false;
                     win.pending_map = true;
+                }
+                
+                // Generate serial after releasing borrow
+                let serial = state.next_serial();
+                if let Some(win) = state
+                    .windows
+                    .iter_mut()
+                    .rev()
+                    .find(|w| w.xdg_surface == *resource)
+                {
+                    win.last_configure_serial = Some(serial);
+                    
+                    toplevel.configure(800, 600, vec![]);
+                    resource.configure(serial);
+                    
+                    info!("📤 Sent configure with serial {} to new toplevel", serial);
                 } else {
                     // If not found, create a new entry as fallback
+                    let serial = state.next_serial();
                     state.windows.push(Window {
                         xdg_surface: resource.clone(),
                         xdg_toplevel: Some(toplevel.clone()),
@@ -812,26 +1106,78 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for CompositorState {
                         y: 100,
                         width: 800,
                         height: 600,
-                        configured_serial: Some(1),
+                        last_configure_serial: Some(serial),
+                        last_acked_serial: None,
+                        is_configured: false,
+                        is_mapped: false,
+                        xdg_role: XdgRole::Toplevel,
                         pending_map: true,
                     });
-                    resource.configure(1);
+                    resource.configure(serial);
+                    info!("📤 Sent configure with serial {} to fallback toplevel", serial);
                 }
             }
             xdg_surface::Request::GetPopup { id, .. } => {
-                data_init.init(id, ());
-                resource.configure(1);
-            }
-            xdg_surface::Request::AckConfigure { serial } => {
-                info!("✅ Configure acknowledged: serial={}", serial);
-                // Mark window ready to map after commit
+                // Check if role already assigned
                 if let Some(win) = state
                     .windows
                     .iter_mut()
                     .find(|w| w.xdg_surface == *resource)
                 {
-                    win.configured_serial = Some(serial);
-                    win.pending_map = true;
+                    if win.xdg_role != XdgRole::None {
+                        warn!("⚠️ Attempted to assign popup role to surface that already has role: {:?}", win.xdg_role);
+                        return;
+                    }
+                    // Assign popup role
+                    win.xdg_role = XdgRole::Popup;
+                }
+                
+                // Generate serial after releasing borrow
+                let serial = state.next_serial();
+                if let Some(win) = state
+                    .windows
+                    .iter_mut()
+                    .find(|w| w.xdg_surface == *resource)
+                {
+                    win.last_configure_serial = Some(serial);
+                    resource.configure(serial);
+                    info!("📤 Sent configure with serial {} to new popup", serial);
+                } else {
+                    // Fallback: create placeholder with popup role
+                    let serial = state.next_serial();
+                    resource.configure(serial);
+                }
+                data_init.init(id, ());
+            }
+            xdg_surface::Request::AckConfigure { serial } => {
+                // Validate and track acked serial
+                if let Some(win) = state
+                    .windows
+                    .iter_mut()
+                    .find(|w| w.xdg_surface == *resource)
+                {
+                    // Verify this serial was actually sent
+                    if win.last_configure_serial == Some(serial) {
+                        win.last_acked_serial = Some(serial);
+                        win.is_configured = true;
+                        win.pending_map = true;
+                        info!("✅ Configure acknowledged: serial={} (valid)", serial);
+                    } else if win.last_acked_serial.map_or(false, |acked| serial <= acked) {
+                        // Client acking an old serial - allowed but warn
+                        warn!("⚠️ Client acked old serial {} (last_acked: {:?}, last_sent: {:?})",
+                            serial, win.last_acked_serial, win.last_configure_serial);
+                        // Still update, as protocol allows acking older serials
+                        win.last_acked_serial = Some(serial.max(win.last_acked_serial.unwrap_or(0)));
+                        win.is_configured = true;
+                        win.pending_map = true;
+                    } else {
+                        // Unknown serial - protocol violation
+                        warn!("❌ Client acked unknown serial {} (expected: {:?})",
+                            serial, win.last_configure_serial);
+                        // Don't mark as configured - this is a protocol error
+                    }
+                } else {
+                    warn!("⚠️ AckConfigure for unknown xdg_surface");
                 }
             }
             _ => {}
@@ -930,8 +1276,32 @@ impl Dispatch<wl_seat::WlSeat, ()> for CompositorState {
         match request {
             wl_seat::Request::GetKeyboard { id } => {
                 let kb = data_init.init(id, ());
+                
+                // Send keymap to the keyboard
+                if let Some(ref keymap_str) = state.xkb_keymap_string {
+                    match create_memfd_keymap(keymap_str) {
+                        Ok(fd) => {
+                            let size = keymap_str.len() as u32;
+                            kb.keymap(
+                                wl_keyboard::KeymapFormat::XkbV1,
+                                fd.as_fd(),
+                                size,
+                            );
+                            debug!("📋 Sent XKB keymap to keyboard: {} bytes", size);
+                        }
+                        Err(e) => {
+                            warn!("Failed to create keymap memfd: {}", e);
+                        }
+                    }
+                } else {
+                    warn!("No XKB keymap available for keyboard!");
+                }
+                
+                // Send repeat info (30 keys/sec, 500ms delay)
+                kb.repeat_info(30, 500);
+                
                 state.keyboards.push(kb);
-                debug!("Keyboard requested");
+                debug!("✅ Keyboard configured with keymap and repeat info");
             }
             wl_seat::Request::GetPointer { id } => {
                 let ptr = data_init.init(id, ());

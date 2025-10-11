@@ -49,6 +49,10 @@ use wgpu;
 use xkbcommon::xkb;
 use tiny_skia;
 
+// Import SecurityManager with proper path resolution
+// Always use crate:: since this module is only compiled as part of the library
+use crate::security::SecurityManager;
+
 const CURSOR_ID: u64 = 9_000_000u64;
 const CURSOR_W: u32 = 24;
 const CURSOR_H: u32 = 24;
@@ -146,6 +150,12 @@ pub struct CompositorState {
     pub kbd_repeat_delay_ms: i32,
     pub kbd_repeat_rate_hz: i32,
     pub natural_scrolling: bool,
+
+    // Security manager for rate limiting and resource caps
+    pub security: Arc<parking_lot::Mutex<SecurityManager>>,
+    // Client ID mapping (wayland client backend id -> u32 for security tracking)
+    pub client_id_map: HashMap<usize, u32>,
+    pub next_client_id: u32,
 }
 
 #[derive(Clone)]
@@ -182,6 +192,7 @@ pub struct CompositorServer {
     pub input_manager: Arc<RwLock<crate::input::InputManager>>,
     pub clipboard: Arc<RwLock<crate::clipboard::ClipboardManager>>,
     pub decoration_manager: Arc<RwLock<crate::decoration::DecorationManager>>,
+    pub security: Arc<parking_lot::Mutex<SecurityManager>>,
     // Input channel from evdev thread
     #[allow(dead_code)]
     input_rx: Option<Receiver<HwInputEvent>>,
@@ -386,6 +397,7 @@ impl CompositorServer {
         input_manager: Arc<RwLock<crate::input::InputManager>>,
         clipboard: Arc<RwLock<crate::clipboard::ClipboardManager>>,
         decoration_manager: Arc<RwLock<crate::decoration::DecorationManager>>,
+        security: Arc<parking_lot::Mutex<SecurityManager>>,
         present_rx: Option<Receiver<PresentEvent>>,
         size_rx: Option<Receiver<SizeUpdate>>,
         redraw_tx: Option<std::sync::mpsc::Sender<()>>,
@@ -439,6 +451,7 @@ impl CompositorServer {
             input_manager,
             clipboard,
             decoration_manager,
+            security,
             input_rx,
             spawn_headless_renderer,
             selected_backends,
@@ -609,6 +622,10 @@ impl CompositorServer {
             kbd_repeat_delay_ms: kbd_delay_ms,
             kbd_repeat_rate_hz: kbd_rate_hz,
             natural_scrolling,
+
+            security: self.security.clone(),
+            client_id_map: HashMap::new(),
+            next_client_id: 1,
         };
 
         // Create calloop event loop
@@ -2458,8 +2475,8 @@ impl GlobalDispatch<wl_compositor::WlCompositor, ()> for CompositorState {
 }
 impl Dispatch<wl_compositor::WlCompositor, ()> for CompositorState {
     fn request(
-        _state: &mut Self,
-        _client: &Client,
+        state: &mut Self,
+        client: &Client,
         _resource: &wl_compositor::WlCompositor,
         request: wl_compositor::Request,
         _data: &(),
@@ -2468,6 +2485,28 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for CompositorState {
     ) {
         match request {
             wl_compositor::Request::CreateSurface { id } => {
+                // Get or assign client ID for security tracking
+                // Use raw pointer as stable client identifier
+                let client_ptr = client as *const Client as usize;
+                let client_id = *state.client_id_map.entry(client_ptr).or_insert_with(|| {
+                    let cid = state.next_client_id;
+                    state.next_client_id += 1;
+                    cid
+                });
+
+                // Security: Check surface limit
+                let mut sec = state.security.lock();
+                if let Err(e) = sec.check_surface_limit(client_id) {
+                    log::warn!("🔒 Surface creation denied for client {}: {}", client_id, e);
+                    // Still init to avoid protocol error, but log the violation
+                }
+                // Security: Check rate limit
+                if !sec.check_rate_limit(client_id, "create_surface") {
+                    log::warn!("🔒 Rate limit exceeded for client {} on create_surface", client_id);
+                }
+                sec.register_surface(client_id);
+                drop(sec);
+
                 // Initialize wl_surface resource with default data
                 data_init.init(id, ());
             }
@@ -3884,7 +3923,7 @@ fn convert_dmabuf_to_rgba(rec: &BufferRecord) -> Option<Vec<u8>> {
         _ => return None,
     };
 
-    // Attempt Vulkan import first when enabled
+    // Attempt Vulkan import first when enabled (zero-copy GPU path)
     #[cfg(feature = "dmabuf-vulkan")]
     {
         let w = rec.width.max(0) as u32;
@@ -3897,9 +3936,14 @@ fn convert_dmabuf_to_rgba(rec: &BufferRecord) -> Option<Vec<u8>> {
             plane.offset,
             &plane.fd,
         ) {
+            debug!("DMA-BUF: zero-copy Vulkan import succeeded for {}x{} buffer (fourcc: 0x{:08x})", w, h, fourcc);
             return Some(bytes);
+        } else {
+            debug!("DMA-BUF: Vulkan import failed, falling back to CPU copy for {}x{} buffer (fourcc: 0x{:08x})", w, h, fourcc);
         }
     }
+    #[cfg(not(feature = "dmabuf-vulkan"))]
+    debug!("DMA-BUF: dmabuf-vulkan feature not enabled, using CPU copy for {}x{} buffer (fourcc: 0x{:08x})", width, height, fourcc);
     let stride = plane.stride.max(0) as usize;
     let offset = plane.offset.max(0) as usize;
     if width == 0 || height == 0 {
@@ -4608,6 +4652,7 @@ impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, DmabufParamsDa
                         fourcc: format,
                     },
                 };
+                debug!("DMA-BUF: created buffer {}x{} (fourcc: 0x{:08x}, id: {})", width, height, format, rec.id);
                 state.buffers.insert(rec.id, rec);
                 // params can be destroyed by client later; done
             }
@@ -7006,6 +7051,25 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for CompositorState {
     ) {
         match request {
             xdg_surface::Request::GetToplevel { id } => {
+                // Security: Check window limit
+                // Use raw pointer as stable client identifier
+                let client_ptr = _client as *const Client as usize;
+                let client_id = *state.client_id_map.entry(client_ptr).or_insert_with(|| {
+                    let cid = state.next_client_id;
+                    state.next_client_id += 1;
+                    cid
+                });
+
+                let mut sec = state.security.lock();
+                if let Err(e) = sec.check_window_limit(client_id) {
+                    log::warn!("🔒 Window creation denied for client {}: {}", client_id, e);
+                }
+                if !sec.check_rate_limit(client_id, "create_window") {
+                    log::warn!("🔒 Rate limit exceeded for client {} on create_window", client_id);
+                }
+                sec.register_window(client_id);
+                drop(sec);
+
                 let toplevel = data_init.init(id, ());
                 // Precompute serial to avoid borrow conflict
                 let serial = state.next_serial();
@@ -7102,12 +7166,23 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for CompositorState {
     ) {
         match request {
             xdg_toplevel::Request::SetTitle { title } => {
+                // Security: Validate and sanitize title
+                let sanitized_title = {
+                    let sec = state.security.lock();
+                    if let Err(e) = sec.validate_window_title(&title) {
+                        log::warn!("🔒 Invalid window title rejected: {}", e);
+                        sec.sanitize_string(&title)
+                    } else {
+                        title.clone()
+                    }
+                };
+
                 if let Some(win) = state
                     .windows
                     .iter_mut()
                     .find(|w| w.xdg_toplevel.as_ref() == Some(resource))
                 {
-                    win.title = title.clone();
+                    win.title = sanitized_title.clone();
                     if let Some(ref surface) = win.wl_surface {
                         state.events.push(ServerEvent::TitleChanged {
                             surface: surface.clone(),
@@ -7118,12 +7193,23 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for CompositorState {
                 }
             }
             xdg_toplevel::Request::SetAppId { app_id } => {
+                // Security: Validate and sanitize app_id
+                let sanitized_app_id = {
+                    let sec = state.security.lock();
+                    if let Err(e) = sec.validate_class(&app_id) {
+                        log::warn!("🔒 Invalid app_id rejected: {}", e);
+                        sec.sanitize_string(&app_id)
+                    } else {
+                        app_id.clone()
+                    }
+                };
+
                 if let Some(win) = state
                     .windows
                     .iter_mut()
                     .find(|w| w.xdg_toplevel.as_ref() == Some(resource))
                 {
-                    win.app_id = app_id.clone();
+                    win.app_id = sanitized_app_id.clone();
                     if let Some(ref surface) = win.wl_surface {
                         state.events.push(ServerEvent::AppIdChanged {
                             surface: surface.clone(),
@@ -7517,6 +7603,10 @@ mod server_init_tests {
         let deco = Arc::new(RwLock::new(crate::decoration::DecorationManager::new(
             &config.window,
         )));
+        // Initialize security manager for test
+        let mut sec = crate::security::SecurityManager::default();
+        sec.init().expect("Failed to initialize security manager");
+        let security = Arc::new(parking_lot::Mutex::new(sec));
 
         let server = CompositorServer::new(
             wm,
@@ -7524,6 +7614,7 @@ mod server_init_tests {
             im,
             clip,
             deco,
+            security,
             None,
             None,
             None,

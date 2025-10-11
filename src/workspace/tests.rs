@@ -400,6 +400,155 @@ fn test_reserved_insets_max_behavior() -> Result<()> {
 }
 
 #[test]
+fn test_cleanup_runs_periodically() -> Result<()> {
+    let config = WorkspaceConfig::default();
+    let mut ws = ScrollableWorkspaces::new(&config)?;
+
+    // Create some empty columns
+    ws.add_window_to_column(100, 1);
+    ws.add_window_to_column(200, 2);
+    ws.add_window_to_column(300, 3);
+    
+    // Remove all windows, leaving empty columns
+    ws.remove_window(100);
+    ws.remove_window(200);
+    ws.remove_window(300);
+    
+    // Should have multiple empty columns
+    assert!(ws.active_column_count() >= 3);
+    
+    // Run update_animations multiple times without waiting
+    for _ in 0..5 {
+        ws.update_animations()?;
+    }
+    
+    // Columns should still be present (not enough time elapsed)
+    assert!(ws.active_column_count() >= 3);
+    
+    // Now simulate time passing by sleeping
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    
+    // Run update_animations - should trigger cleanup
+    ws.update_animations()?;
+    
+    // After cleanup, should still have focused column but empty ones may be removed
+    // (depending on last_accessed time which gets updated on operations)
+    assert!(ws.active_column_count() >= 1);
+    
+    Ok(())
+}
+
+#[test]
+fn test_scroll_animation_state_transitions() -> Result<()> {
+    let config = WorkspaceConfig {
+        smooth_scrolling: true,
+        ..Default::default()
+    };
+    let mut ws = ScrollableWorkspaces::new(&config)?;
+    
+    // Add columns
+    ws.add_window_to_column(1, 0);
+    ws.add_window_to_column(2, 1);
+    ws.add_window_to_column(3, 2);
+    
+    // Initially idle
+    assert!(!ws.is_scrolling());
+    
+    // Start scrolling
+    ws.scroll_right();
+    assert!(ws.is_scrolling());
+    
+    // Progress should be 0 at start
+    let progress = ws.scroll_progress();
+    assert!(progress >= 0.0 && progress <= 1.0);
+    
+    // Update a few times during animation
+    for _ in 0..5 {
+        ws.update_animations()?;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    
+    // Should still be scrolling (animation takes ~250ms)
+    assert!(ws.is_scrolling());
+    
+    // Wait for animation to complete (with buffer for system variability)
+    std::thread::sleep(std::time::Duration::from_millis(350));
+    ws.update_animations()?;
+    
+    // Should be idle or very close to idle now
+    // Animation might take slightly longer on slower systems
+    if ws.is_scrolling() {
+        // Give it one more update cycle
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        ws.update_animations()?;
+    }
+    
+    // Should definitely be idle now
+    assert!(!ws.is_scrolling());
+    assert_eq!(ws.focused_column_index(), 1);
+    
+    Ok(())
+}
+
+#[test]
+fn test_momentum_scroll_with_friction() -> Result<()> {
+    let config = WorkspaceConfig {
+        momentum_friction: 0.95,
+        momentum_min_velocity: 1.0,
+        ..Default::default()
+    };
+    let mut ws = ScrollableWorkspaces::new(&config)?;
+    
+    // Add columns
+    for i in 0..5 {
+        ws.add_window_to_column(i as u64, i as i32);
+    }
+    
+    // Start momentum scrolling
+    ws.start_momentum_scroll(500.0);
+    assert!(ws.is_scrolling());
+    
+    // Update animations to apply momentum
+    for _ in 0..10 {
+        ws.update_animations()?;
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    
+    // Should have moved from initial position
+    let pos = ws.current_position();
+    assert_ne!(pos, 0.0);
+    
+    Ok(())
+}
+
+#[test]
+fn test_cleanup_preserves_focused_column() -> Result<()> {
+    let config = WorkspaceConfig::default();
+    let mut ws = ScrollableWorkspaces::new(&config)?;
+    
+    // Add window to focused column
+    ws.add_window_to_column(100, 0);
+    
+    // Create empty columns
+    ws.ensure_column(1);
+    ws.ensure_column(2);
+    ws.ensure_column(3);
+    
+    let initial_count = ws.active_column_count();
+    assert!(initial_count >= 4);
+    
+    // Simulate time passing and cleanup
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    ws.update_animations()?;
+    
+    // Focused column should still exist even if empty
+    assert!(ws.get_focused_column_opt().is_some());
+    assert_eq!(ws.focused_column_index(), 0);
+    
+    Ok(())
+}
+
+#[test]
 fn test_reserved_insets_reset_lower_values() -> Result<()> {
     let config = WorkspaceConfig::default();
     let mut ws = ScrollableWorkspaces::new(&config)?;

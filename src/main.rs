@@ -46,7 +46,7 @@ mod xwayland;
 mod dmabuf_vulkan;
 
 #[cfg(all(feature = "smithay", feature = "wgpu-present"))]
-fn start_output_control_server(tx: std::sync::mpsc::Sender<crate::smithay::server::OutputOp>) {
+fn start_output_control_server(tx: std::sync::mpsc::Sender<axiom::smithay::server::OutputOp>) {
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixListener;
     use std::thread;
@@ -91,7 +91,7 @@ fn start_output_control_server(tx: std::sync::mpsc::Sender<crate::smithay::serve
                                                 if let Some(vec) = parse_outputs_spec(spec) {
                                                     for init in vec {
                                                         let _ = tx.send(
-                                                            crate::smithay::server::OutputOp::Add(
+                                                            axiom::smithay::server::OutputOp::Add(
                                                                 init,
                                                             ),
                                                         );
@@ -103,7 +103,7 @@ fn start_output_control_server(tx: std::sync::mpsc::Sender<crate::smithay::serve
                                             if let Some(idx_s) = parts.next() {
                                                 if let Ok(idx) = idx_s.parse::<usize>() {
                                                     let _ = tx.send(
-                                                        crate::smithay::server::OutputOp::Remove {
+                                                        axiom::smithay::server::OutputOp::Remove {
                                                             index: idx,
                                                         },
                                                     );
@@ -125,7 +125,7 @@ fn start_output_control_server(tx: std::sync::mpsc::Sender<crate::smithay::serve
 }
 
 #[cfg(all(feature = "smithay", feature = "wgpu-present"))]
-fn parse_outputs_spec(spec: &str) -> Option<Vec<crate::smithay::server::OutputInit>> {
+fn parse_outputs_spec(spec: &str) -> Option<Vec<axiom::smithay::server::OutputInit>> {
     // Format: "WIDTHxHEIGHT@SCALE+X,Y;WIDTHxHEIGHT@SCALE+X,Y;..."
     let mut out = Vec::new();
     for chunk in spec.split(';') {
@@ -156,7 +156,7 @@ fn parse_outputs_spec(spec: &str) -> Option<Vec<crate::smithay::server::OutputIn
         let (x_str, y_str) = xy_str.split_once(',').unwrap_or(("0", "0"));
         let pos_x: i32 = x_str.parse().unwrap_or(0);
         let pos_y: i32 = y_str.parse().unwrap_or(0);
-        out.push(crate::smithay::server::OutputInit {
+        out.push(axiom::smithay::server::OutputInit {
             width,
             height,
             scale,
@@ -174,13 +174,12 @@ fn parse_outputs_spec(spec: &str) -> Option<Vec<crate::smithay::server::OutputIn
     }
 }
 
-// Unified Smithay backend
-#[cfg(feature = "smithay")]
-pub mod smithay;
+// Unified Smithay backend is provided by the library
+// Use axiom::smithay instead of declaring it again here
 
 #[cfg(not(all(feature = "smithay", feature = "wgpu-present")))]
-use compositor::AxiomCompositor;
-use config::AxiomConfig;
+use axiom::compositor::AxiomCompositor;
+use axiom::config::AxiomConfig;
 
 #[derive(Parser)]
 #[command(name = "axiom")]
@@ -279,11 +278,11 @@ async fn main() -> Result<()> {
     // === On-screen or headless presenter path (Smithay available) ===
     #[cfg(all(feature = "smithay", feature = "wgpu-present"))]
     {
-        use crate::clipboard::ClipboardManager;
-        use crate::input::InputManager;
-        use crate::smithay::server::{CompositorServer, PresentEvent};
-        use crate::window::WindowManager;
-        use crate::workspace::ScrollableWorkspaces;
+        use axiom::clipboard::ClipboardManager;
+        use axiom::input::InputManager;
+        use axiom::smithay::server::{CompositorServer, PresentEvent};
+        use axiom::window::WindowManager;
+        use axiom::workspace::ScrollableWorkspaces;
 
         // Select backends based on CLI
         let selected_backends = match cli.backend.as_str() {
@@ -303,9 +302,13 @@ async fn main() -> Result<()> {
                 &config.bindings,
             )?));
             let clip = Arc::new(RwLock::new(ClipboardManager::new()));
+            // Initialize security manager
+            let mut sec = axiom::security::SecurityManager::default();
+            sec.init().expect("Failed to initialize security manager");
+            let security = Arc::new(parking_lot::Mutex::new(sec));
             // Prefer Smithay libinput backend
-            let input_rx = crate::smithay::input_backend::init_libinput_backend()
-                .or_else(crate::smithay::server::CompositorServer::spawn_evdev_input_channel);
+            let input_rx = axiom::smithay::input_backend::init_libinput_backend()
+                .or_else(axiom::smithay::server::CompositorServer::spawn_evdev_input_channel);
             // Parse outputs if provided
             let outputs_init = cli.outputs.as_ref().and_then(|s| parse_outputs_spec(s));
             // Set decoration policy env for server
@@ -315,7 +318,7 @@ async fn main() -> Result<()> {
                 std::env::remove_var("AXIOM_FORCE_CSD");
             }
             let (outputs_tx, outputs_rx) =
-                std::sync::mpsc::channel::<crate::smithay::server::OutputOp>();
+                std::sync::mpsc::channel::<axiom::smithay::server::OutputOp>();
             // Start control socket server on main thread
             start_output_control_server(outputs_tx);
             if cli.split_frame_callbacks {
@@ -325,7 +328,7 @@ async fn main() -> Result<()> {
                 std::env::set_var("AXIOM_DEBUG_OUTPUTS", "1");
             }
             // Create decoration manager
-            let deco = Arc::new(RwLock::new(crate::decoration::DecorationManager::new(
+            let deco = Arc::new(RwLock::new(axiom::decoration::DecorationManager::new(
                 &config.window,
             )));
             let server = CompositorServer::new(
@@ -334,6 +337,7 @@ async fn main() -> Result<()> {
                 im,
                 clip,
                 deco,
+                security,
                 None,
                 None,
                 None,
@@ -353,14 +357,14 @@ async fn main() -> Result<()> {
         let outputs_init_main = outputs_init.clone();
         // Create runtime dynamic outputs channel now so we can run control server on main thread
         let (outputs_tx, outputs_rx) =
-            std::sync::mpsc::channel::<crate::smithay::server::OutputOp>();
+            std::sync::mpsc::channel::<axiom::smithay::server::OutputOp>();
         start_output_control_server(outputs_tx.clone());
         let (present_tx, present_rx) = std::sync::mpsc::channel::<PresentEvent>();
-        let (size_tx, size_rx) = std::sync::mpsc::channel::<crate::smithay::server::SizeUpdate>();
+        let (size_tx, size_rx) = std::sync::mpsc::channel::<axiom::smithay::server::SizeUpdate>();
         let (redraw_tx, redraw_rx) = std::sync::mpsc::channel::<()>();
         // Start IPC server in a background Tokio runtime and keep it alive
-        let ipc_server = std::sync::Arc::new(std::sync::Mutex::new(crate::ipc::AxiomIPCServer::new()));
-        crate::ipc::AxiomIPCServer::set_config_snapshot(config.clone());
+        let ipc_server = std::sync::Arc::new(std::sync::Mutex::new(axiom::ipc::AxiomIPCServer::new()));
+        axiom::ipc::AxiomIPCServer::set_config_snapshot(config.clone());
         let ipc_server_for_thread = ipc_server.clone();
         std::thread::spawn(move || {
             match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
@@ -391,8 +395,12 @@ async fn main() -> Result<()> {
                 Err(e) => { error!("Failed to initialize InputManager: {}", e); return; }
             };
             let clip = Arc::new(RwLock::new(ClipboardManager::new()));
-            let input_rx = crate::smithay::input_backend::init_libinput_backend()
-                .or_else(crate::smithay::server::CompositorServer::spawn_evdev_input_channel);
+            // Initialize security manager
+            let mut sec = axiom::security::SecurityManager::default();
+            sec.init().expect("Failed to initialize security manager");
+            let security = Arc::new(parking_lot::Mutex::new(sec));
+            let input_rx = axiom::smithay::input_backend::init_libinput_backend()
+                .or_else(axiom::smithay::server::CompositorServer::spawn_evdev_input_channel);
             if cfg_clone.window.force_client_side_decorations {
                 std::env::set_var("AXIOM_FORCE_CSD", "1");
             } else {
@@ -404,7 +412,7 @@ async fn main() -> Result<()> {
             if cli.debug_outputs {
                 std::env::set_var("AXIOM_DEBUG_OUTPUTS", "1");
             }
-            let deco = Arc::new(RwLock::new(crate::decoration::DecorationManager::new(
+            let deco = Arc::new(RwLock::new(axiom::decoration::DecorationManager::new(
                 &cfg_clone.window,
             )));
             let server = CompositorServer::new(
@@ -413,6 +421,7 @@ async fn main() -> Result<()> {
                 im,
                 clip,
                 deco,
+                security,
                 Some(present_rx),
                 Some(size_rx),
                 Some(redraw_tx),
@@ -451,7 +460,7 @@ async fn main() -> Result<()> {
             std::env::set_var("AXIOM_PRESENT_MODE", pm);
         }
         // Create renderer with the same instance as the surface
-        let mut renderer = pollster::block_on(crate::renderer::AxiomRenderer::new_with_instance(
+        let mut renderer = pollster::block_on(axiom::renderer::AxiomRenderer::new_with_instance(
             &instance,
             Some(&surface),
             window_size.width,
@@ -468,7 +477,7 @@ async fn main() -> Result<()> {
                         match renderer.resize(Some(&surface), new_size.width, new_size.height) {
                             Ok(()) => {
                                 window_size = new_size;
-                                let _ = size_tx.send(crate::smithay::server::SizeUpdate { width: new_size.width, height: new_size.height, scale: 1, name: None, model: None });
+                                let _ = size_tx.send(axiom::smithay::server::SizeUpdate { width: new_size.width, height: new_size.height, scale: 1, name: None, model: None });
                             }
                             Err(e) => {
                                 error!("Failed to resize renderer: {}", e);

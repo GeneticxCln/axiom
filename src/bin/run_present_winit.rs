@@ -355,6 +355,10 @@ fn main() -> Result<()> {
         ));
         let clip = Arc::new(RwLock::new(ClipboardManager::new()));
         let deco = Arc::new(RwLock::new(DecorationManager::new(&cfg_clone.window)));
+        // Initialize security manager
+        let mut sec = axiom::security::SecurityManager::default();
+        sec.init().expect("Failed to initialize security manager");
+        let security = Arc::new(parking_lot::Mutex::new(sec));
 
         // Prefer libinput; fallback to evdev channel if available
         let input_rx = axiom::smithay::input_backend::init_libinput_backend()
@@ -366,6 +370,7 @@ fn main() -> Result<()> {
             im,
             clip,
             deco,
+            security,
             Some(present_rx),
             Some(size_rx),
             Some(redraw_tx),

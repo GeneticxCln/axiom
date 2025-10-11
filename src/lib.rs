@@ -81,14 +81,15 @@ pub use crate::config::AxiomConfig;
 pub use crate::decoration::{DecorationManager, DecorationMode};
 pub use crate::effects::EffectsEngine;
 pub use crate::input::InputManager;
+pub use crate::security::SecurityManager;
 pub use crate::window::{Rectangle, WindowManager};
 pub use crate::workspace::ScrollableWorkspaces;
 
-// Real backend modules (non-smithay)
-pub mod backend_real;
+// Note: Experimental backends have been removed from source.
+// See docs/reference/ for archived reference implementations.
+// Production backend: smithay/server.rs
 
-// Unified Smithay backend
-#[cfg(feature = "smithay")]
+// Unified Smithay backend (always available - it's the production backend)
 pub mod smithay;
 
 #[cfg(feature = "dmabuf-vulkan")]

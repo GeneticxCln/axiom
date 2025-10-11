@@ -9,10 +9,10 @@ license = "GPL-3.0"
 keywords = ["wayland", "compositor", "window-manager", "tiling", "effects"]
 categories = ["gui"]
 autobins = false
-default-run = "axiom"
+default-run = "axiom-compositor"
 
 [[bin]]
-name = "axiom"
+name = "axiom-compositor"
 path = "src/main.rs"
 
 [[bin]]
@@ -24,10 +24,6 @@ required-features = ["smithay-minimal"]
 name = "run_present_winit"
 path = "src/bin/run_present_winit.rs"
 required-features = ["smithay", "wgpu-present"]
-
-[[bin]]
-name = "run_real_backend"
-path = "src/bin/run_real_backend.rs"
 
 [[bin]]
 name = "test_basic"
@@ -128,15 +124,16 @@ path = "src/lib.rs"
 
 # Features
 [features]
-# Provide structured control over smithay feature set
-default = ["smithay-minimal", "smithay", "wgpu-present"]
-# Demos (no-op gate for example/test bins)
-demo = []
-# Base smithay dependency and minimal protocol frontend only
+# Production defaults: Smithay backend with on-screen presentation
+default = ["smithay", "smithay-minimal", "wgpu-present"]
+
+# Base smithay dependency with minimal protocol frontend
 smithay = ["dep:smithay", "smithay/wayland_frontend"]
-# Minimal Wayland server feature (no-op shim to align with README/CI)
+
+# Smithay-minimal is an alias for smithay (maintained for compatibility)
 smithay-minimal = ["smithay"]
-# Full backend (drm, udev, libinput, xwayland, renderer_gl, winit)
+
+# Full smithay backend capabilities (DRM, udev, libinput, xwayland, GL rendering)
 smithay-full = [
     "smithay",
     "smithay/backend_winit",
@@ -147,18 +144,21 @@ smithay-full = [
     "smithay/renderer_gl",
     "smithay/xwayland"
 ]
-# Enable on-screen presentation via wgpu + winit path
+
+# Enable on-screen presentation via wgpu + winit
 wgpu-present = ["pollster"]
+
 # Enable NVIDIA NVML GPU metrics support (requires libnvidia-ml)
 # Usage: cargo build --features gpu-nvml
 gpu-nvml = ["nvml-wrapper"]
-# Vulkan-based dmabuf import path (off by default)
+
+# Vulkan-based dmabuf import for zero-copy GPU buffer sharing
 # Usage: cargo build --features dmabuf-vulkan
 dmabuf-vulkan = ["dep:ash", "dep:libloading"]
-# Example builds (no-op)
+
+# Demo and example features (no-op gates for test/example binaries)
+demo = []
 examples = []
-# Experimental: Real XDG backend wiring (register core globals and dispatch loop)
-real-compositor = ["smithay"]
 
 # Development dependencies for testing
 [dev-dependencies]

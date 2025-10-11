@@ -172,6 +172,9 @@ pub struct ScrollableWorkspaces {
 
     /// Animation easing parameters
     last_update: Instant,
+    
+    /// Last time cleanup was performed
+    last_cleanup: Instant,
 }
 
 impl ScrollableWorkspaces {
@@ -216,6 +219,7 @@ impl ScrollableWorkspaces {
             viewport_width: 1920.0,  // Default, will be updated
             viewport_height: 1080.0, // Default, will be updated
             last_update: Instant::now(),
+            last_cleanup: Instant::now(),
             reserved_top: 0.0,
             reserved_right: 0.0,
             reserved_bottom: 0.0,
@@ -729,6 +733,10 @@ impl ScrollableWorkspaces {
     pub fn update_animations(&mut self) -> Result<()> {
         let now = Instant::now();
         let _delta_time = now.duration_since(self.last_update).as_secs_f64();
+        
+        // Check if cleanup should run before updating last_update
+        let should_cleanup = now.duration_since(self.last_cleanup) > Duration::from_secs(1);
+        
         self.last_update = now;
 
         match self.scroll_state {
@@ -804,8 +812,9 @@ impl ScrollableWorkspaces {
         }
 
         // Cleanup empty columns that haven't been accessed in a while
-        if now.duration_since(self.last_update) > Duration::from_secs(1) {
+        if should_cleanup {
             self.cleanup_empty_columns();
+            self.last_cleanup = now;
         }
 
         Ok(())
