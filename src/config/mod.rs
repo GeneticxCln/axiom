@@ -533,6 +533,7 @@ impl WorkspaceConfig {
 
 impl AxiomConfig {
     /// Load configuration from a TOML file
+    #[allow(dead_code)]
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
 

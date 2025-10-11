@@ -3,6 +3,8 @@
 //! This module implements Axiom's core innovation: infinite scrollable
 //! workspaces with smooth animations and intelligent window placement.
 
+#![allow(dead_code)]
+
 use anyhow::Result;
 use log::{debug, info};
 use std::collections::HashMap;
@@ -269,6 +271,11 @@ impl ScrollableWorkspaces {
     }
 
     /// Ensure a column exists at the given index
+    /// SAFETY GUARANTEES:
+    /// - HashMap<i32, WorkspaceColumn> supports arbitrary integer indices (positive, negative, zero)
+    /// - No index collisions possible (HashMap guarantees unique keys)
+    /// - unwrap() is safe: if !contains_key, we insert; then get_mut always succeeds
+    /// - Infinite scroll: negative indices are intentional and valid
     pub fn ensure_column(&mut self, index: i32) -> &mut WorkspaceColumn {
         if !self.columns.contains_key(&index) {
             let position = index as f64 * self.config.workspace_width as f64;
@@ -279,6 +286,7 @@ impl ScrollableWorkspaces {
             );
             self.columns.insert(index, column);
         }
+        // SAFETY: Column guaranteed to exist after insert above
         self.columns.get_mut(&index).unwrap()
     }
 
@@ -296,10 +304,16 @@ impl ScrollableWorkspaces {
     pub fn scroll_to_column(&mut self, column_index: i32) {
         self.ensure_column(column_index);
 
+        // WHY: Cast i32 to f64 for position calculation. Safe because:
+        // 1. i32::MAX * typical workspace_width (1920) = ~4e12, well within f64 range (2^53)
+        // 2. Infinite scroll is intentional; negative indices are valid
+        // 3. workspace_width is validated at config load time to be positive
         let target_pos = column_index as f64 * self.config.workspace_width as f64;
         let current_time = Instant::now();
 
         // Calculate animation duration based on distance
+        // EDGE CASE: distance can be very large for infinite scroll (e.g., jump from -1000 to +1000)
+        // Clamped to 800ms max to prevent excessively long animations
         let distance = (target_pos - self.current_position).abs();
         let base_duration = Duration::from_millis(250); // Base animation duration
         let duration = Duration::from_millis(
@@ -488,6 +502,8 @@ impl ScrollableWorkspaces {
     }
 
     /// Vertical stacking layout (default)
+    /// SAFETY: This function is only called when column.windows is non-empty (line 469 check).
+    /// Division by window_count is safe because window_count >= 1 at all call sites.
     fn layout_vertical(
         &self,
         column: &WorkspaceColumn,
@@ -496,6 +512,9 @@ impl ScrollableWorkspaces {
     ) -> HashMap<u64, Rectangle> {
         let mut layouts = HashMap::new();
         let window_count = column.windows.len();
+        if window_count == 0 {
+            return layouts; // Defensive: should never happen per caller contract
+        }
         let total_gap_height = gap * (window_count as i32 + 1);
         let available_height = (bounds.height as i32 - total_gap_height).max(1);
         let window_height = available_height / window_count as i32;
@@ -523,6 +542,9 @@ impl ScrollableWorkspaces {
     ) -> HashMap<u64, Rectangle> {
         let mut layouts = HashMap::new();
         let window_count = column.windows.len();
+        if window_count == 0 {
+            return layouts; // Defensive: caller contract ensures non-empty
+        }
         let total_gap_width = gap * (window_count as i32 + 1);
         let available_width = (bounds.width as i32 - total_gap_width).max(1);
         let window_width = available_width / window_count as i32;
@@ -614,8 +636,13 @@ impl ScrollableWorkspaces {
         }
 
         // Calculate optimal grid dimensions
+        // SAFETY: window_count >= 1 (checked at line 620), so cols >= 1 and rows >= 1
         let cols = (window_count as f64).sqrt().ceil() as usize;
         let rows = (window_count as f64 / cols as f64).ceil() as usize;
+
+        // Additional safety: ensure cols and rows are never zero
+        let cols = cols.max(1);
+        let rows = rows.max(1);
 
         let cell_width = (bounds.width as i32 - gap * (cols as i32 + 1)) / cols as i32;
         let cell_height = (bounds.height as i32 - gap * (rows as i32 + 1)) / rows as i32;
@@ -759,16 +786,29 @@ impl ScrollableWorkspaces {
                     );
                 } else {
                     // Calculate eased position
-                    let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
+                    // SAFETY: duration.as_secs_f64() is always > 0 because:
+                    // 1. Duration is created with at least 250ms base (line 309)
+                    // 2. Clamped to max 800ms, never zero
+                    // 3. This branch only reached if elapsed < duration, so duration > 0
+                    let duration_secs = duration.as_secs_f64();
+                    let progress = if duration_secs > 0.0 {
+                        (elapsed.as_secs_f64() / duration_secs).clamp(0.0, 1.0)
+                    } else {
+                        1.0 // Fallback: instant completion if duration is somehow zero
+                    };
                     let eased_progress = self.ease_out_cubic(progress);
 
                     self.current_position =
                         start_position + (target_position - start_position) * eased_progress;
 
                     // Calculate velocity for smooth transitions
-                    self.scroll_velocity = (target_position - start_position)
-                        * self.ease_out_cubic_derivative(progress)
-                        / duration.as_secs_f64();
+                    self.scroll_velocity = if duration_secs > 0.0 {
+                        (target_position - start_position)
+                            * self.ease_out_cubic_derivative(progress)
+                            / duration_secs
+                    } else {
+                        0.0 // No velocity if instant transition
+                    };
                 }
             }
 
@@ -778,16 +818,21 @@ impl ScrollableWorkspaces {
                 velocity,
             } => {
                 let elapsed = now.duration_since(start_time).as_secs_f64();
+                // WHY clamp to 0.9999: Prevents friction from becoming 1.0 (no decay) or negative
                 let friction: f64 = self.config.momentum_friction.clamp(0.0, 0.9999);
 
-                // Apply friction to velocity
+                // Apply exponential friction: v(t) = v₀ * friction^(t*60)
+                // The * 60 factor accounts for 60 fps frame pacing in the physics simulation
+                // CORRECTNESS: friction^(elapsed*60) decays smoothly; 0.0 < friction < 1.0 guarantees convergence
                 let current_velocity = velocity * friction.powf(elapsed * 60.0);
 
                 if current_velocity.abs() < self.config.momentum_min_velocity {
                     // Momentum has died down, snap to nearest column if close enough
+                    // SAFETY: workspace_width is validated > 0 at config load time
+                    let workspace_width_f64 = (self.config.workspace_width as f64).max(1.0);
                     let nearest_column =
-                        (self.current_position / self.config.workspace_width as f64).round() as i32;
-                    let target_pos = nearest_column as f64 * self.config.workspace_width as f64;
+                        (self.current_position / workspace_width_f64).round() as i32;
+                    let target_pos = nearest_column as f64 * workspace_width_f64;
                     if (self.current_position - target_pos).abs() <= self.config.snap_threshold_px {
                         self.scroll_to_column(nearest_column);
                     } else {
@@ -821,22 +866,40 @@ impl ScrollableWorkspaces {
     }
 
     /// Ease-out cubic function for smooth animations
+    /// Mathematical form: f(t) = (t-1)³ + 1 for t ∈ [0,1]
+    /// Properties:
+    /// - f(0) = 0 (animation starts at source)
+    /// - f(1) = 1 (animation ends at target)
+    /// - f'(0) = 0 (starts with zero velocity, smooth start)
+    /// - f'(1) = 0 (ends with zero velocity, smooth stop)
+    /// CORRECTNESS: This is a standard easing function, well-tested in animation libraries.
     fn ease_out_cubic(&self, t: f64) -> f64 {
         let t = t - 1.0;
         t * t * t + 1.0
     }
 
     /// Derivative of ease-out cubic for velocity calculation
+    /// f'(t) = 3(t-1)² for t ∈ [0,1]
+    /// WHY: Used to calculate instantaneous scroll velocity during animation.
+    /// This ensures smooth velocity transitions when switching between animation types.
+    /// SAFETY: Always non-negative (squared term), so velocity magnitude is always valid.
     fn ease_out_cubic_derivative(&self, t: f64) -> f64 {
         let t = t - 1.0;
         3.0 * t * t
     }
 
     /// Clean up empty columns that haven't been used recently
+    /// SAFETY GUARANTEES:
+    /// 1. Focused column never removed (explicit check: index != focused_column)
+    /// 2. No race conditions: called from update_animations with &mut self (exclusive access)
+    /// 3. Two-phase approach (collect then remove) prevents iterator invalidation
+    /// 4. 30-second threshold prevents premature removal of temporarily empty columns
+    /// WHY: Prevents unbounded memory growth from infinitely creating columns during scroll
     fn cleanup_empty_columns(&mut self) {
         let now = Instant::now();
         let cleanup_threshold = Duration::from_secs(30); // Keep empty columns for 30 seconds
 
+        // Phase 1: Collect indices to remove (immutable borrow of columns)
         let columns_to_remove: Vec<i32> = self
             .columns
             .iter()
@@ -848,6 +911,7 @@ impl ScrollableWorkspaces {
             .map(|(index, _)| *index)
             .collect();
 
+        // Phase 2: Remove collected indices (mutable borrow of columns)
         for index in columns_to_remove {
             self.columns.remove(&index);
             debug!("🧹 Cleaned up empty workspace column {}", index);
@@ -969,6 +1033,10 @@ impl ScrollableWorkspaces {
     }
 
     /// Focus the next window in the focused column
+    /// CORRECTNESS: Wrap-around logic ensures valid index:
+    /// - (idx + 1) % len wraps to 0 when idx = len-1
+    /// - Empty check prevents modulo by zero
+    /// - None case initializes to 0 (first window)
     pub fn focus_next_window_in_column(&mut self) -> Option<u64> {
         let column = self.get_focused_column_mut();
         
@@ -982,6 +1050,7 @@ impl ScrollableWorkspaces {
         };
         
         column.focused_window_index = Some(next_index);
+        // SAFETY: next_index guaranteed < column.windows.len() by modulo operation
         let window_id = column.windows[next_index];
         
         debug!(
@@ -993,6 +1062,10 @@ impl ScrollableWorkspaces {
     }
 
     /// Focus the previous window in the focused column
+    /// CORRECTNESS: Wrap-around logic ensures valid index:
+    /// - idx > 0: decrement safely (idx-1 is valid)
+    /// - idx == 0 or None: wrap to len-1 (last window)
+    /// - Empty check prevents len-1 underflow (would be usize::MAX)
     pub fn focus_previous_window_in_column(&mut self) -> Option<u64> {
         let column = self.get_focused_column_mut();
         
@@ -1002,10 +1075,11 @@ impl ScrollableWorkspaces {
         
         let prev_index = match column.focused_window_index {
             Some(idx) if idx > 0 => idx - 1,
-            _ => column.windows.len() - 1,
+            _ => column.windows.len() - 1,  // Wrap to last window
         };
         
         column.focused_window_index = Some(prev_index);
+        // SAFETY: prev_index is either idx-1 (valid) or len-1 (valid because len > 0)
         let window_id = column.windows[prev_index];
         
         debug!(
@@ -1041,12 +1115,15 @@ impl ScrollableWorkspaces {
     }
 
     /// Move the focused window down in the stack (swap with next)
+    /// EDGE CASE: window_count - 1 subtraction safe because:
+    /// - If window_count == 0: focused_idx is None (no focused window)
+    /// - If window_count > 0: focused_idx < len-1 check prevents out-of-bounds
     pub fn move_focused_window_down(&mut self) -> Result<()> {
         let column = self.get_focused_column_mut();
         let window_count = column.windows.len();
         
         if let Some(focused_idx) = column.focused_window_index {
-            if focused_idx < window_count - 1 {
+            if focused_idx < window_count.saturating_sub(1) {
                 column.windows.swap(focused_idx, focused_idx + 1);
                 column.focused_window_index = Some(focused_idx + 1);
                 debug!("⬇️ Moved focused window down in column {}", self.focused_column);

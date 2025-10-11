@@ -160,6 +160,9 @@ dmabuf-vulkan = ["dep:ash", "dep:libloading"]
 demo = []
 examples = []
 
+# Debug effects logging (disabled in release for performance)
+debug-effects = []
+
 # Development dependencies for testing
 [dev-dependencies]
 criterion = "0.5"

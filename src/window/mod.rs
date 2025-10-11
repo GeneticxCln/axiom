@@ -10,6 +10,8 @@
 //! The window management system is designed to handle both Wayland and X11 windows
 //! through a unified interface, with proper integration into the Axiom compositor.
 
+#![allow(dead_code)]
+
 use crate::config::WindowConfig;
 use anyhow::{anyhow, Result};
 use log::debug;

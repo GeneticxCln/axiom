@@ -342,21 +342,18 @@ impl AxiomCompositor {
             }
             CompositorAction::MoveWindowLeft => {
                 debug!("🎨 Input triggered: Move window left");
-                if let Some((_window_id, _, _, _)) = self.get_workspace_info().into() {
-                    // Get first window in current workspace for demo
-                    let windows = self.workspace_manager.get_focused_column_windows();
-                    if let Some(&window_id) = windows.first() {
-                        self.move_window_left(window_id);
-                    }
+                // Get first window in current workspace for demo
+                let windows = self.workspace_manager.get_focused_column_windows();
+                if let Some(&window_id) = windows.first() {
+                    self.move_window_left(window_id);
                 }
             }
             CompositorAction::MoveWindowRight => {
                 debug!("🎨 Input triggered: Move window right");
-                if let Some((_window_id, _, _, _)) = self.get_workspace_info().into() {
-                    let windows = self.workspace_manager.get_focused_column_windows();
-                    if let Some(&window_id) = windows.first() {
-                        self.move_window_right(window_id);
-                    }
+                // Get first window in current workspace for demo
+                let windows = self.workspace_manager.get_focused_column_windows();
+                if let Some(&window_id) = windows.first() {
+                    self.move_window_right(window_id);
                 }
             }
             CompositorAction::CloseWindow => {

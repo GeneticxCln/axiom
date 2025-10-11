@@ -8,7 +8,7 @@
 use crate::config::EffectsConfig;
 use crate::effects::animations::AnimationStats;
 use anyhow::Result;
-use log::{debug, info};
+use tracing::{debug, info, error};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -304,11 +304,13 @@ impl EffectsEngine {
         // Cleanup finished animations
         self.cleanup_finished_animations();
 
+        // Feature-gated debug logging to avoid allocations in release builds
+        #[cfg(feature = "debug-effects")]
         debug!(
-            "🎨 Effects update: {} windows, quality: {:.1}, frame_time: {:.1}ms",
-            self.window_effects.len(),
-            self.effects_quality,
-            delta_time.as_secs_f64() * 1000.0
+            window_count = self.window_effects.len(),
+            quality = %format!("{:.1}", self.effects_quality),
+            frame_time_ms = %format!("{:.1}", delta_time.as_secs_f64() * 1000.0),
+            "Effects update"
         );
 
         Ok(())
@@ -335,7 +337,7 @@ impl EffectsEngine {
 
         effect_state.active_animations.push(animation);
 
-        info!("🎬 Started window open animation for window {}", window_id);
+        info!(window_id, "Started window open animation");
     }
 
     /// Start a window closing animation
@@ -355,7 +357,7 @@ impl EffectsEngine {
 
         effect_state.active_animations.push(animation);
 
-        info!("🎬 Started window close animation for window {}", window_id);
+        info!(window_id, "Started window close animation");
     }
 
     /// Start a window movement animation
@@ -375,21 +377,28 @@ impl EffectsEngine {
 
         effect_state.active_animations.push(animation);
 
+        #[cfg(feature = "debug-effects")]
         debug!(
-            "🎬 Started window move animation for window {} from {:?} to {:?}",
-            window_id, from, to
+            window_id,
+            from_x = from.0,
+            from_y = from.1,
+            to_x = to.0,
+            to_y = to.1,
+            "Started window move animation"
         );
     }
 
     /// Start a workspace transition animation
-    pub fn animate_workspace_transition(&mut self, from_offset: f32, to_offset: f32) {
+    pub fn animate_workspace_transition(&mut self, _from_offset: f32, _to_offset: f32) {
         if !self.animations_enabled {
             return;
         }
 
+        #[cfg(feature = "debug-effects")]
         info!(
-            "🌊 Started workspace transition animation from {:.1} to {:.1}",
-            from_offset, to_offset
+            from_offset = %format!("{:.1}", from_offset),
+            to_offset = %format!("{:.1}", to_offset),
+            "Started workspace transition animation"
         );
 
         // Workspace transitions are handled by the workspace manager,
@@ -397,16 +406,18 @@ impl EffectsEngine {
     }
 
     /// Apply blur effect to a window
-    pub fn apply_blur_effect(&self, window_id: u64, _surface_data: &mut [u8]) {
+    pub fn apply_blur_effect(&self, _window_id: u64, _surface_data: &mut [u8]) {
         if !self.blur_params.enabled || !self.config.enabled {
             return;
         }
 
         // In a real implementation, this would apply GPU-based blur
         // For now, we simulate the effect
+        #[cfg(feature = "debug-effects")]
         debug!(
-            "🌊 Applying blur effect to window {} (radius: {:.1})",
-            window_id, self.blur_params.radius
+            window_id,
+            radius = %format!("{:.1}", self.blur_params.radius),
+            "Applying blur effect"
         );
     }
 
@@ -418,7 +429,8 @@ impl EffectsEngine {
     /// Remove window from effects tracking
     pub fn remove_window(&mut self, window_id: u64) {
         if self.window_effects.remove(&window_id).is_some() {
-            debug!("🗑️ Removed window {} from effects tracking", window_id);
+            #[cfg(feature = "debug-effects")]
+            debug!(window_id, "Removed window from effects tracking");
         }
     }
 
@@ -515,13 +527,22 @@ impl EffectsEngine {
                     }
                 }
 
+                // WindowResize and WorkspaceTransition intentionally unimplemented
+                // WHY: These animation types are defined in the enum but not yet wired to visual updates
+                // FUTURE: Implement when GPU-accelerated resize and workspace transition effects are added
                 _ => {
-                    // Handle other animation types
+                    // No-op: animation type not yet implemented in effects engine
                 }
             }
         }
 
         // Remove finished animations (in reverse order to maintain indices)
+        // CORRECTNESS: Reverse iteration prevents index shifting bug.
+        // Example: Removing indices [1, 3, 5] from vec of length 6:
+        // - Forward order: remove(1) shifts indices → 3 becomes 2, 5 becomes 4;
+        //   then remove(3) removes the wrong element!
+        // - Reverse order: remove(5), then remove(3), then remove(1) →
+        //   each index remains valid because we remove from highest to lowest
         for i in animations_to_remove.into_iter().rev() {
             effect_state.active_animations.remove(i);
         }
@@ -551,7 +572,7 @@ impl EffectsEngine {
     /// Update animations for a specific window
     fn update_window_animations(
         &mut self,
-        window_id: &u64,
+        _window_id: &u64,
         effect_state: &mut WindowEffectState,
         now: Instant,
     ) -> Result<()> {
@@ -572,10 +593,8 @@ impl EffectsEngine {
                         effect_state.scale = *target_scale;
                         effect_state.opacity = *target_opacity;
                         animations_to_remove.push(i);
-                        debug!(
-                            "✅ Window open animation completed for window {}",
-                            window_id
-                        );
+                        #[cfg(feature = "debug-effects")]
+                        debug!(window_id, "Window open animation completed");
                     } else {
                         // Update animation
                         let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
@@ -600,10 +619,8 @@ impl EffectsEngine {
                         effect_state.scale = 0.0;
                         effect_state.opacity = 0.0;
                         animations_to_remove.push(i);
-                        debug!(
-                            "✅ Window close animation completed for window {}",
-                            window_id
-                        );
+                        #[cfg(feature = "debug-effects")]
+                        debug!(window_id, "Window close animation completed");
                     } else {
                         // Update animation
                         let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
@@ -628,10 +645,8 @@ impl EffectsEngine {
                         effect_state.position_offset =
                             (target_pos.0 - start_pos.0, target_pos.1 - start_pos.1);
                         animations_to_remove.push(i);
-                        debug!(
-                            "✅ Window move animation completed for window {}",
-                            window_id
-                        );
+                        #[cfg(feature = "debug-effects")]
+                        debug!(window_id, "Window move animation completed");
                     } else {
                         // Update animation
                         let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
@@ -646,13 +661,15 @@ impl EffectsEngine {
                     }
                 }
 
+                // WindowResize and WorkspaceTransition intentionally unimplemented
                 _ => {
-                    // Handle other animation types
+                    // No-op: animation type not yet implemented
                 }
             }
         }
 
         // Remove finished animations (in reverse order to maintain indices)
+        // CORRECTNESS: Reverse iteration prevents index shifting bug (see update_window_animations_static)
         for i in animations_to_remove.into_iter().rev() {
             effect_state.active_animations.remove(i);
         }
@@ -714,11 +731,13 @@ impl EffectsEngine {
         let target_frame_time = Duration::from_millis(16); // 60 FPS
 
         if self.frame_time > target_frame_time * 2 {
-            // Performance is poor, reduce quality
+            // Performance is poor (< 30 FPS), reduce quality
+            // Reduction rate: 0.1 per frame = aggressive but necessary for responsiveness
             self.effects_quality = (self.effects_quality - 0.1).max(0.3);
+            #[cfg(feature = "debug-effects")]
             debug!(
-                "⚡ Reduced effects quality to {:.1} due to performance",
-                self.effects_quality
+                quality = %format!("{:.1}", self.effects_quality),
+                "Reduced effects quality due to performance"
             );
         } else if self.frame_time < target_frame_time && self.effects_quality < 1.0 {
             // Performance is good, increase quality
@@ -741,12 +760,9 @@ impl EffectsEngine {
     }
 
     /// Enable or disable animations
-    pub fn set_animations_enabled(&mut self, enabled: bool) {
+pub fn set_animations_enabled(&mut self, enabled: bool) {
         self.animations_enabled = enabled;
-        info!(
-            "🎬 Animations {}",
-            if enabled { "enabled" } else { "disabled" }
-        );
+        info!(enabled, "Animations state changed");
     }
 
     /// Get performance statistics
@@ -759,26 +775,23 @@ impl EffectsEngine {
     }
 
     /// Adjust default animation duration (ms) for future animations
-    pub fn set_animation_duration(&mut self, duration_ms: u32) {
+pub fn set_animation_duration(&mut self, duration_ms: u32) {
         self.default_animation_duration = Duration::from_millis(duration_ms as u64);
         self.config.animations.duration = duration_ms;
-        info!("🎬 Default animation duration set to {} ms", duration_ms);
+        info!(duration_ms, "Default animation duration updated");
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
-        info!("🎨 Shutting down Visual Effects Engine...");
+        info!("Shutting down Visual Effects Engine");
         self.window_effects.clear();
-        info!("✅ Effects Engine shutdown complete");
+        info!("Effects Engine shutdown complete");
         Ok(())
     }
 
     /// Enable or disable all visual effects at runtime
-    pub fn set_effects_enabled(&mut self, enabled: bool) {
+pub fn set_effects_enabled(&mut self, enabled: bool) {
         self.config.enabled = enabled;
-        info!(
-            "🎛️ Effects {}",
-            if enabled { "enabled" } else { "disabled" }
-        );
+        info!(enabled, "Effects state changed");
     }
 
     /// Toggle effects on/off
@@ -801,7 +814,7 @@ impl EffectsEngine {
             };
             renderer.update_blur_params(new_params);
         }
-        info!("🌊 Blur radius set to {:.1}", radius);
+        info!(radius = %format!("{:.1}", radius), "Blur radius updated");
     }
 
     /// Adjust animation speed multiplier (via animation controller)
@@ -816,19 +829,29 @@ impl EffectsEngine {
     }
 
     /// Initialize GPU context for hardware-accelerated effects
+    /// ERROR HANDLING:
+    /// - Shader compilation failures are propagated via Result
+    /// - Blur renderer creation errors are propagated via Result
+    /// - On error, GPU context is stored but renderers remain None
+    /// - Caller should log error and continue with CPU fallback
     pub fn initialize_gpu(&mut self, device: Arc<Device>, queue: Arc<Queue>) -> Result<()> {
-        info!("🚀 Initializing GPU acceleration for effects...");
+        info!("Initializing GPU acceleration for effects");
 
-        // Store GPU context
+        // Store GPU context (even if renderer init fails, context is valid)
         self.gpu_device = Some(device.clone());
         self.gpu_queue = Some(queue.clone());
 
-        // Initialize shader manager with Arc<Device>
         // Initialize blur renderer
         if self.blur_params.enabled {
             // Create shader manager for effects
             let mut shader_manager = shaders::ShaderManager::new(device.clone());
-            shader_manager.compile_all_shaders()?;
+            
+            // CRITICAL: Shader compilation can fail (invalid SPIR-V, unsupported features, etc.)
+            // Propagate error to caller for proper handling
+            shader_manager.compile_all_shaders().map_err(|e| {
+                error!(error = %e, "Failed to compile effects shaders");
+                e
+            })?;
 
             // Convert our BlurParams to blur module's BlurParams
             let blur_params = blur::BlurParams {
@@ -841,22 +864,27 @@ impl EffectsEngine {
                 performance_scale: self.effects_quality,
             };
 
+            // CRITICAL: Blur renderer creation can fail (texture allocation, pipeline creation, etc.)
+            // Propagate error to caller
             self.blur_renderer = Some(blur::BlurRenderer::new(
                 device.clone(),
                 queue.clone(),
                 Arc::new(shader_manager),
                 blur_params,
-            )?);
-            debug!("🌊 GPU blur renderer initialized");
+            ).map_err(|e| {
+                error!(error = %e, "Failed to initialize blur renderer");
+                e
+            })?);
+            debug!("GPU blur renderer initialized");
         }
 
         // Initialize shadow renderer - temporarily disabled until shader manager is properly integrated
         // TODO: Re-enable once we have proper GPU context and shader management
         if self.default_shadow.enabled {
-            debug!("🌟 Shadow rendering configured (GPU initialization deferred)");
+            debug!("Shadow rendering configured (GPU initialization deferred)");
         }
 
-        info!("✅ GPU effects acceleration ready");
+        info!("GPU effects acceleration ready");
         Ok(())
     }
 

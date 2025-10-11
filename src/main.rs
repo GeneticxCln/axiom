@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use log::{error, info};
+use log::{error, info, warn};
 #[cfg(all(feature = "smithay", feature = "wgpu-present"))]
 use parking_lot::RwLock;
 #[cfg(all(feature = "smithay", feature = "wgpu-present"))]
@@ -63,6 +63,16 @@ fn start_output_control_server(tx: std::sync::mpsc::Sender<axiom::smithay::serve
             return;
         }
     };
+    
+    // Harden socket permissions to 0600 (owner read/write only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)) {
+            error!("failed to set permissions on control socket {}: {}", sock_path, e);
+        }
+    }
+    
     info!("axiom control socket listening at {}", sock_path);
 
     thread::spawn(move || {
@@ -127,6 +137,12 @@ fn start_output_control_server(tx: std::sync::mpsc::Sender<axiom::smithay::serve
 #[cfg(all(feature = "smithay", feature = "wgpu-present"))]
 fn parse_outputs_spec(spec: &str) -> Option<Vec<axiom::smithay::server::OutputInit>> {
     // Format: "WIDTHxHEIGHT@SCALE+X,Y;WIDTHxHEIGHT@SCALE+X,Y;..."
+    // Note: X,Y can be negative for multi-monitor topologies with outputs
+    // positioned to the left or above the origin (e.g., "-1920,0" for a monitor left of primary).
+    // OutputInit stores pos_x/pos_y as i32 to support this. Negative coordinates are preserved
+    // through the Smithay server and used for layout calculations.
+    // The presenter path clamps them to u32 (line 542) since GPU scissor rectangles require
+    // non-negative coordinates in framebuffer space.
     let mut out = Vec::new();
     for chunk in spec.split(';') {
         let s = chunk.trim();
@@ -217,11 +233,11 @@ struct Cli {
     headless: bool,
 
     /// Select GPU backend: auto, vulkan, gl
-    #[arg(long, default_value = "auto")]
+    #[arg(long, value_parser = ["auto", "vulkan", "gl"], default_value = "auto")]
     backend: String,
 
     /// Present mode override for on-screen rendering: auto, fifo, mailbox, immediate
-    #[arg(long, default_value = "auto")]
+    #[arg(long, value_parser = ["auto", "fifo", "mailbox", "immediate"], default_value = "auto")]
     present_mode: String,
 
     /// Disable visual effects (performance mode)
@@ -481,6 +497,7 @@ async fn main() -> Result<()> {
                             }
                             Err(e) => {
                                 error!("Failed to resize renderer: {}", e);
+                                // Surface errors (Lost, Outdated) require reconfiguration; skip frame and retry next cycle
                             }
                         }
                         elwt.set_control_flow(winit::event_loop::ControlFlow::Poll);
@@ -503,8 +520,38 @@ async fn main() -> Result<()> {
                     let has_content = renderer.window_count() > 0;
                     
                     if renderer.can_present() {
-                        if let Ok(frame) = surface.get_current_texture() {
+                        let frame_result = surface.get_current_texture();
+                        match frame_result {
+                            Err(wgpu::SurfaceError::Lost) => {
+                                // Surface lost (e.g., DPMS suspend); reconfigure and skip frame
+                                info!("Surface lost; reconfiguring");
+                                let _ = renderer.resize(Some(&surface), window_size.width, window_size.height);
+                            }
+                            Err(wgpu::SurfaceError::Outdated) => {
+                                // Surface outdated (e.g., resize race); reconfigure
+                                info!("Surface outdated; reconfiguring");
+                                let _ = renderer.resize(Some(&surface), window_size.width, window_size.height);
+                            }
+                            Err(wgpu::SurfaceError::Timeout) => {
+                                warn!("Surface timeout; skipping frame");
+                            }
+                            Err(wgpu::SurfaceError::OutOfMemory) => {
+                                error!("Surface out of memory; cannot recover");
+                                elwt.exit();
+                            }
+                            Ok(frame) => {
                             // Compute output rectangles from the CLI topology if provided
+                            // WHY: Negative coordinates from multi-monitor topology are clamped to 0
+                            // because wgpu scissor rectangles operate in framebuffer space (u32 only).
+                            // For example, an output at (-1920, 0, 1920, 1080) becomes (0, 0, 1920, 1080)
+                            // in the presenter window's coordinate space.
+                            // 
+                            // CORRECTNESS: This is safe because:
+                            // 1. The Smithay server maintains full i32 coordinate space for layout
+                            // 2. The presenter window shows a single viewport into that space
+                            // 3. Window positions in the shared render state are already transformed
+                            //    by Smithay to viewport-relative coordinates before reaching the renderer
+                            // 4. Clamping only affects the debug overlay scissor calculation (line 1442-1503)
                             let outputs_rects: Vec<(u32,u32,u32,u32)> = outputs_init_main
                                 .as_ref()
                                 .map(|outs| {
@@ -516,40 +563,41 @@ async fn main() -> Result<()> {
 
                             let debug_overlay = std::env::var("AXIOM_DEBUG_OUTPUTS").ok().map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
                             
-                            // Only render if we have windows, otherwise just clear and present once
-                            if has_content {
-                                if let Err(e) = renderer.render_to_surface_with_outputs(&surface, &frame, &outputs_rects, debug_overlay) {
-                                    error!("render error: {}", e);
-                                }
-                                frame.present();
+                                // Only render if we have windows, otherwise just clear and present once
+                                if has_content {
+                                    if let Err(e) = renderer.render_to_surface_with_outputs(&surface, &frame, &outputs_rects, debug_overlay) {
+                                        error!("render error: {}", e);
+                                    }
+                                    frame.present();
                                 
-                                // Send per-output presentation feedback timing (one event per logical output)
-                                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-                                let tv_sec = now.as_secs();
-                                let tv_nsec = now.subsec_nanos();
-                                let tv_sec_hi: u32 = (tv_sec >> 32) as u32;
-                                let tv_sec_lo: u32 = (tv_sec & 0xFFFF_FFFF) as u32;
-                                // Query monitor refresh if available
-                                let refresh_ns: u32 = 16_666_666; // Default to 60Hz
-                                // Flags: vsync + hw clock
-                                let flags: u32 = (wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync | wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock).bits();
-                                let outputs_count = outputs_init_main.as_ref().map(|v| v.len()).unwrap_or(1);
-                                for idx in 0..outputs_count {
-                                    let _ = present_tx.send(PresentEvent { tv_sec_hi, tv_sec_lo, tv_nsec, refresh_ns, flags, output_idx: Some(idx) });
-                                }
+                                    // Send per-output presentation feedback timing (one event per logical output)
+                                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                                    let tv_sec = now.as_secs();
+                                    let tv_nsec = now.subsec_nanos();
+                                    let tv_sec_hi: u32 = (tv_sec >> 32) as u32;
+                                    let tv_sec_lo: u32 = (tv_sec & 0xFFFF_FFFF) as u32;
+                                    // Query monitor refresh if available
+                                    let refresh_ns: u32 = 16_666_666; // Default to 60Hz
+                                    // Flags: vsync + hw clock
+                                    let flags: u32 = (wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync | wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock).bits();
+                                    let outputs_count = outputs_init_main.as_ref().map(|v| v.len()).unwrap_or(1);
+                                    for idx in 0..outputs_count {
+                                        let _ = present_tx.send(PresentEvent { tv_sec_hi, tv_sec_lo, tv_nsec, refresh_ns, flags, output_idx: Some(idx) });
+                                    }
 
-                                // Broadcast IPC performance metrics (rate-limited inside IPC)
-                                if let Ok(mut guard) = ipc_server.lock() {
-                                    let now_inst = std::time::Instant::now();
-                                    let frame_time_ms = (now_inst.duration_since(last_frame_time_inst).as_secs_f32() * 1000.0).max(0.0);
-                                    last_frame_time_inst = now_inst;
-                                    let active_windows = renderer.window_count() as u32;
-                                    let current_workspace = 0; // server thread owns workspace index
-                                    guard.maybe_broadcast_performance_metrics(frame_time_ms, active_windows, current_workspace);
+                                    // Broadcast IPC performance metrics (rate-limited inside IPC)
+                                    if let Ok(mut guard) = ipc_server.lock() {
+                                        let now_inst = std::time::Instant::now();
+                                        let frame_time_ms = (now_inst.duration_since(last_frame_time_inst).as_secs_f32() * 1000.0).max(0.0);
+                                        last_frame_time_inst = now_inst;
+                                        let active_windows = renderer.window_count() as u32;
+                                        let current_workspace = 0; // server thread owns workspace index
+                                        guard.maybe_broadcast_performance_metrics(frame_time_ms, active_windows, current_workspace);
+                                    }
+                                } else {
+                                    // No windows yet - just drop the frame without presenting to avoid wgpu errors
+                                    drop(frame);
                                 }
-                            } else {
-                                // No windows yet - just drop the frame without presenting to avoid wgpu errors
-                                drop(frame);
                             }
                         }
                     } else {

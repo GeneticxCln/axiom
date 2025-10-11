@@ -34,6 +34,8 @@
 //! }
 //! ```
 
+#![allow(dead_code)]
+
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
