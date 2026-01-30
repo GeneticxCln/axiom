@@ -1,4 +1,8 @@
 //! Phase 4: Visual Effects System Demo
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::no_effect_underscore_binding)]
 //!
 //! This demo showcases the complete visual effects system:
 //! - Advanced animations with different easing curves
@@ -145,7 +149,7 @@ async fn demo_effects_quality(compositor: &mut AxiomCompositor) -> Result<()> {
         // Note: This would integrate with the GPU-based effects when they're active
 
         // Create some visual effects to showcase quality differences
-        for (_i, &window_id) in window_ids.iter().enumerate() {
+        for &window_id in &window_ids {
             // Animate window with effects
             compositor
                 .effects_engine_mut()
@@ -204,9 +208,6 @@ async fn demo_performance_adaptation(compositor: &mut AxiomCompositor) -> Result
         // Start multiple animations simultaneously
         for (i, &window_id) in window_ids.iter().enumerate() {
             match animation_cycle % 4 {
-                0 => compositor
-                    .effects_engine_mut()
-                    .animate_window_open(window_id),
                 1 => {
                     let from = (i as f32 * 100.0, 100.0);
                     let to = (i as f32 * 100.0 + 50.0, 200.0);
@@ -217,7 +218,7 @@ async fn demo_performance_adaptation(compositor: &mut AxiomCompositor) -> Result
                 2 => compositor
                     .effects_engine_mut()
                     .animate_window_close(window_id),
-                3 => compositor
+                0 | 3 => compositor
                     .effects_engine_mut()
                     .animate_window_open(window_id),
                 _ => {}
@@ -422,7 +423,7 @@ pub fn display_effects_capabilities(compositor: &AxiomCompositor) {
         1000.0 / frame_time.as_millis() as f64
     );
     info!("  🎛️  Effects Quality: {:.1}%", effects_quality * 100.0);
-    info!("  ✨ Active Effects: {}", active_effects);
+    info!("  ✨ Active Effects: {active_effects}");
 
     info!("🎬 Available Animation Types:");
     info!("  • Window Open/Close with scale and opacity");

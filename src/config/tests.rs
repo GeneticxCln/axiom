@@ -275,7 +275,7 @@ fn test_xwayland_config() {
     config.enabled = true;
     assert!(config.enabled);
 
-// Test display field defaults
+    // Test display field defaults
     assert!(config.display.is_none());
 }
 

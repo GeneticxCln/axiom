@@ -258,9 +258,8 @@ impl InputManager {
 
             if delta_x > 0.0 {
                 return vec![CompositorAction::ScrollWorkspaceRight];
-            } else {
-                return vec![CompositorAction::ScrollWorkspaceLeft];
             }
+            return vec![CompositorAction::ScrollWorkspaceLeft];
         }
 
         Vec::new()
@@ -285,9 +284,8 @@ impl InputManager {
                 if delta_x.abs() > 20.0 {
                     if delta_x > 0.0 {
                         return vec![CompositorAction::ScrollWorkspaceRight];
-                    } else {
-                        return vec![CompositorAction::ScrollWorkspaceLeft];
                     }
+                    return vec![CompositorAction::ScrollWorkspaceLeft];
                 }
             }
             GestureType::Pan => {

@@ -1,4 +1,5 @@
 //! Configuration management for Axiom
+#![allow(missing_docs)]
 //!
 //! This module handles loading, parsing, and validating configuration
 //! from TOML files. It combines settings for workspaces, effects,
@@ -395,9 +396,15 @@ impl Default for GeneralConfig {
 }
 
 impl WorkspaceConfig {
-    fn default_momentum_friction() -> f64 { 0.95 }
-    fn default_momentum_min_velocity() -> f64 { 1.0 }
-    fn default_snap_threshold() -> f64 { 48.0 }
+    fn default_momentum_friction() -> f64 {
+        0.95
+    }
+    fn default_momentum_min_velocity() -> f64 {
+        1.0
+    }
+    fn default_snap_threshold() -> f64 {
+        48.0
+    }
 }
 
 impl AxiomConfig {

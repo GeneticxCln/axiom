@@ -106,7 +106,7 @@ impl ShaderManager {
 }
 
 /// Basic window vertex shader - handles positioning and transformations
-const WINDOW_VERTEX_SHADER: &str = r#"
+const WINDOW_VERTEX_SHADER: &str = r"
 // Vertex shader for window rendering with animations
 struct VertexInput {
     @location(0) position: vec2<f32>,
@@ -146,10 +146,10 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     
     return out;
 }
-"#;
+";
 
 /// Window fragment shader with rounded corners and opacity
-const WINDOW_FRAGMENT_SHADER: &str = r#"
+const WINDOW_FRAGMENT_SHADER: &str = r"
 // Fragment shader for window rendering with rounded corners
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -195,10 +195,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     
     return vec4<f32>(base_color.rgb, final_alpha);
 }
-"#;
+";
 
 /// Horizontal blur pass shader
-const BLUR_HORIZONTAL_SHADER: &str = r#"
+const BLUR_HORIZONTAL_SHADER: &str = r"
 // Horizontal Gaussian blur pass
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -246,10 +246,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     
     return mix(textureSample(input_texture, input_sampler, input.tex_coords), result, blur.intensity);
 }
-"#;
+";
 
 /// Vertical blur pass shader (similar to horizontal but different direction)
-const BLUR_VERTICAL_SHADER: &str = r#"
+const BLUR_VERTICAL_SHADER: &str = r"
 // Vertical Gaussian blur pass
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -297,10 +297,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     
     return mix(textureSample(input_texture, input_sampler, input.tex_coords), result, blur.intensity);
 }
-"#;
+";
 
 /// Drop shadow shader
-const DROP_SHADOW_SHADER: &str = r#"
+const DROP_SHADOW_SHADER: &str = r"
 // Drop shadow rendering shader
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -336,10 +336,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     
     return vec4<f32>(shadow.shadow_color.rgb, final_alpha);
 }
-"#;
+";
 
 /// Rounded corners shader
-const ROUNDED_CORNERS_SHADER: &str = r#"
+const ROUNDED_CORNERS_SHADER: &str = r"
 // Anti-aliased rounded corners shader
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -386,10 +386,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     
     return vec4<f32>(final_color, final_alpha);
 }
-"#;
+";
 
 /// Animation transformation vertex shader
-const ANIMATION_TRANSFORM_SHADER: &str = r#"
+const ANIMATION_TRANSFORM_SHADER: &str = r"
 // Advanced animation transformation shader
 struct VertexInput {
     @location(0) position: vec2<f32>,
@@ -470,4 +470,4 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     
     return out;
 }
-"#;
+";

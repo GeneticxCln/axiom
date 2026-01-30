@@ -15,6 +15,11 @@ struct Uniforms {
     projection: mat4x4<f32>,
 }
 
+struct WindowUniforms {
+    opacity: f32,
+    padding: vec3<f32>,
+}
+
 @group(0) @binding(0)
 var<uniform> uniforms: Uniforms;
 
@@ -23,6 +28,9 @@ var window_texture: texture_2d<f32>;
 
 @group(0) @binding(2)
 var window_sampler: sampler;
+
+@group(0) @binding(3)
+var<uniform> window_uniforms: WindowUniforms;
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
@@ -37,6 +45,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Sample the window texture
     let color = textureSample(window_texture, window_sampler, input.tex_coords);
     
-    // Apply gamma correction and return
-    return vec4<f32>(pow(color.rgb, vec3<f32>(2.2)), color.a);
+    // Apply gamma correction and opacity
+    // We multiply the final alpha by the window opacity
+    let opacity = window_uniforms.opacity;
+    return vec4<f32>(pow(color.rgb, vec3<f32>(2.2)), color.a * opacity);
 }

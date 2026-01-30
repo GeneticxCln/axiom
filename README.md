@@ -64,85 +64,29 @@ axiom/
 ├── Cargo.toml              # Dependencies and metadata
 ├── axiom.toml              # Default configuration
 ├── test_ipc.py             # IPC testing script
-└── STATUS.md               # Detailed development status
+└── MASTER_DEVELOPMENT_PLAN.md               # Detailed development status
 ```
 
 ## 🚀 Development Status
 
-| Phase | Status | Description |
-|-------|--------|--------------|
-| **Phase 1** | ✅ **COMPLETE** | Basic compositor foundation, IPC, configuration |
-| **Phase 2** | ✅ **COMPLETE** | Smithay integration, window management, Wayland protocols |
-| **Phase 3** | ✅ **COMPLETE** | Enhanced protocols, input handling, real window integration |
-| **Phase 4** | ✅ **COMPLETE** | Visual effects system & polish |
+**Current Status**: 🚀 **Phase 6 - Real Compositor**
 
-**Current Status**: 🎨 **Phase 4 Complete!** - Advanced visual effects system with GPU-accelerated animations, blur, shadows, and adaptive performance optimization. Ready for production polish!
+For detailed status, roadmap, and progress, please see [MASTER_DEVELOPMENT_PLAN.md](MASTER_DEVELOPMENT_PLAN.md).
 
-### ✅ What's Working Now (Phase 1)
+## 📚 Documentation
 
-- **🏗️ Complete Architecture**: Modular Rust codebase with clean separation of concerns
-- **⚙️ Configuration System**: TOML-based config with defaults and validation
-- **🔄 Event Loop**: Async Tokio-based main loop running at 60 FPS
-- **🤖 IPC Integration**: Unix socket communication with Lazy UI optimization system (socket at $XDG_RUNTIME_DIR/axiom/axiom.sock, fallback /tmp/axiom-lazy-ui.sock)
-- **📊 Performance Monitoring**: Real-time CPU, memory, GPU usage reporting
-- **🛡️ Error Handling**: Comprehensive error management with graceful shutdown
-- **🔧 CLI Interface**: Full command-line interface with debug and windowed modes
-- **📝 Logging**: Structured, emoji-enhanced logging for development and debugging
+Detailed documentation is available in the `docs/` directory:
 
-### ✅ What's New in Phase 2 (COMPLETE!)
+### User Guide
+-   [**Installation**](docs/user/INSTALL.md) - How to build and install
+-   [**Running**](docs/user/RUNNING.md) - How to start the compositor
+-   [**Configuration**](docs/user/CONFIGURATION.md) - Customizing Axiom
 
-- **✅ Smithay Integration**: Real Wayland compositor framework with Smithay 0.3.0
-- **✅ Backend Architecture**: Functional backend with proper initialization and shutdown
-- **✅ Window Management**: Enhanced AxiomWindow wrapper with properties and lifecycle
-- **✅ Event Loop Integration**: Main compositor loop coordinating all subsystems
-- **✅ Workspace Integration**: Backend properly connected to scrollable workspace system
-- **✅ Error Handling**: Comprehensive error management and graceful shutdown
+### Developer Resources
+-   [**Backend Selection**](docs/dev/BACKEND_SELECTION.md) - Understanding backend options
+-   [**Building**](docs/dev/BUILD.md) - Compile flags and targets
+-   [**Contributing**](docs/dev/CONTRIBUTING.md) - Project structure and guidelines
 
-### 🔄 Currently Working On (Phase 3)
-
-- **📜 Real Protocol Support**: Implementing actual XDG Shell, wl_compositor handlers
-- **🖼️ OpenGL Rendering**: Real window rendering pipeline with hardware acceleration
-- **⌨️ Input Processing**: Keyboard shortcuts, mouse interactions, and gesture support
-- **🖥️ Multi-output Support**: Proper handling of multiple displays and output management
-- **🎨 Surface Management**: Wayland surface creation, damage tracking, and composition
-- **🧩 Client Communication**: Bidirectional communication with Wayland clients
-
-## 🛠️ Building & Running
-
-### Quick Start
-
-```bash
-# Clone and build
-git clone https://github.com/GeneticxCln/axiom.git
-cd axiom
-cargo build --release
-
-# Run in development mode
-./target/debug/axiom --debug --windowed
-
-# Run in production
-sudo ./target/release/axiom
-```
-
-### Configuration Precedence
-
-- Defaults (compiled)
-- Config file (TOML)
-- CLI flags
-- IPC runtime updates (validated, whitelisted)
-
-### Dependencies
-
-```bash
-# Ubuntu/Debian
-sudo apt install libwayland-dev pkg-config build-essential
-
-# Arch Linux 
-sudo pacman -S rust wayland wayland-protocols pkg-config
-
-# Fedora
-sudo dnf install rust cargo wayland-devel wayland-protocols-devel
-```
 
 ## ⚙️ Configuration
 

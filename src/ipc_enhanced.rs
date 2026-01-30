@@ -358,7 +358,7 @@ impl EnhancedIPCServer {
         let mut messages_to_retry = Vec::new();
         
         {
-            let mut q = queue.lock().unwrap();
+            let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
             while let Some(msg) = q.pop_front() {
                 // Check if message is too old
                 if msg.timestamp.elapsed() > Duration::from_secs(60) {
@@ -397,7 +397,7 @@ impl EnhancedIPCServer {
         
         // Re-queue messages that need retry
         if !messages_to_retry.is_empty() {
-            let mut q = queue.lock().unwrap();
+            let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
             for msg in messages_to_retry {
                 q.push_back(msg);
             }
@@ -407,7 +407,7 @@ impl EnhancedIPCServer {
     /// Send message to a client
     async fn send_to_client(client: &ClientConnection, message: &str) -> Result<()> {
         let stream = Arc::clone(&client.stream);
-        let mut stream = stream.lock().unwrap();
+        let mut stream = stream.lock().unwrap_or_else(|e| e.into_inner());
         
         // Try to get mutable reference to the stream
         // Note: In real implementation, we'd need proper async handling
@@ -423,7 +423,7 @@ impl EnhancedIPCServer {
                 match listener.accept().await {
                     Ok((stream, _addr)) => {
                         let client_id = {
-                            let mut id = self.next_client_id.lock().unwrap();
+                            let mut id = self.next_client_id.lock().unwrap_or_else(|e| e.into_inner());
                             let current = *id;
                             *id += 1;
                             current
@@ -496,7 +496,7 @@ impl EnhancedIPCServer {
     
     /// Broadcast message to all clients
     async fn broadcast_message(&self, message: &str) {
-        let mut queue = self.message_queue.lock().unwrap();
+        let mut queue = self.message_queue.lock().unwrap_or_else(|e| e.into_inner());
         queue.push_back(QueuedMessage {
             id: rand::random(),
             content: message.to_string(),

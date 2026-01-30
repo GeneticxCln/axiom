@@ -1,4 +1,6 @@
 //! Server-side decoration system for Axiom compositor
+#![allow(clippy::approx_constant)]
+#![allow(missing_docs)]
 //!
 //! This module handles drawing window decorations (titlebars, borders, buttons)
 //! when clients request server-side decorations (SSD).
@@ -12,6 +14,7 @@ use crate::effects::WindowEffectState;
 use crate::window::Rectangle;
 
 /// Decoration mode for windows
+#[allow(clippy::approx_constant)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecorationMode {
     /// Client-side decorations (app draws its own titlebar)
@@ -22,6 +25,7 @@ pub enum DecorationMode {
     None,
 }
 
+/// Window decoration and theming
 /// Window decoration state and preferences
 #[derive(Debug, Clone)]
 pub struct WindowDecoration {
@@ -54,6 +58,7 @@ pub struct TitlebarButtons {
 
 /// Individual button state
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ButtonState {
     pub visible: bool,
     pub enabled: bool,

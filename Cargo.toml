@@ -13,41 +13,11 @@ categories = ["gui"]
 name = "axiom"
 path = "src/main.rs"
 
-[[bin]]
-name = "test_real_backend"
-path = "src/test_real_backend.rs"
-required-features = ["real-compositor", "experimental-smithay"]
-test = false
-
-[[bin]]
-name = "test_basic"
-path = "src/test_basic.rs"
-required-features = ["demo"]
-test = false
-
 # Gate examples by a feature so they don't break default builds/tests
 [[example]]
 name = "metrics_client"
 path = "examples/metrics_client.rs"
 required-features = ["examples"]
-
-[[bin]]
-name = "test_socket"
-path = "src/test_socket.rs"
-required-features = ["demo"]
-test = false
-
-[[bin]]
-name = "test_real"
-path = "src/test_real.rs"
-required-features = ["real-compositor", "experimental-smithay"]
-test = false
-
-[[bin]]
-name = "run_real_backend"
-path = "src/bin/run_real_backend.rs"
-required-features = ["real-compositor", "experimental-smithay"]
-test = false
 
 [dependencies]
 # Configuration and serialization
@@ -57,6 +27,7 @@ clap = { version = "4.4", features = ["derive"] }
 
 # Async runtime and utilities  
 tokio = { version = "1.0", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 anyhow = "1.0"
 thiserror = "1.0"
 log = "0.4"
@@ -64,12 +35,12 @@ env_logger = "0.10"
 
 # Core Wayland compositor dependencies
 wayland-server = "0.31"
-wayland-protocols = { version = "0.31", features = ["server", "staging", "unstable"] }
+wayland-protocols = { version = "0.32", features = ["server", "staging", "unstable"] }
 wayland-backend = "0.3"
 wayland-scanner = "0.31"
 
 # Smithay compositor framework with full features
-smithay = { version = "0.3.0", default-features = false, features = [
+smithay = { version = "0.7.0", default-features = false, features = [
     "backend_winit",
     "backend_drm",
     "backend_libinput", 
@@ -79,7 +50,7 @@ smithay = { version = "0.3.0", default-features = false, features = [
     "wayland_frontend",
     "xwayland"
 ] }
-smithay-client-toolkit = "0.18"
+smithay-client-toolkit = "0.20"
 
 # Graphics and input
 glium = "0.34"
@@ -87,6 +58,7 @@ cgmath = "0.18"
 xkbcommon = "0.7"
 libc = "0.2"
 calloop = "0.12"
+x11rb = "0.13"
 input = "0.9"
 drm = "0.11"
 gbm = "0.14"
@@ -98,7 +70,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Graphics and rendering
 wgpu = "0.19"
-winit = "0.29"
+winit = "0.29" # Check smithay 0.7 compatibility, might need 0.30 or specific version
+# Smithay 0.7 likely uses winit 0.30 or similar, but let's stick to 0.29 if it works, or upgrade if forced.
+# Actually, smithay 0.7 typically bumps winit. Let's try 0.29 first to minimize breakage or check overrides.
 
 # IPC for Lazy UI integration
 serde_json = "1.0"
@@ -110,6 +84,7 @@ ctrlc = "3.4"  # For graceful shutdown
 rand = "0.8"  # For input simulation in Phase 3
 bytemuck = { version = "1.14", features = ["derive"] }  # For GPU buffer data
 parking_lot = "0.12"  # For RwLock synchronization
+slog = "2.7"
 
 # TODO: Add features when compositor dependencies are ready
 # [features]

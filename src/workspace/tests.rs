@@ -148,13 +148,13 @@ fn test_focused_column_retrieval() -> Result<()> {
     workspaces.add_window_to_column(1002, 1);
 
     // Get focused column (should be first column initially)
-let focused_column = workspaces.get_focused_column_opt().unwrap();
+    let focused_column = workspaces.get_focused_column_opt().unwrap();
     assert_eq!(focused_column.windows.len(), 1);
     assert_eq!(focused_column.windows[0], 1001);
 
     // Move focus and check again
     workspaces.scroll_right();
-let focused_column = workspaces.get_focused_column_opt().unwrap();
+    let focused_column = workspaces.get_focused_column_opt().unwrap();
     assert_eq!(focused_column.windows.len(), 1);
     assert_eq!(focused_column.windows[0], 1002);
 
@@ -171,7 +171,7 @@ fn test_workspace_update_cycle() -> Result<()> {
     workspaces.add_window_to_column(1002, 1);
 
     // Test update cycle (should not crash)
-workspaces.update_animations()?;
+    workspaces.update_animations()?;
 
     // Should still have the same number of columns
     assert_eq!(workspaces.active_column_count(), 2);
@@ -343,6 +343,50 @@ fn test_workspace_bounds_checking() -> Result<()> {
     if !workspaces.is_infinite_scroll_enabled() {
         assert!(index < 10); // Reasonable upper bound
     }
+
+    Ok(())
+}
+
+#[test]
+fn test_multi_monitor_tapes() -> Result<()> {
+    let config = WorkspaceConfig::default();
+    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+
+    // 1. Create tapes for two outputs
+    workspaces.ensure_tape("output-1");
+    workspaces.ensure_tape("output-2");
+
+    // 2. Switch to output-1 and add a window
+    workspaces.focused_output = "output-1".to_string();
+    workspaces.add_window(1001);
+
+    // Verify window exists in output-1
+    assert!(workspaces.active_tape().window_exists(1001));
+    assert_eq!(workspaces.active_tape().active_column_count(), 1);
+
+    // 3. Switch to output-2
+    workspaces.focused_output = "output-2".to_string();
+
+    // Verify window does NOT exist in output-2's tape locally (though window_exists delegates globally in current impl, let's check column count directly)
+    assert_eq!(workspaces.active_tape().active_column_count(), 1); // Default empty column
+    assert!(workspaces
+        .active_tape()
+        .get_focused_column_windows()
+        .is_empty());
+
+    // 4. Add window to output-2
+    workspaces.add_window(2002);
+    assert_eq!(
+        workspaces.active_tape().get_focused_column_windows(),
+        vec![2002]
+    );
+
+    // 5. Verify independence
+    workspaces.focused_output = "output-1".to_string();
+    assert_eq!(
+        workspaces.active_tape().get_focused_column_windows(),
+        vec![1001]
+    );
 
     Ok(())
 }

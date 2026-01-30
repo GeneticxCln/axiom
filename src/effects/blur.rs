@@ -62,6 +62,9 @@ pub struct BlurRenderer {
     intermediate_texture: Option<Texture>,
     intermediate_texture_view: Option<TextureView>,
 
+    // Cached sampler for blur effects (avoid per-frame allocation)
+    blur_sampler: wgpu::Sampler,
+
     // Current blur parameters
     current_params: BlurParams,
 
@@ -95,6 +98,22 @@ impl BlurRenderer {
             mapped_at_creation: false,
         });
 
+        // Create cached sampler (created once, reused every frame)
+        let blur_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Blur Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 1.0,
+            compare: None,
+            anisotropy_clamp: 1,
+            border_color: None,
+        });
+
         let mut renderer = Self {
             device,
             queue,
@@ -104,6 +123,7 @@ impl BlurRenderer {
             blur_params_buffer,
             intermediate_texture: None,
             intermediate_texture_view: None,
+            blur_sampler,
             current_params: initial_params,
             last_blur_time: std::time::Duration::from_millis(0),
         };
@@ -243,9 +263,10 @@ impl BlurRenderer {
 
         // Get blur parameters based on current settings
         let (radius, intensity) = match &self.current_params.blur_type {
-            BlurType::Gaussian { radius, intensity } => (*radius, *intensity),
             BlurType::Background { radius, intensity } => (*radius * 0.8, *intensity), // Slightly less intense
-            BlurType::Window { radius, intensity } => (*radius, *intensity),
+            BlurType::Gaussian { radius, intensity } | BlurType::Window { radius, intensity } => {
+                (*radius, *intensity)
+            }
             BlurType::Bokeh {
                 radius, intensity, ..
             } => (*radius * 1.2, *intensity), // More intense for bokeh
@@ -333,7 +354,7 @@ impl BlurRenderer {
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.create_blur_sampler()),
+                    resource: wgpu::BindingResource::Sampler(&self.blur_sampler),
                 },
             ],
         });
@@ -404,7 +425,7 @@ impl BlurRenderer {
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.create_blur_sampler()),
+                    resource: wgpu::BindingResource::Sampler(&self.blur_sampler),
                 },
             ],
         });
@@ -438,8 +459,7 @@ impl BlurRenderer {
         let needs_recreation = self
             .intermediate_texture
             .as_ref()
-            .map(|texture| texture.width() != size.x || texture.height() != size.y)
-            .unwrap_or(true);
+            .is_none_or(|texture| texture.width() != size.x || texture.height() != size.y);
 
         if needs_recreation {
             debug!(
@@ -512,8 +532,8 @@ impl BlurRenderer {
                         radius: r2,
                         intensity: i2,
                     },
-                ) => (r1 - r2).abs() < 0.1 && (i1 - i2).abs() < 0.01,
-                (
+                )
+                | (
                     BlurType::Background {
                         radius: r1,
                         intensity: i1,

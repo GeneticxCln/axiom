@@ -1,4 +1,5 @@
 //! Window management system
+#![allow(missing_docs)]
 //! Handles window placement, focusing, and layout algorithms
 
 use crate::config::WindowConfig;
@@ -7,7 +8,7 @@ use std::collections::HashMap;
 
 // Backend window type
 #[cfg(feature = "experimental-smithay")]
-pub use crate::experimental::smithay::smithay_backend_simple::BackendWindow;
+use crate::experimental::smithay::real_window::BackendWindow;
 
 // Minimal fallback backend window when experimental-smithay is disabled
 #[cfg(not(feature = "experimental-smithay"))]
@@ -22,10 +23,19 @@ pub struct BackendWindow {
 #[cfg(not(feature = "experimental-smithay"))]
 impl BackendWindow {
     pub fn new(id: u64, title: String) -> Self {
-        Self { id, title, position: (0, 0), size: (800, 600) }
+        Self {
+            id,
+            title,
+            position: (0, 0),
+            size: (800, 600),
+        }
     }
-    pub fn set_position(&mut self, x: i32, y: i32) { self.position = (x, y); }
-    pub fn set_size(&mut self, width: u32, height: u32) { self.size = (width, height); }
+    pub fn set_position(&mut self, x: i32, y: i32) {
+        self.position = (x, y);
+    }
+    pub fn set_size(&mut self, width: u32, height: u32) {
+        self.size = (width, height);
+    }
 }
 
 /// Rectangle for window positioning and sizing

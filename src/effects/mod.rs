@@ -150,6 +150,10 @@ pub struct EffectsEngine {
     /// GPU context (when available)
     gpu_device: Option<Arc<Device>>,
     gpu_queue: Option<Arc<Queue>>,
+
+    // Reuse buffers for update loop to avoid allocation
+    update_window_ids: Vec<u64>,
+    update_animations: Vec<String>,
 }
 
 impl Default for WindowEffectState {
@@ -215,7 +219,7 @@ impl EffectsEngine {
         let default_easing_curve = match config.animations.curve.as_str() {
             "linear" => EasingCurve::Linear,
             "ease-in" => EasingCurve::EaseIn,
-            "ease-out" => EasingCurve::EaseOut,
+
             "ease-in-out" => EasingCurve::EaseInOut,
             _ => EasingCurve::EaseOut,
         };
@@ -256,6 +260,8 @@ impl EffectsEngine {
             adaptive_quality: true,
             gpu_device: None,
             gpu_queue: None,
+            update_window_ids: Vec::with_capacity(64),
+            update_animations: Vec::with_capacity(32),
         })
     }
 
@@ -278,11 +284,14 @@ impl EffectsEngine {
         }
 
         // Update all window animations
+        // Update all window animations
         // Update window animations - collect data first to avoid borrow conflicts
-        let mut animation_updates = Vec::new();
-        let window_ids: Vec<u64> = self.window_effects.keys().copied().collect();
 
-        for window_id in window_ids {
+        self.update_animations.clear();
+        self.update_window_ids.clear();
+        self.update_window_ids.extend(self.window_effects.keys());
+
+        for &window_id in &self.update_window_ids {
             if let Some(effect_state) = self.window_effects.get_mut(&window_id) {
                 if let Ok(updates) = Self::update_window_animations_static(
                     window_id,
@@ -290,7 +299,7 @@ impl EffectsEngine {
                     now,
                     &self.default_easing_curve,
                 ) {
-                    animation_updates.extend(updates);
+                    self.update_animations.extend(updates);
                 }
             }
         }
@@ -533,7 +542,6 @@ impl EffectsEngine {
         let t = t.clamp(0.0, 1.0);
 
         match curve {
-            EasingCurve::Linear => t,
             EasingCurve::EaseIn => t * t,
             EasingCurve::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
             EasingCurve::EaseInOut => {
@@ -550,7 +558,7 @@ impl EffectsEngine {
     /// Update animations for a specific window
     fn update_window_animations(
         &mut self,
-        window_id: &u64,
+        window_id: u64,
         effect_state: &mut WindowEffectState,
         now: Instant,
     ) -> Result<()> {
@@ -685,7 +693,7 @@ impl EffectsEngine {
                     7.5625 * t * t + 0.9375
                 } else {
                     let t = t - 2.625 / 2.75;
-                    7.5625 * t * t + 0.984375
+                    7.5625 * t * t + 0.984_375
                 }
             }
             EasingCurve::ElasticOut => {
@@ -772,6 +780,44 @@ impl EffectsEngine {
     // Temporary no-op to satisfy benches that call this API. In future, wire to actual blur control per window.
     pub fn set_window_blur(&mut self, _window_id: u64, _radius: f32) {
         // Intentionally left as no-op for now.
+    }
+
+    /// Update configuration
+    pub fn update_config(&mut self, config: EffectsConfig) {
+        info!("🔄 Updating Effects Engine configuration");
+
+        // Update blur params
+        self.blur_params = BlurParams {
+            enabled: config.blur.enabled,
+            radius: config.blur.radius as f32,
+            intensity: config.blur.intensity as f32,
+            background_blur: config.blur.window_backgrounds,
+            window_blur: false,
+        };
+
+        // Update shadow params
+        self.default_shadow = ShadowParams {
+            enabled: config.shadows.enabled,
+            size: config.shadows.size as f32,
+            blur_radius: config.shadows.blur_radius as f32,
+            opacity: config.shadows.opacity as f32,
+            offset: (0.0, 2.0),
+            color: [0.0, 0.0, 0.0, 1.0],
+        };
+
+        // Update animation settings
+        self.animations_enabled = config.animations.enabled;
+        self.default_animation_duration = Duration::from_millis(config.animations.duration as u64);
+
+        self.default_easing_curve = match config.animations.curve.as_str() {
+            "linear" => EasingCurve::Linear,
+            "ease-in" => EasingCurve::EaseIn,
+
+            "ease-in-out" => EasingCurve::EaseInOut,
+            _ => EasingCurve::EaseOut,
+        };
+
+        self.config = config;
     }
 
     /// Initialize GPU context for hardware-accelerated effects

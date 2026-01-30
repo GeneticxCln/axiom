@@ -3,15 +3,27 @@
 //! This module provides communication between the Axiom compositor (Rust) and
 //! Lazy UI optimization system (Python) using Unix sockets and JSON messages.
 
+#![allow(missing_docs)]
+
 use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::alloc::System;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Semaphore};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+use crate::config::AxiomConfig;
+
+/// Maximum number of concurrent IPC client connections.
+const MAX_CONNECTIONS: usize = 16;
+/// Idle timeout for client connections (seconds).
+const CLIENT_IDLE_TIMEOUT_SECS: u64 = 60;
 
 /// Messages sent from Axiom to Lazy UI (performance metrics, events)
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -106,11 +118,19 @@ pub struct AxiomIPCServer {
     #[allow(dead_code)]
     message_sender: Option<mpsc::UnboundedSender<AxiomMessage>>,
     command_receiver: Option<mpsc::UnboundedReceiver<LazyUIMessage>>,
+    /// Sender side of command channel (for wiring incoming commands)
+    command_sender: Option<mpsc::UnboundedSender<LazyUIMessage>>,
     // System info for metrics sampling
     sys: Option<System>,
     last_metrics_sent: Instant,
     // Last CPU times for non-blocking CPU usage sampling
     last_cpu_times: Option<(u64, u64)>,
+    // Graceful shutdown token
+    shutdown_token: Option<CancellationToken>,
+    // Handle for the accept loop task
+    accept_handle: Option<JoinHandle<Result<()>>>,
+    // Connection limit semaphore
+    connection_semaphore: Option<Arc<Semaphore>>,
 }
 
 impl Default for AxiomIPCServer {
@@ -130,13 +150,18 @@ impl AxiomIPCServer {
             broadcast_tx: None,
             message_sender: None,
             command_receiver: None,
+            command_sender: None,
             sys: None,
             last_metrics_sent: Instant::now(),
             last_cpu_times: None,
+            shutdown_token: None,
+            accept_handle: None,
+            connection_semaphore: None,
         }
     }
 
     /// Start the IPC server
+    #[allow(clippy::unused_async)]
     pub async fn start(&mut self) -> Result<()> {
         // Ensure parent dir exists with correct permissions
         if let Some(dir) = self.socket_path.parent() {
@@ -165,17 +190,45 @@ impl AxiomIPCServer {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600));
+            let _ =
+                std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600));
         }
 
         // Create broadcast channel for outgoing messages
         let (tx, _rx) = broadcast::channel::<AxiomMessage>(1024);
         self.broadcast_tx = Some(tx.clone());
 
+        // Create command channel for incoming messages
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<LazyUIMessage>();
+        self.command_sender = Some(cmd_tx.clone());
+        self.command_receiver = Some(cmd_rx);
+
+        // Create shutdown token
+        let shutdown_token = CancellationToken::new();
+        self.shutdown_token = Some(shutdown_token.clone());
+
+        // Create connection semaphore
+        let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        self.connection_semaphore = Some(semaphore.clone());
+
+        // Get our own UID for peer credential checks
+        #[cfg(unix)]
+        let our_uid = unsafe { libc::getuid() };
+        #[cfg(not(unix))]
+        let our_uid = 0u32;
+
         info!("🔗 Axiom IPC server listening on: {:?}", self.socket_path);
 
         // Start accepting connections in a separate task
-        tokio::spawn(Self::accept_connections_static(listener, tx));
+        let handle = tokio::spawn(Self::accept_connections_static(
+            listener,
+            tx,
+            cmd_tx,
+            shutdown_token,
+            semaphore,
+            our_uid,
+        ));
+        self.accept_handle = Some(handle);
 
         Ok(())
     }
@@ -184,22 +237,70 @@ impl AxiomIPCServer {
     async fn accept_connections_static(
         listener: UnixListener,
         tx: broadcast::Sender<AxiomMessage>,
+        cmd_tx: mpsc::UnboundedSender<LazyUIMessage>,
+        shutdown_token: CancellationToken,
+        semaphore: Arc<Semaphore>,
+        our_uid: u32,
     ) -> Result<()> {
         loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    info!("🤝 Lazy UI connected to Axiom IPC");
-                    let rx = tx.subscribe();
-                    tokio::spawn(Self::handle_client(stream, rx));
+            tokio::select! {
+                biased;
+                _ = shutdown_token.cancelled() => {
+                    info!("🔽 IPC accept loop shutting down");
+                    break;
                 }
-                Err(e) => {
-                    error!("❌ Error accepting IPC connection: {}", e);
+                accept_result = listener.accept() => {
+                    match accept_result {
+                        Ok((stream, _)) => {
+                            // Peer credential check
+                            #[cfg(unix)]
+                            {
+
+                                match stream.peer_cred() {
+                                    Ok(cred) => {
+                                        if cred.uid() != our_uid {
+                                            warn!("🚫 Rejecting IPC connection from different user (uid={})", cred.uid());
+                                            continue;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("⚠️ Failed to get peer credentials: {}, rejecting connection", e);
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            // Acquire semaphore permit (limits concurrent connections)
+                            let permit = match semaphore.clone().try_acquire_owned() {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    warn!("🚫 Max IPC connections reached ({}), rejecting", MAX_CONNECTIONS);
+                                    continue;
+                                }
+                            };
+
+                            info!("🤝 Lazy UI connected to Axiom IPC");
+                            let rx = tx.subscribe();
+                            let cmd_tx_clone = cmd_tx.clone();
+                            tokio::spawn(async move {
+                                let _permit = permit; // Hold permit for duration of connection
+                                if let Err(e) = Self::handle_client(stream, rx, cmd_tx_clone).await {
+                                    debug!("IPC client handler ended: {}", e);
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            error!("❌ Error accepting IPC connection: {}", e);
+                        }
+                    }
                 }
             }
         }
+        Ok(())
     }
 
     /// Accept incoming connections from Lazy UI (kept for compatibility)
+    #[allow(clippy::unused_async)]
     async fn accept_connections(&mut self) -> Result<()> {
         // Deprecated path: connection acceptance is spawned in start() with a broadcast channel.
         // Keeping this method to satisfy older call sites; return Ok(()) without doing anything.
@@ -210,9 +311,11 @@ impl AxiomIPCServer {
     async fn handle_client(
         stream: UnixStream,
         mut rx: broadcast::Receiver<AxiomMessage>,
+        cmd_tx: mpsc::UnboundedSender<LazyUIMessage>,
     ) -> Result<()> {
         let (reader, mut writer) = stream.into_split();
         let mut lines = BufReader::new(reader).lines();
+        let idle_timeout = Duration::from_secs(CLIENT_IDLE_TIMEOUT_SECS);
 
         // Send startup notification
         let startup_msg = AxiomMessage::StartupComplete {
@@ -230,6 +333,11 @@ impl AxiomIPCServer {
         // Process incoming messages and outgoing broadcasts concurrently
         loop {
             tokio::select! {
+                // Idle timeout - disconnect if no activity
+                _ = tokio::time::sleep(idle_timeout) => {
+                    info!("⏱️ IPC client idle timeout, disconnecting");
+                    break;
+                }
                 line = lines.next_line() => {
                     let line = match line? {
                         Some(l) => l,
@@ -245,6 +353,9 @@ impl AxiomIPCServer {
                     debug!("📨 Received IPC message: {}", trimmed);
                     match serde_json::from_str::<LazyUIMessage>(trimmed) {
                         Ok(message) => {
+                            // Forward command to compositor via channel
+                            let _ = cmd_tx.send(message.clone());
+                            // Also process inline for immediate response
                             if let Err(e) = Self::process_lazy_ui_message(message, &mut writer).await {
                                 warn!("⚠️ Error processing message: {}", e);
                             }
@@ -292,8 +403,11 @@ impl AxiomIPCServer {
                 for (key, value) in changes {
                     debug!("  📝 Setting {}: {:?}", key, value);
                     // For now accept only whitelisted keys
-                    let ok = matches!(key.as_str(),
-                        "effects.blur.radius" | "effects.animations.duration" | "workspace.scroll_speed"
+                    let ok = matches!(
+                        key.as_str(),
+                        "effects.blur.radius"
+                            | "effects.animations.duration"
+                            | "workspace.scroll_speed"
                     );
                     if ok {
                         applied.push(key);
@@ -402,6 +516,7 @@ impl AxiomIPCServer {
 
     /// Send performance metrics to Lazy UI
     #[allow(dead_code)]
+    #[allow(clippy::unused_async)]
     pub async fn send_performance_metrics(
         &self,
         cpu_usage: f32,
@@ -432,11 +547,11 @@ impl AxiomIPCServer {
         Ok(())
     }
 
-    /// Phase 3: Process pending IPC messages
-    pub async fn process_messages(&mut self) -> Result<()> {
+    /// Phase 3: Process pending IPC messages and apply configuration changes
+    /// Returns true if configuration was modified
+    pub async fn process_messages(&mut self, config: &mut AxiomConfig) -> Result<bool> {
         // Process any pending messages from Lazy UI
-        // In a real implementation, this would handle incoming connections
-        // and process optimization commands from the receiver
+        let mut config_changed = false;
 
         if let Some(receiver) = &mut self.command_receiver {
             while let Ok(message) = receiver.try_recv() {
@@ -444,10 +559,55 @@ impl AxiomIPCServer {
                 // Process the message (optimization commands, config changes, etc.)
                 match message {
                     LazyUIMessage::OptimizeConfig { changes, reason } => {
-                        info!("🎯 Processing optimization: {} ({})", changes.len(), reason);
+                        info!("🎯 Applying optimization: {} ({})", changes.len(), reason);
+                        for (key, value) in changes {
+                            if let Some(val_f64) = value.as_f64() {
+                                match key.as_str() {
+                                    "effects.blur.radius" => {
+                                        config.effects.blur.radius = val_f64 as u32;
+                                        config_changed = true;
+                                        debug!("  Set blur radius to {}", val_f64);
+                                    }
+                                    "effects.animations.duration" => {
+                                        config.effects.animations.duration = val_f64 as u32;
+                                        config_changed = true;
+                                        debug!("  Set animation duration to {}", val_f64);
+                                    }
+                                    "workspace.scroll_speed" => {
+                                        config.workspace.scroll_speed = val_f64;
+                                        config_changed = true;
+                                        debug!("  Set scroll speed to {}", val_f64);
+                                    }
+                                    _ => {
+                                        debug!("  Unknown optimization key: {}", key);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    LazyUIMessage::SetConfig { key, value } => {
+                        info!("⚙️ Setting config: {} = {:?}", key, value);
+                        // Manual mapping (would be better with reflection/serde_merge)
+                        if let Some(val_f64) = value.as_f64() {
+                            match key.as_str() {
+                                "effects.blur.radius" => {
+                                    config.effects.blur.radius = val_f64 as u32;
+                                    config_changed = true;
+                                }
+                                "effects.animations.duration" => {
+                                    config.effects.animations.duration = val_f64 as u32;
+                                    config_changed = true;
+                                }
+                                "workspace.scroll_speed" => {
+                                    config.workspace.scroll_speed = val_f64;
+                                    config_changed = true;
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     _ => {
-                        debug!("📑 Other message type processed");
+                        debug!("📑 Other message type processed (no main thread action needed)");
                     }
                 }
             }
@@ -455,10 +615,11 @@ impl AxiomIPCServer {
 
         // Small delay to prevent busy loop
         tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-        Ok(())
+        Ok(config_changed)
     }
 
     /// Send user event to Lazy UI
+    #[allow(clippy::unused_async)]
     pub async fn send_user_event(
         &self,
         event_type: String,
@@ -565,7 +726,7 @@ impl AxiomIPCServer {
             None
         }
 
-        let (cpu_percent, mem_used_mb) = (|| {
+        let (cpu_percent, mem_used_mb) = {
             let current = read_cpu_times();
             let cpu = match (self.last_cpu_times, current) {
                 (Some((idle_a, total_a)), Some((idle_b, total_b))) => {
@@ -577,8 +738,8 @@ impl AxiomIPCServer {
                         0.0
                     }
                 }
-                (_, Some((idle_b, total_b))) => {
-                    // First sample; store and return 0 for now
+                (_, Some((_idle_b, _total_b))) => {
+                    // First reading, can't calculate delta yet
                     0.0
                 }
                 _ => 0.0,
@@ -600,17 +761,21 @@ impl AxiomIPCServer {
                 }
             }
             let used_kb = mem_total_kb.saturating_sub(mem_available_kb) as f32;
-            let used_mb = used_kb / 1024.0;
-            (cpu, used_mb)
-        })();
+            let used_megabytes = used_kb / 1024.0;
+            (cpu, used_megabytes)
+        };
 
         // Update last CPU times with the current sample for next call
         if let Some((idle, total)) = (|| {
             let contents = std::fs::read_to_string("/proc/stat").ok()?;
             let first = contents.lines().next()?;
-            if !first.starts_with("cpu ") { return None; }
+            if !first.starts_with("cpu ") {
+                return None;
+            }
             let parts: Vec<&str> = first.split_whitespace().collect();
-            if parts.len() < 5 { return None; }
+            if parts.len() < 5 {
+                return None;
+            }
             let idle: u64 = parts.get(4)?.parse().ok()?;
             let iowait: u64 = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
             let user: u64 = parts.get(1)?.parse().ok()?;
@@ -628,6 +793,33 @@ impl AxiomIPCServer {
         }
 
         (cpu_percent, mem_used_mb)
+    }
+
+    /// Gracefully shut down the IPC server
+    pub async fn shutdown(&mut self) -> Result<()> {
+        info!("🔽 Shutting down IPC server...");
+
+        // Cancel the accept loop
+        if let Some(token) = self.shutdown_token.take() {
+            token.cancel();
+        }
+
+        // Wait for the accept loop to finish
+        if let Some(handle) = self.accept_handle.take() {
+            // Give it a short timeout in case it's stuck
+            match tokio::time::timeout(Duration::from_secs(5), handle).await {
+                Ok(Ok(_)) => info!("✅ IPC accept loop stopped"),
+                Ok(Err(e)) => warn!("⚠️ IPC accept loop error: {}", e),
+                Err(_) => warn!("⚠️ IPC accept loop shutdown timed out"),
+            }
+        }
+
+        // Drop broadcast channel to signal clients
+        self.broadcast_tx = None;
+        self.command_sender = None;
+
+        info!("✅ IPC server shut down");
+        Ok(())
     }
 }
 

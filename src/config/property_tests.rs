@@ -306,7 +306,7 @@ proptest! {
         prop_assert!(config.effects.shadows.opacity >= 0.0 && config.effects.shadows.opacity <= 1.0);
         prop_assert!(config.input.keyboard_repeat_rate > 0);
         prop_assert!(config.input.mouse_accel > 0.0);
-        prop_assert!(config.general.max_fps >= 0);
+        // max_fps is u32, always >= 0
     }
 
     /// Test that partial configuration merging works correctly
@@ -417,7 +417,7 @@ mod stress_tests {
 
     #[test]
     fn test_large_config_serialization() {
-        let mut config = AxiomConfig::default();
+        let config = AxiomConfig::default();
 
         // Should handle large configs gracefully
         let toml_result = toml::to_string(&config);

@@ -22,6 +22,7 @@ use super::ShadowParams;
 
 /// Different types of shadow effects
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum ShadowType {
     /// Standard drop shadow
     DropShadow {
@@ -494,8 +495,7 @@ impl ShadowRenderer {
         let needs_creation = self
             .shadow_map_texture
             .as_ref()
-            .map(|texture| texture.width() != size.x || texture.height() != size.y)
-            .unwrap_or(true);
+            .is_none_or(|texture| texture.width() != size.x || texture.height() != size.y);
 
         if needs_creation && matches!(self.current_quality, ShadowQuality::Ultra) {
             debug!("🗺️ Creating shadow map texture: {}x{}", size.x, size.y);

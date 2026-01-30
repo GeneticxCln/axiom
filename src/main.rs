@@ -1,4 +1,24 @@
 //! # Axiom - Hybrid Wayland Compositor
+#![allow(missing_docs)]
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::unused_self)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::float_cmp)]
+#![allow(clippy::unnecessary_debug_formatting)]
+#![allow(clippy::ignored_unit_patterns)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::single_match_else)]
 //!
 //! The first Wayland compositor combining niri's scrollable workspace innovation
 //! with Hyprland's visual effects system.
@@ -14,33 +34,24 @@
 //! - `config`: Configuration parsing and management
 //! - `xwayland`: X11 compatibility layer
 
-
 use anyhow::Result;
 use clap::Parser;
-use log::{error, info};
+use log::{debug, error, info, warn};
 
-mod compositor;
-mod decoration;
-mod config;
-mod demo_phase4_effects;
-mod demo_phase6_minimal;
-mod demo_phase6_working;
-mod demo_workspace;
-mod effects;
-mod input;
-mod ipc;
-mod window;
-mod workspace;
-mod xwayland;
-mod renderer;
-mod experimental;
-
-// Smithay backend modules - only available with experimental-smithay feature
-#[cfg(feature = "experimental-smithay")]
-use experimental::smithay::*;
-
-use compositor::AxiomCompositor;
-use config::AxiomConfig;
+use axiom::compositor::AxiomCompositor;
+use axiom::config::AxiomConfig;
+use axiom::decoration::DecorationManager;
+use axiom::effects::EffectsEngine;
+use axiom::input::InputManager;
+use axiom::ipc::AxiomIPCServer;
+use axiom::renderer::AxiomRenderer;
+use axiom::window::WindowManager;
+use axiom::workspace::ScrollableWorkspaces;
+use axiom::xwayland::XWaylandManager;
+use parking_lot::RwLock;
+use std::sync::Arc;
+use tokio::sync::RwLock as AsyncRwLock;
+// use axiom::generate_default_config;
 
 #[derive(Parser)]
 #[command(name = "axiom")]
@@ -48,6 +59,7 @@ use config::AxiomConfig;
     about = "A hybrid Wayland compositor combining scrollable workspaces with visual effects"
 )]
 #[command(version)]
+#[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// Path to configuration file
     #[arg(short, long, default_value = "~/.config/axiom/axiom.toml")]
@@ -72,10 +84,6 @@ struct Cli {
     /// Run visual effects demo (Phase 4)
     #[arg(long)]
     effects_demo: bool,
-
-    /// Run Phase 6.2 Smithay backend demo with protocol simulation
-    #[arg(long)]
-    phase6_2_demo: bool,
 }
 
 #[tokio::main]
@@ -88,6 +96,21 @@ async fn main() -> Result<()> {
     } else {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     }
+
+    // Set global panic handler
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .unwrap_or_else(|| std::panic::Location::caller());
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.as_str()
+        } else {
+            "Box<Any>"
+        };
+        error!("🚨 COMPOSITOR PANIC [{}]: {}", location, payload);
+    }));
 
     info!("🚀 Starting Axiom - Hybrid Wayland Compositor");
     info!("📄 Version: {}", env!("CARGO_PKG_VERSION"));
@@ -115,59 +138,14 @@ async fn main() -> Result<()> {
     // Initialize and run compositor
     info!("🏗️  Initializing Axiom compositor...");
 
-    let mut compositor = AxiomCompositor::new(config.clone(), cli.windowed).await?;
+    // Create shared managers
+    // use parking_lot::RwLock; // Use top level
+    // use tokio::sync::RwLock as AsyncRwLock; // Use top level
+    // use std::sync::Arc; // Use top level
 
-    info!("✨ Axiom is ready! Where productivity meets beauty.");
-
-    // Run demos if requested
-    if cli.demo {
-        info!("🎭 Running Phase 3 scrollable workspace demo...");
-        demo_workspace::run_comprehensive_test(&mut compositor).await?;
-        info!("🎆 Phase 3 demo completed!");
-    }
-
-    if cli.effects_demo {
-        info!("🎨 Running Phase 4 visual effects demo...");
-        demo_phase4_effects::display_effects_capabilities(&compositor);
-        demo_phase4_effects::run_phase4_effects_demo(&mut compositor).await?;
-        info!("🎆 Phase 4 effects demo completed!");
-    }
-
-    if cli.phase6_2_demo {
-        info!("🌊 Running Phase 6.2 Smithay backend demo with protocol simulation...");
-        run_phase6_2_demo(config.clone(), cli.windowed).await?;
-        info!("🎆 Phase 6.2 demo completed!");
-        return Ok(()); // Exit after demo
-    }
-
-    if cli.demo || cli.effects_demo || cli.phase6_2_demo {
-        info!("🎆 All demos completed! Continuing with normal compositor operation...");
-    }
-
-    // Main event loop
-    compositor.run().await?;
-
-    info!("👋 Axiom compositor shutting down");
-    Ok(())
-}
-
-/// Run Phase 6.2 Smithay backend demo with protocol simulation
-#[cfg(feature = "experimental-smithay")]
-async fn run_phase6_2_demo(config: AxiomConfig, windowed: bool) -> Result<()> {
-    use crate::decoration::DecorationManager;
-    use crate::effects::EffectsEngine;
-    use crate::input::InputManager;
-    use crate::experimental::smithay::smithay_backend_phase6_2::AxiomSmithayBackendPhase6_2;
-    use crate::window::WindowManager;
-    use crate::workspace::ScrollableWorkspaces;
-    use parking_lot::RwLock;
-    use std::sync::Arc;
-
-    info!("🌊 Initializing Phase 6.2 Enhanced Protocol Simulation Backend...");
-    info!("🔧 Creating required manager components...");
-
-    // Create all required manager components
-    let workspace_manager = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)?));
+    let workspace_manager = std::sync::Arc::new(parking_lot::RwLock::new(
+        ScrollableWorkspaces::new(&config.workspace)?,
+    ));
     let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)?));
     let effects_engine = Arc::new(RwLock::new(EffectsEngine::new(&config.effects)?));
     let decoration_manager = Arc::new(RwLock::new(DecorationManager::new(&config.window)));
@@ -176,41 +154,68 @@ async fn run_phase6_2_demo(config: AxiomConfig, windowed: bool) -> Result<()> {
         &config.bindings,
     )?));
 
-    let mut backend = AxiomSmithayBackendPhase6_2::new(
-        config,
-        windowed,
-        workspace_manager,
-        window_manager,
-        effects_engine,
-        decoration_manager,
-        input_manager,
-    )?;
+    // XWayland
+    let xwayland_manager = if config.xwayland.enabled {
+        debug!("🔗 Initializing XWayland...");
+        Some(Arc::new(AsyncRwLock::new(
+            XWaylandManager::new(&config.xwayland).await?,
+        )))
+    } else {
+        debug!("🔗 XWayland disabled by config");
+        None
+    };
 
-    backend.initialize().await?;
+    let ipc_server = AxiomIPCServer::new();
 
-    info!("✨ Phase 6.2 backend initialized successfully!");
-    info!("🔌 Socket: {:?}", backend.socket_name());
+    // Renderer
+    let renderer = match AxiomRenderer::new_headless().await {
+        Ok(r) => Arc::new(RwLock::new(r)),
+        Err(e) => {
+            warn!("⚠️ Failed to initialize headless renderer: {}", e);
+            // This is problematic if new() expects it.
+            anyhow::bail!("Failed to initialize renderer");
+        }
+    };
 
-    // Run the comprehensive demonstration
-    backend.demonstrate_protocol_simulation().await?;
+    let mut compositor = AxiomCompositor::new(
+        config.clone(),
+        cli.windowed,
+        workspace_manager.clone(),
+        effects_engine.clone(),
+        window_manager.clone(),
+        decoration_manager.clone(),
+        input_manager.clone(),
+        xwayland_manager.clone(),
+        ipc_server,
+        renderer.clone(),
+    )
+    .await?;
 
-    // Clean up demonstration
-    backend.demonstrate_client_cleanup().await?;
+    info!("✨ Axiom is ready! Where productivity meets beauty.");
 
-    info!("📊 Final status report:");
-    backend.report_status();
+    // Run demos if requested
+    if cli.demo {
+        info!("🎭 Running Phase 3 scrollable workspace demo...");
+        axiom::demo_workspace::run_comprehensive_test(&mut compositor).await?;
+        info!("🎆 Phase 3 demo completed!");
+    }
 
-    // Shutdown cleanly
-    backend.shutdown().await?;
+    if cli.effects_demo {
+        info!("🎨 Running Phase 4 visual effects demo...");
+        axiom::demo_phase4_effects::display_effects_capabilities(&compositor);
+        axiom::demo_phase4_effects::run_phase4_effects_demo(&mut compositor).await?;
+        info!("🎆 Phase 4 effects demo completed!");
+    }
 
-    info!("🎯 Phase 6.2 demo completed successfully!");
+    if cli.demo || cli.effects_demo {
+        info!("🎆 All demos completed! Continuing with normal compositor operation...");
+    }
+
+    // Main event loop
+    Box::pin(compositor.run()).await?;
+
+    info!("👋 Axiom compositor shutting down");
     Ok(())
-}
-
-/// Fallback version when experimental-smithay feature is not enabled
-#[cfg(not(feature = "experimental-smithay"))]
-async fn run_phase6_2_demo(_config: AxiomConfig, _windowed: bool) -> Result<()> {
-    anyhow::bail!("Phase 6.2 Smithay demo requires the 'experimental-smithay' feature to be enabled");
 }
 
 #[cfg(test)]

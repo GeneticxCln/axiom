@@ -253,12 +253,8 @@ impl AnimationController {
         self.cleanup_finished_animations();
 
         // Update animation count for performance monitoring
-        self.animation_count = self
-            .active_animations
-            .values()
-            .map(|anims| anims.len())
-            .sum::<usize>()
-            + self.spring_states.len();
+        self.animation_count =
+            self.active_animations.values().map(Vec::len).sum::<usize>() + self.spring_states.len();
 
         if !updates.is_empty() {
             debug!(
@@ -279,7 +275,7 @@ impl AnimationController {
     ) -> Result<()> {
         let global_speed = self.global_speed_multiplier;
 
-        for (window_id, animations) in self.active_animations.iter_mut() {
+        for (window_id, animations) in &mut self.active_animations {
             animations.retain_mut(|anim| {
                 if anim.paused {
                     return true;
@@ -292,7 +288,7 @@ impl AnimationController {
                     return true;
                 }
 
-                let elapsed = total_elapsed - anim.delay;
+                let elapsed = total_elapsed.saturating_sub(anim.delay);
                 let effective_duration = Duration::from_secs_f64(
                     anim.duration.as_secs_f64() / (anim.speed_multiplier * global_speed) as f64,
                 );
@@ -351,7 +347,7 @@ impl AnimationController {
     ) -> Result<()> {
         let dt = delta_time.as_secs_f32();
 
-        for ((window_id, property_name), spring_state) in self.spring_states.iter_mut() {
+        for ((window_id, property_name), spring_state) in &mut self.spring_states {
             if spring_state.settled {
                 continue;
             }
@@ -422,7 +418,7 @@ impl AnimationController {
                 continue;
             }
 
-            let elapsed_in_timeline = total_elapsed - timeline.start_delay;
+            let elapsed_in_timeline = total_elapsed.saturating_sub(timeline.start_delay);
             let progress =
                 elapsed_in_timeline.as_secs_f64() / timeline.total_duration.as_secs_f64();
 
@@ -463,9 +459,9 @@ impl AnimationController {
 
                     if !already_active {
                         // Start this event
-                        let window_id = event.target_window.unwrap_or(0); // 0 = global
-                                                                          // For now, just track that the event started
-                                                                          // In a full implementation, we'd manage these animations properly
+                        let _window_id = event.target_window.unwrap_or(0); // 0 = global
+                                                                           // For now, just track that the event started
+                                                                           // In a full implementation, we'd manage these animations properly
 
                         // This is a bit of a hack - we'd need to track this better
                         // For now, just create a dummy ActiveAnimation
@@ -516,9 +512,10 @@ impl AnimationController {
         progress: f32,
     ) -> Option<(AnimationProperty, AnimationValue)> {
         let easing_curve = match animation {
-            AnimationType::WindowOpen { .. } => EasingCurve::EaseOut,
             AnimationType::WindowClose { .. } => EasingCurve::EaseIn,
-            AnimationType::WindowMove { .. } => EasingCurve::EaseOut,
+            AnimationType::WindowOpen { .. } | AnimationType::WindowMove { .. } => {
+                EasingCurve::EaseOut
+            }
             _ => EasingCurve::Linear,
         };
 
@@ -584,7 +581,6 @@ impl AnimationController {
         let t = progress.clamp(0.0, 1.0);
 
         match curve {
-            EasingCurve::Linear => t,
             EasingCurve::EaseIn => t * t,
             EasingCurve::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
             EasingCurve::EaseInOut => {
@@ -688,7 +684,7 @@ impl AnimationController {
                     7.5625 * t * t + 0.9375
                 } else {
                     let t = t - 2.625 / 2.75;
-                    7.5625 * t * t + 0.984375
+                    7.5625 * t * t + 0.984_375
                 }
             }
             EasingCurve::ElasticOut => {
@@ -736,11 +732,11 @@ impl AnimationController {
     /// Get animation duration from type
     fn get_animation_duration(&self, animation: &AnimationType) -> Duration {
         match animation {
-            AnimationType::WindowOpen { duration, .. } => *duration,
-            AnimationType::WindowClose { duration, .. } => *duration,
-            AnimationType::WindowMove { duration, .. } => *duration,
-            AnimationType::WindowResize { duration, .. } => *duration,
-            AnimationType::WorkspaceTransition { duration, .. } => *duration,
+            AnimationType::WindowOpen { duration, .. }
+            | AnimationType::WindowClose { duration, .. }
+            | AnimationType::WindowMove { duration, .. }
+            | AnimationType::WindowResize { duration, .. }
+            | AnimationType::WorkspaceTransition { duration, .. } => *duration,
         }
     }
 

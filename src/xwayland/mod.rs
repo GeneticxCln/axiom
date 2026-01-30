@@ -1,4 +1,5 @@
-//! XWayland integration for X11 app compatibility
+//! XWayland integration manager
+#![allow(missing_docs)]
 //! Provides seamless integration of X11 applications in Wayland
 
 use crate::config::XWaylandConfig;
@@ -54,7 +55,7 @@ pub struct X11WindowInfo {
     pub created_at: Instant,
 }
 
-/// XWayland server state
+/// `XWayland` server state
 #[derive(Debug, Clone, PartialEq)]
 pub enum XWaylandServerState {
     /// Server is stopped
@@ -70,7 +71,7 @@ pub enum XWaylandServerState {
     Error(String),
 }
 
-/// XWayland statistics
+/// `XWayland` statistics
 #[derive(Debug, Clone, Default)]
 pub struct XWaylandStats {
     pub server_restarts: u32,
@@ -81,11 +82,11 @@ pub struct XWaylandStats {
 }
 
 impl XWaylandManager {
-    /// Create a new XWayland manager
+    /// Create a new `XWayland` manager
     pub async fn new(config: &XWaylandConfig) -> Result<Self> {
         info!("🔗 Initializing XWayland manager");
 
-        Ok(Self {
+        let mut manager = Self {
             config: config.clone(),
             xwayland_process: None,
             display_number: None,
@@ -93,7 +94,15 @@ impl XWaylandManager {
             server_state: XWaylandServerState::Stopped,
             stats: XWaylandStats::default(),
             start_time: Instant::now(),
-        })
+        };
+
+        if config.enabled {
+            if let Err(e) = manager.start_server().await {
+                log::error!("Failed to auto-start XWayland: {}", e);
+            }
+        }
+
+        Ok(manager)
     }
 
     pub async fn shutdown(&mut self) -> Result<()> {
@@ -119,7 +128,106 @@ impl XWaylandManager {
         Ok(())
     }
 
-    /// Stop the XWayland server
+    /// Start the `XWayland` server
+    pub async fn start_server(&mut self) -> Result<()> {
+        if self.xwayland_process.is_some() {
+            info!("⚠️ XWayland server already running");
+            return Ok(());
+        }
+
+        info!("🚀 Starting XWayland server...");
+        self.server_state = XWaylandServerState::Starting;
+
+        // 1. Find a free display number
+        let display = self.find_free_display()?;
+        info!("Found free X11 display: :{}", display);
+
+        // 2. Prepare XWayland command
+        let mut cmd = tokio::process::Command::new("Xwayland");
+        cmd.arg(format!(":{}", display))
+            .arg("-rootless") // Integrate with Wayland compositor
+            .arg("-terminate") // Terminate when last client disconnects
+            .arg("-core") // Core dump on fault
+            .arg("-wm") // Window manager mode
+            .arg("20"); // File descriptor for Wayland socket (simulated for now)
+
+        // 3. Spawn the process
+        match cmd.spawn() {
+            Ok(child) => {
+                self.xwayland_process = Some(child);
+                self.display_number = Some(display);
+
+                // 4. Wait for display to be ready
+                if self.wait_for_display(display).await {
+                    info!("✅ XWayland server started successfully on :{}", display);
+                    self.server_state = XWaylandServerState::Running;
+
+                    // 5. Set environment variable for this process and children
+                    std::env::set_var("DISPLAY", format!(":{}", display));
+                } else {
+                    log::error!("❌ Timeout waiting for XWayland display :{}", display);
+                    self.stop_server().await?;
+                    return Err(anyhow::anyhow!("Timed out waiting for XWayland to start"));
+                }
+            }
+            Err(e) => {
+                log::error!("❌ Failed to spawn XWayland: {}", e);
+                self.server_state = XWaylandServerState::Error(e.to_string());
+                return Err(anyhow::anyhow!("Failed to spawn XWayland: {}", e));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Find a free X11 display number
+    fn find_free_display(&self) -> Result<u32> {
+        // If config specifies a display, try that first
+        if let Some(display) = self.config.display {
+            if !self.is_display_locked(display) {
+                return Ok(display);
+            }
+            log::warn!(
+                "Configured display :{} is in use, searching for others...",
+                display
+            );
+        }
+
+        // Search for free display from 0 to 32
+        for i in 0..32 {
+            if !self.is_display_locked(i) {
+                return Ok(i);
+            }
+        }
+
+        Err(anyhow::anyhow!("No free X11 displays found"))
+    }
+
+    /// Check if a display number is locked/in-use
+    fn is_display_locked(&self, display: u32) -> bool {
+        let lock_path = format!("/tmp/.X{}-lock", display);
+        let socket_path = format!("/tmp/.X11-unix/X{}", display);
+
+        std::path::Path::new(&lock_path).exists() || std::path::Path::new(&socket_path).exists()
+    }
+
+    /// Wait for `XWayland` display socket to appear
+    async fn wait_for_display(&self, display: u32) -> bool {
+        let socket_path = std::path::PathBuf::from(format!("/tmp/.X11-unix/X{}", display));
+        let start = Instant::now();
+        let timeout = Duration::from_secs(5); // 5 second timeout
+
+        while start.elapsed() < timeout {
+            if socket_path.exists() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        false
+    }
+
+    /// Stop the `XWayland` server
     pub async fn stop_server(&mut self) -> Result<()> {
         if let Some(mut process) = self.xwayland_process.take() {
             info!("🛑 Stopping XWayland server");
@@ -135,9 +243,15 @@ impl XWaylandManager {
             self.server_state = XWaylandServerState::Stopped;
             self.display_number = None;
 
+            // Clean up env var
+            std::env::remove_var("DISPLAY");
+
             info!("✅ XWayland server stopped");
         }
 
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

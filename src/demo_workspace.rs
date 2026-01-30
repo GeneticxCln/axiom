@@ -43,7 +43,7 @@ pub async fn demo_scrollable_workspaces(compositor: &mut AxiomCompositor) -> Res
     let window4 = compositor.add_window("Calculator".to_string());
     let window5 = compositor.add_window("Files".to_string());
 
-    let (column, position, count, scrolling) = compositor.get_workspace_info();
+    let (column, position, count, _scrolling) = compositor.get_workspace_info();
     info!(
         "🎯 After scroll right: Column {}, Position {:.1}, {} active columns",
         column, position, count
@@ -84,7 +84,7 @@ pub async fn demo_scrollable_workspaces(compositor: &mut AxiomCompositor) -> Res
 
     time::sleep(Duration::from_millis(200)).await;
 
-    let (column, position, count, scrolling) = compositor.get_workspace_info();
+    let (column, position, count, _scrolling) = compositor.get_workspace_info();
     info!(
         "🎯 After cleanup: Column {}, Position {:.1}, {} active columns",
         column, position, count

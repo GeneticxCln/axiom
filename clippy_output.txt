@@ -1,0 +1,999 @@
+    Checking axiom v0.1.0 (/home/quinton/axiom)
+warning: unused import: `parking_lot::RwLock`
+  --> src/compositor.rs:27:5
+   |
+27 | use parking_lot::RwLock;
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::os::unix::net::SocketAddr`
+   --> src/ipc/mod.rs:254:37
+    |
+254 | ...                   use std::os::unix::net::SocketAddr;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `window_id`
+   --> src/effects/animations.rs:466:29
+    |
+466 |                         let window_id = event.target_window.unwrap_or(0); // 0 = global
+    |                             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_window_id`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `idle_b`
+   --> src/ipc/mod.rs:717:27
+    |
+717 |                 (_, Some((idle_b, total_b))) => {
+    |                           ^^^^^^ help: if this is intentional, prefix it with an underscore: `_idle_b`
+
+warning: unused variable: `total_b`
+   --> src/ipc/mod.rs:717:35
+    |
+717 |                 (_, Some((idle_b, total_b))) => {
+    |                                   ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_total_b`
+
+warning: this function has too many arguments (10/7)
+  --> src/compositor.rs:57:5
+   |
+57 | /     pub async fn new(
+58 | |         config: AxiomConfig,
+59 | |         windowed: bool,
+60 | |         workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
+...  |
+67 | |         renderer: Arc<parking_lot::RwLock<AxiomRenderer>>,
+68 | |     ) -> Result<Self> {
+   | |_____________________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#too_many_arguments
+   = note: `#[warn(clippy::too_many_arguments)]` on by default
+
+warning: this `MutexGuard` is held across an await point
+   --> src/compositor.rs:444:13
+    |
+444 |             xwayland.write().shutdown().await?;
+    |             ^^^^^^^^^^^^^^^^
+    |
+    = help: consider using an async-aware `Mutex` type or ensuring the `MutexGuard` is dropped before calling `await`
+note: these are all the await points this lock is held through
+   --> src/compositor.rs:444:41
+    |
+444 |             xwayland.write().shutdown().await?;
+    |                                         ^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#await_holding_lock
+    = note: `#[warn(clippy::await_holding_lock)]` on by default
+
+error: approximate value of `f{32, 64}::consts::FRAC_1_PI` found
+   --> src/decoration.rs:159:52
+    |
+159 |             border_color_unfocused: [0.216, 0.255, 0.318, 1.0], // Gray (#374151)
+    |                                                    ^^^^^
+    |
+    = help: consider using the constant directly
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#approx_constant
+    = note: `#[deny(clippy::approx_constant)]` on by default
+
+error: approximate value of `f{32, 64}::consts::FRAC_1_PI` found
+   --> src/decoration.rs:183:43
+    |
+183 |                 .unwrap_or([0.216, 0.255, 0.318, 1.0]), // Default gray
+    |                                           ^^^^^
+    |
+    = help: consider using the constant directly
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#approx_constant
+
+warning: all variants have the same postfix: `Shadow`
+  --> src/effects/shadow.rs:25:1
+   |
+25 | / pub enum ShadowType {
+26 | |     /// Standard drop shadow
+27 | |     DropShadow {
+28 | |         offset: Vector2<f32>,
+...  |
+46 | |     },
+47 | | }
+   | |_^
+   |
+   = help: remove the postfixes and use full paths to the variants instead of glob imports
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#enum_variant_names
+   = note: `#[warn(clippy::enum_variant_names)]` on by default
+
+warning: try not to call a closure in the expression where it is declared
+   --> src/ipc/mod.rs:705:42
+    |
+705 |           let (cpu_percent, mem_used_mb) = (|| {
+    |  __________________________________________^
+706 | |             let current = read_cpu_times();
+707 | |             let cpu = match (self.last_cpu_times, current) {
+708 | |                 (Some((idle_a, total_a)), Some((idle_b, total_b))) => {
+...   |
+741 | |             (cpu, used_mb)
+742 | |         })();
+    | |____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#redundant_closure_call
+    = note: `#[warn(clippy::redundant_closure_call)]` on by default
+help: try doing something like
+    |
+705 ~         let (cpu_percent, mem_used_mb) = {
+706 +             let current = read_cpu_times();
+707 +             let cpu = match (self.last_cpu_times, current) {
+708 +                 (Some((idle_a, total_a)), Some((idle_b, total_b))) => {
+709 +                     let idle_delta = idle_b.saturating_sub(idle_a) as f64;
+710 +                     let total_delta = total_b.saturating_sub(total_a) as f64;
+711 +                     if total_delta > 0.0 {
+712 +                         ((1.0 - idle_delta / total_delta) * 100.0) as f32
+713 +                     } else {
+714 +                         0.0
+715 +                     }
+716 +                 }
+717 +                 (_, Some((idle_b, total_b))) => {
+718 +                     // First sample; store and return 0 for now
+719 +                     0.0
+720 +                 }
+721 +                 _ => 0.0,
+722 +             };
+723 + 
+724 +             // Memory usage from /proc/meminfo
+725 +             let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+726 +             let mut mem_total_kb: u64 = 0;
+727 +             let mut mem_available_kb: u64 = 0;
+728 +             for line in meminfo.lines() {
+729 +                 if line.starts_with("MemTotal:") {
+730 +                     if let Some(val) = line.split_whitespace().nth(1) {
+731 +                         mem_total_kb = val.parse().unwrap_or(0);
+732 +                     }
+733 +                 } else if line.starts_with("MemAvailable:") {
+734 +                     if let Some(val) = line.split_whitespace().nth(1) {
+735 +                         mem_available_kb = val.parse().unwrap_or(0);
+736 +                     }
+737 +                 }
+738 +             }
+739 +             let used_kb = mem_total_kb.saturating_sub(mem_available_kb) as f32;
+740 +             let used_mb = used_kb / 1024.0;
+741 +             (cpu, used_mb)
+742 ~         };
+    |
+
+warning: clamp-like pattern without using clamp function
+   --> src/workspace/mod.rs:350:37
+    |
+350 |                 let friction: f64 = self.config.momentum_friction.max(0.0).min(0.9999);
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with clamp: `self.config.momentum_friction.clamp(0.0, 0.9999)`
+    |
+    = note: clamp will panic if max < min, min.is_nan(), or max.is_nan()
+    = note: clamp returns NaN if the input is NaN
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#manual_clamp
+    = note: `#[warn(clippy::manual_clamp)]` on by default
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+  --> src/renderer/mod.rs:84:19
+   |
+84 |     placeholders: HashMap<u64, ((f32, f32), (f32, f32), f32)>,
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#type_complexity
+   = note: `#[warn(clippy::type_complexity)]` on by default
+
+warning: unnecessary closure used to substitute value for `Option::None`
+   --> src/renderer/mod.rs:639:22
+    |
+639 |           let config = self.surfaces.values().next().map(|(_, c)| c).or_else(|| {
+    |  ______________________^
+640 | |              // Fallback if we can't find config from map (though we should have it)
+641 | |              // This can happen if called on headless or if surface was added ad-hoc
+642 | |              None
+643 | |         });
+    | |__________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.93.0/index.html#unnecessary_lazy_evaluations
+    = note: `#[warn(clippy::unnecessary_lazy_evaluations)]` on by default
+help: use `or` instead
+    |
+639 ~         let config = self.surfaces.values().next().map(|(_, c)| c).or({
+640 +              // Fallback if we can't find config from map (though we should have it)
+641 +              // This can happen if called on headless or if surface was added ad-hoc
+642 +              None
+643 ~         });
+    |
+
+warning: missing documentation for a struct
+  --> src/config/mod.rs:98:1
+   |
+98 | pub struct AnimationConfig {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> src/lib.rs:50:9
+   |
+50 | #![warn(missing_docs, rust_2018_idioms)]
+   |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/config/mod.rs:116:1
+    |
+116 | pub struct BlurConfig {
+    | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/config/mod.rs:131:1
+    |
+131 | pub struct RoundedCornersConfig {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/config/mod.rs:143:1
+    |
+143 | pub struct ShadowConfig {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/decoration.rs:50:5
+   |
+50 |     pub close: ButtonState,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/decoration.rs:51:5
+   |
+51 |     pub minimize: ButtonState,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/decoration.rs:52:5
+   |
+52 |     pub maximize: ButtonState,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/decoration.rs:58:5
+   |
+58 |     pub visible: bool,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/decoration.rs:59:5
+   |
+59 |     pub enabled: bool,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/decoration.rs:60:5
+   |
+60 |     pub hovered: bool,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/decoration.rs:61:5
+   |
+61 |     pub pressed: bool,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/decoration.rs:62:5
+   |
+62 |     pub bounds: Rectangle,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/decoration.rs:100:5
+    |
+100 |     pub button_hovered: [f32; 4],
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/decoration.rs:101:5
+    |
+101 |     pub button_pressed: [f32; 4],
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/decoration.rs:105:5
+    |
+105 |     pub close_hovered: [f32; 4],
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/decoration.rs:106:5
+    |
+106 |     pub close_pressed: [f32; 4],
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/decoration.rs:174:5
+    |
+174 |     pub fn new(config: &WindowConfig) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:643:5
+    |
+643 |     Close,
+    |     ^^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:644:5
+    |
+644 |     Minimize,
+    |     ^^^^^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:645:5
+    |
+645 |     ToggleMaximize,
+    |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:646:5
+    |
+646 |     StartMove,
+    |     ^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:647:5
+    |
+647 |     StartResize(ResizeEdge),
+    |     ^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:653:5
+    |
+653 |     Top,
+    |     ^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:654:5
+    |
+654 |     Bottom,
+    |     ^^^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:655:5
+    |
+655 |     Left,
+    |     ^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:656:5
+    |
+656 |     Right,
+    |     ^^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:657:5
+    |
+657 |     TopLeft,
+    |     ^^^^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:658:5
+    |
+658 |     TopRight,
+    |     ^^^^^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:659:5
+    |
+659 |     BottomLeft,
+    |     ^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:660:5
+    |
+660 |     BottomRight,
+    |     ^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:666:5
+    |
+666 |     None,
+    |     ^^^^
+
+warning: missing documentation for a variant
+   --> src/decoration.rs:667:5
+    |
+667 |     ServerSide {
+    |     ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/decoration.rs:668:9
+    |
+668 |         titlebar_rect: Rectangle,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/decoration.rs:669:9
+    |
+669 |         titlebar_bg: [f32; 4],
+    |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/decoration.rs:670:9
+    |
+670 |         border_width: u32,
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/decoration.rs:671:9
+    |
+671 |         border_color: [f32; 4],
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/decoration.rs:672:9
+    |
+672 |         corner_radius: f32,
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/decoration.rs:673:9
+    |
+673 |         title: String,
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/decoration.rs:674:9
+    |
+674 |         text_color: [f32; 4],
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/decoration.rs:675:9
+    |
+675 |         font_size: f32,
+    |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> src/decoration.rs:676:9
+    |
+676 |         buttons: TitlebarButtons,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/decoration.rs:682:5
+    |
+682 |     pub fn contains_point(&self, x: i32, y: i32) -> bool {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:32:9
+   |
+32 |         timestamp: u64,
+   |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:33:9
+   |
+33 |         cpu_usage: f32,
+   |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:34:9
+   |
+34 |         memory_usage: f32,
+   |         ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:35:9
+   |
+35 |         gpu_usage: f32,
+   |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:36:9
+   |
+36 |         frame_time: f32,
+   |         ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:37:9
+   |
+37 |         active_windows: u32,
+   |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:38:9
+   |
+38 |         current_workspace: i32,
+   |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:43:9
+   |
+43 |         timestamp: u64,
+   |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:44:9
+   |
+44 |         event_type: String,
+   |         ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:45:9
+   |
+45 |         details: serde_json::Value,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:50:9
+   |
+50 |         timestamp: u64,
+   |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:51:9
+   |
+51 |         component: String,
+   |         ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:52:9
+   |
+52 |         old_state: String,
+   |         ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:53:9
+   |
+53 |         new_state: String,
+   |         ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:58:9
+   |
+58 |         key: String,
+   |         ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:59:9
+   |
+59 |         value: serde_json::Value,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:64:9
+   |
+64 |         version: String,
+   |         ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:65:9
+   |
+65 |         capabilities: Vec<String>,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:75:9
+   |
+75 |         changes: std::collections::HashMap<String, serde_json::Value>,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:76:9
+   |
+76 |         reason: String,
+   |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:80:17
+   |
+80 |     GetConfig { key: String },
+   |                 ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:84:9
+   |
+84 |         key: String,
+   |         ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:85:9
+   |
+85 |         value: serde_json::Value,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:90:9
+   |
+90 |         action: String,
+   |         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:91:9
+   |
+91 |         parameters: serde_json::Value,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:96:9
+   |
+96 |         enabled: Option<bool>,
+   |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:97:9
+   |
+97 |         blur_radius: Option<f32>,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/ipc/mod.rs:98:9
+   |
+98 |         animation_speed: Option<f32>,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/window/mod.rs:15:1
+   |
+15 | pub struct BackendWindow {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/window/mod.rs:16:5
+   |
+16 |     pub id: u64,
+   |     ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/window/mod.rs:17:5
+   |
+17 |     pub title: String,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/window/mod.rs:18:5
+   |
+18 |     pub position: (i32, i32),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/window/mod.rs:19:5
+   |
+19 |     pub size: (u32, u32),
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/window/mod.rs:24:5
+   |
+24 |     pub fn new(id: u64, title: String) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/window/mod.rs:27:5
+   |
+27 |     pub fn set_position(&mut self, x: i32, y: i32) { self.position = (x, y); }
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/window/mod.rs:28:5
+   |
+28 |     pub fn set_size(&mut self, width: u32, height: u32) { self.size = (width, height); }
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/window/mod.rs:34:5
+   |
+34 |     pub x: i32,
+   |     ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/window/mod.rs:35:5
+   |
+35 |     pub y: i32,
+   |     ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/window/mod.rs:36:5
+   |
+36 |     pub width: u32,
+   |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/window/mod.rs:37:5
+   |
+37 |     pub height: u32,
+   |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/window/mod.rs:42:5
+   |
+42 |     pub fn from_loc_and_size((x, y): (i32, i32), (width, height): (u32, u32)) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> src/window/mod.rs:66:1
+   |
+66 | pub struct WindowProperties {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> src/window/mod.rs:107:1
+    |
+107 | pub struct WindowManager {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/window/mod.rs:122:5
+    |
+122 |     pub fn new(config: &WindowConfig) -> Result<Self> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/window/mod.rs:277:5
+    |
+277 |     pub fn shutdown(&mut self) -> Result<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> src/workspace/mod.rs:38:5
+   |
+38 |     pub fn new(index: i32, position: f64) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/workspace/mod.rs:48:5
+   |
+48 |     pub fn add_window(&mut self, window_id: u64) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/workspace/mod.rs:55:5
+   |
+55 |     pub fn remove_window(&mut self, window_id: u64) -> bool {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> src/workspace/mod.rs:65:5
+   |
+65 |     pub fn is_empty(&self) -> bool {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> src/workspace/mod.rs:73:5
+   |
+73 |     Idle,
+   |     ^^^^
+
+warning: missing documentation for a variant
+  --> src/workspace/mod.rs:74:5
+   |
+74 |     Scrolling {
+   |     ^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/workspace/mod.rs:75:9
+   |
+75 |         start_time: Instant,
+   |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/workspace/mod.rs:76:9
+   |
+76 |         start_position: f64,
+   |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/workspace/mod.rs:77:9
+   |
+77 |         target_position: f64,
+   |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/workspace/mod.rs:78:9
+   |
+78 |         duration: Duration,
+   |         ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> src/workspace/mod.rs:80:5
+   |
+80 |     Momentum {
+   |     ^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/workspace/mod.rs:81:9
+   |
+81 |         start_time: Instant,
+   |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/workspace/mod.rs:82:9
+   |
+82 |         start_position: f64,
+   |         ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/workspace/mod.rs:83:9
+   |
+83 |         velocity: f64,
+   |         ^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/workspace/mod.rs:122:5
+    |
+122 |     pub fn new(config: &WorkspaceConfig) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> src/workspace/mod.rs:455:5
+    |
+455 |     pub fn new(config: &WorkspaceConfig) -> Result<Self> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:489:5
+    |
+489 |     pub fn window_exists(&self, window_id: u64) -> bool {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:493:5
+    |
+493 |     pub fn is_infinite_scroll_enabled(&self) -> bool {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:497:5
+    |
+497 |     pub fn set_viewport_size(&mut self, width: f64, height: f64) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:501:5
+    |
+501 |     pub fn add_window_to_column(&mut self, window_id: u64, column_index: i32) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:506:5
+    |
+506 |     pub fn get_focused_column_mut(&mut self) -> &mut WorkspaceColumn {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:510:5
+    |
+510 |     pub fn get_focused_column_opt(&self) -> Option<&WorkspaceColumn> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:514:5
+    |
+514 |     pub fn start_momentum_scroll(&mut self, velocity: f64) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:518:5
+    |
+518 |     pub fn scroll_left(&mut self) { self.active_tape_mut().scroll_left(); }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:519:5
+    |
+519 |     pub fn scroll_right(&mut self) { self.active_tape_mut().scroll_right(); }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:521:5
+    |
+521 |     pub fn add_window(&mut self, window_id: u64) { self.active_tape_mut().add_window(window_id); }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:523:5
+    |
+523 |     pub fn remove_window(&mut self, window_id: u64) -> Option<i32> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:533:5
+    |
+533 |     pub fn move_window_left(&mut self, window_id: u64) -> bool { self.active_tape_mut().move_window_left(window_id) }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:534:5
+    |
+534 |     pub fn move_window_right(&mut self, window_id: u64) -> bool { self.active_tape_mut().move_window_right(window_id) }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:536:5
+    |
+536 |     pub fn get_focused_column_windows(&self) -> Vec<u64> { self.active_tape().get_focused_column_windows() }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:538:5
+    |
+538 |     pub fn update_animations(&mut self) -> Result<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:545:5
+    |
+545 |     pub fn calculate_workspace_layouts(&self) -> HashMap<u64, Rectangle> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:607:5
+    |
+607 |     pub fn focused_column_index(&self) -> i32 { self.active_tape().focused_column }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:608:5
+    |
+608 |     pub fn current_position(&self) -> f64 { self.active_tape().current_position }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:609:5
+    |
+609 |     pub fn active_column_count(&self) -> usize { self.active_tape().columns.len() }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:610:5
+    |
+610 |     pub fn is_scrolling(&self) -> bool { matches!(self.active_tape().scroll_state, ScrollState::Scrolling { .. } | ScrollState::Momentum { .. }) }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:611:5
+    |
+611 |     pub fn scroll_progress(&self) -> f64 { 
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/workspace/mod.rs:621:5
+    |
+621 |     pub fn shutdown(&mut self) -> Result<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/xwayland/mod.rs:76:5
+   |
+76 |     pub server_restarts: u32,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/xwayland/mod.rs:77:5
+   |
+77 |     pub x11_windows_created: u64,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/xwayland/mod.rs:78:5
+   |
+78 |     pub active_x11_windows: usize,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/xwayland/mod.rs:79:5
+   |
+79 |     pub uptime: Duration,
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> src/xwayland/mod.rs:80:5
+   |
+80 |     pub memory_usage: Option<u64>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> src/xwayland/mod.rs:107:5
+    |
+107 |     pub async fn shutdown(&mut self) -> Result<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a function
+  --> src/renderer/mod.rs:87:1
+   |
+87 | pub fn push_placeholder_quad(id: u64, position: (f32, f32), size: (f32, f32), opacity: f32) {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `axiom` (lib) generated 144 warnings
+error: could not compile `axiom` (lib) due to 2 previous errors; 144 warnings emitted
