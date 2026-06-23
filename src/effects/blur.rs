@@ -5,6 +5,7 @@
 //! - Background blur (behind windows)
 //! - Window content blur
 //! - Bokeh blur for special effects
+#![allow(dead_code)]
 
 use anyhow::Result;
 use cgmath::Vector2;
@@ -280,10 +281,15 @@ impl BlurRenderer {
         self.ensure_intermediate_texture(texture_size)?;
 
         // First pass: Horizontal blur (input -> intermediate)
+        let intermediate_view = self
+            .intermediate_texture_view
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Intermediate blur texture not initialized"))?;
+
         self.apply_horizontal_blur(
             encoder,
             input_texture,
-            self.intermediate_texture_view.as_ref().unwrap(),
+            intermediate_view,
             texture_size,
             effective_radius,
             effective_intensity,
@@ -292,7 +298,7 @@ impl BlurRenderer {
         // Second pass: Vertical blur (intermediate -> output)
         self.apply_vertical_blur(
             encoder,
-            self.intermediate_texture_view.as_ref().unwrap(),
+            intermediate_view,
             output_texture,
             texture_size,
             effective_radius,
@@ -336,13 +342,14 @@ impl BlurRenderer {
         );
 
         // Create bind group for this pass
+        let h_pipeline = self
+            .horizontal_blur_pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Horizontal blur pipeline not initialized"))?;
+
         let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Horizontal Blur Bind Group"),
-            layout: &self
-                .horizontal_blur_pipeline
-                .as_ref()
-                .unwrap()
-                .get_bind_group_layout(0),
+            layout: &h_pipeline.get_bind_group_layout(0),
             entries: &[
                 BindGroupEntry {
                     binding: 0,
@@ -375,7 +382,7 @@ impl BlurRenderer {
             occlusion_query_set: None,
         });
 
-        render_pass.set_pipeline(self.horizontal_blur_pipeline.as_ref().unwrap());
+        render_pass.set_pipeline(h_pipeline);
         render_pass.set_bind_group(0, &bind_group, &[]);
         render_pass.draw(0..3, 0..1); // Full-screen triangle
 
@@ -407,13 +414,14 @@ impl BlurRenderer {
         );
 
         // Create bind group for this pass
+        let v_pipeline = self
+            .vertical_blur_pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vertical blur pipeline not initialized"))?;
+
         let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Vertical Blur Bind Group"),
-            layout: &self
-                .vertical_blur_pipeline
-                .as_ref()
-                .unwrap()
-                .get_bind_group_layout(0),
+            layout: &v_pipeline.get_bind_group_layout(0),
             entries: &[
                 BindGroupEntry {
                     binding: 0,
@@ -446,7 +454,7 @@ impl BlurRenderer {
             occlusion_query_set: None,
         });
 
-        render_pass.set_pipeline(self.vertical_blur_pipeline.as_ref().unwrap());
+        render_pass.set_pipeline(v_pipeline);
         render_pass.set_bind_group(0, &bind_group, &[]);
         render_pass.draw(0..3, 0..1); // Full-screen triangle
 

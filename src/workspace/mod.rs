@@ -170,7 +170,7 @@ impl WorkspaceTape {
             );
             self.columns.insert(index, column);
         }
-        self.columns.get_mut(&index).unwrap()
+        self.columns.get_mut(&index).expect("column was just inserted")
     }
 
     /// Get the current focused column

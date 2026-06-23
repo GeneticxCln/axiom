@@ -1,24 +1,4 @@
 //! # Axiom - Hybrid Wayland Compositor
-#![allow(missing_docs)]
-#![allow(clippy::uninlined_format_args)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::doc_markdown)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::unused_self)]
-#![allow(clippy::cast_lossless)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::needless_pass_by_value)]
-#![allow(clippy::unnecessary_wraps)]
-#![allow(clippy::float_cmp)]
-#![allow(clippy::unnecessary_debug_formatting)]
-#![allow(clippy::ignored_unit_patterns)]
-#![allow(clippy::manual_let_else)]
-#![allow(clippy::single_match_else)]
 //!
 //! The first Wayland compositor combining niri's scrollable workspace innovation
 //! with Hyprland's visual effects system.
@@ -225,7 +205,7 @@ mod tests {
     #[test]
     fn test_cli_parsing() {
         // Test basic CLI parsing
-        let cli = Cli::try_parse_from(&["axiom"]).unwrap();
+        let cli = Cli::try_parse_from(&["axiom"]).expect("CLI parse should succeed");
         assert!(!cli.debug);
         assert!(!cli.windowed);
         assert!(!cli.no_effects);
@@ -233,7 +213,7 @@ mod tests {
 
     #[test]
     fn test_cli_flags() {
-        let cli = Cli::try_parse_from(&["axiom", "--debug", "--windowed", "--no-effects"]).unwrap();
+        let cli = Cli::try_parse_from(&["axiom", "--debug", "--windowed", "--no-effects"]).expect("CLI parse should succeed");
         assert!(cli.debug);
         assert!(cli.windowed);
         assert!(cli.no_effects);

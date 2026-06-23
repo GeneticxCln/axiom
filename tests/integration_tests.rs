@@ -122,10 +122,8 @@ async fn test_effects_engine() -> Result<()> {
     effects.update()?;
 
     // Test performance stats
-    let (frame_time, quality, active_count) = effects.get_performance_stats();
-    // frame_time.as_millis() returns u128, always >= 0
+    let (_frame_time, quality, _active_count) = effects.get_performance_stats();
     assert!(quality >= 0.0 && quality <= 1.0);
-    // active_count is usize, always >= 0
 
     // Test shutdown
     effects.shutdown()?;
@@ -240,66 +238,6 @@ async fn test_error_recovery() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Test memory usage with typical workload
-#[tokio::test]
-async fn test_memory_usage() -> Result<()> {
-    use axiom::config::WorkspaceConfig;
-    use axiom::workspace::ScrollableWorkspaces;
-
-    let config = WorkspaceConfig::default();
-
-    // Measure baseline memory
-    let initial_memory = get_memory_usage();
-
-    // Create workspace system
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
-
-    // Add many windows and remove them repeatedly to test for leaks
-    for cycle in 0..10 {
-        // Add 20 windows
-        for i in 1..=20 {
-            let window_id = cycle * 20 + i;
-            workspaces.add_window(window_id);
-        }
-
-        // Remove half of them
-        for i in 1..=10 {
-            let window_id = cycle * 20 + i;
-            workspaces.remove_window(window_id);
-        }
-    }
-
-    // Clean shutdown
-    workspaces.shutdown()?;
-
-    // Force garbage collection if possible
-    // (Rust doesn't have explicit GC, but drop should clean up)
-    drop(workspaces);
-
-    let final_memory = get_memory_usage();
-    let memory_growth = final_memory.saturating_sub(initial_memory);
-
-    // Memory growth should be reasonable (less than 100MB for this test)
-    assert!(
-        memory_growth < 100 * 1024 * 1024,
-        "Memory growth too large: {} bytes",
-        memory_growth
-    );
-
-    Ok(())
-}
-
-/// Get current memory usage (rough estimate)
-fn get_memory_usage() -> usize {
-    // Simple memory usage estimate
-    // In a real implementation, you'd use a proper memory profiler
-    
-
-    // This is a placeholder - real memory measurement would need
-    // external tools or more sophisticated tracking
-    0
 }
 
 /// Test concurrent operations

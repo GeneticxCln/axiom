@@ -16,6 +16,7 @@ use super::{AnimationType, EasingCurve};
 
 /// Animation keyframe for property interpolation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Keyframe<T> {
     pub time: f32,           // Time in seconds (0.0 to 1.0 for normalized)
     pub value: T,            // Value at this keyframe
@@ -45,16 +46,19 @@ impl Default for SpringParams {
 /// Animation timeline for complex sequences
 #[derive(Debug, Clone)]
 pub struct AnimationTimeline {
+    #[allow(dead_code)]
     pub name: String,
     pub total_duration: Duration,
     pub repeat_count: Option<u32>, // None = infinite
     pub start_delay: Duration,
+    #[allow(dead_code)]
     pub end_delay: Duration,
     pub keyframes: Vec<TimelineEvent>,
 }
 
 /// Event in an animation timeline
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TimelineEvent {
     pub start_time: f32, // 0.0 to 1.0 (percentage of total duration)
     pub duration: f32,   // Duration as percentage of total
@@ -113,6 +117,7 @@ struct SpringState {
     target_value: f32,
     velocity: f32,
     params: SpringParams,
+    #[allow(dead_code)]
     last_update: Instant,
     settled: bool,
 }
@@ -205,6 +210,7 @@ impl AnimationController {
     }
 
     /// Create and start an animation timeline
+    #[allow(dead_code)]
     pub fn start_timeline(&mut self, timeline: AnimationTimeline) -> Result<()> {
         let timeline_name = timeline.name.clone();
 
@@ -595,6 +601,7 @@ impl AnimationController {
     }
 
     /// Calculate animation value based on type and progress
+    #[allow(dead_code)]
     fn calculate_animation_value(
         &self,
         animation: &AnimationType,
@@ -659,6 +666,7 @@ impl AnimationController {
     }
 
     /// Apply easing curve to progress value
+    #[allow(dead_code)]
     fn apply_easing(&self, progress: f32, curve: &EasingCurve) -> f32 {
         let t = progress.clamp(0.0, 1.0);
 
@@ -741,6 +749,7 @@ impl AnimationController {
     }
 
     /// Get human-readable animation name
+    #[allow(dead_code)]
     fn get_animation_name(&self, animation: &AnimationType) -> &'static str {
         match animation {
             AnimationType::WindowOpen { .. } => "Window Open",
@@ -752,6 +761,7 @@ impl AnimationController {
     }
 
     /// Pause/unpause all animations
+    #[allow(dead_code)]
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
         if paused {
@@ -762,6 +772,7 @@ impl AnimationController {
     }
 
     /// Set global speed multiplier
+    #[allow(dead_code)]
     pub fn set_global_speed(&mut self, speed: f32) {
         self.global_speed_multiplier = speed.max(0.1);
         info!(
@@ -795,11 +806,16 @@ pub struct AnimationUpdate {
 pub enum AnimationProperty {
     Transform,
     Position,
+    #[allow(dead_code)]
     Size,
+    #[allow(dead_code)]
     Opacity,
+    #[allow(dead_code)]
     Rotation,
+    #[allow(dead_code)]
     Scale,
     SpringProperty(String),
+    #[allow(dead_code)]
     Finished(u64), // Animation ID that finished
 }
 
@@ -807,13 +823,17 @@ pub enum AnimationProperty {
 #[derive(Debug, Clone)]
 pub enum AnimationValue {
     Float(f32),
+    #[allow(dead_code)]
     Vector2(Vector2<f32>),
+    #[allow(dead_code)]
     Vector3(Vector3<f32>),
+    #[allow(dead_code)]
     Vector4(Vector4<f32>),
     Position(Vector2<f32>),
     Transform {
         scale: Vector2<f32>,
         opacity: f32,
+        #[allow(dead_code)]
         rotation: f32,
     },
     None,

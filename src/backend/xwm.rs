@@ -61,7 +61,9 @@ pub enum XwmEvent {
 
 pub struct AxiomXwm {
     conn: Rc<RustConnection>,
+    #[allow(dead_code)]
     screen_num: usize,
+    #[allow(dead_code)]
     root: Window,
     windows: HashMap<Window, X11WindowData>,
     pub atoms: Atoms,
@@ -217,6 +219,7 @@ impl AxiomXwm {
         // For now, identifying that X11 selection changed is enough to log.
     }
 
+    #[allow(dead_code)]
     fn handle_selection_request(
         &mut self,
         event: x11rb::protocol::xproto::SelectionRequestEvent,

@@ -35,6 +35,7 @@ pub struct AxiomCompositor {
     workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
     effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
     window_manager: Arc<parking_lot::RwLock<WindowManager>>,
+    #[allow(dead_code)]
     decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
     input_manager: Arc<parking_lot::RwLock<InputManager>>,
     xwayland_manager: Option<Arc<AsyncRwLock<XWaylandManager>>>,
@@ -44,7 +45,7 @@ pub struct AxiomCompositor {
     // Renderer
     renderer: Arc<parking_lot::RwLock<AxiomRenderer>>,
 
-    // Experimental Smithay Backend
+    // Smithay Backend
     smithay_backend: AxiomSmithayBackendReal,
 
     // Performance optimization: Persistent buffers for rendering
@@ -101,6 +102,9 @@ impl AxiomCompositor {
 
         info!("✅ All subsystems initialized successfully");
 
+        // Wire effects engine into renderer for future GPU shadow/blur post-processing
+        renderer.write().set_effects_engine(effects_engine.clone());
+
         Ok(Self {
             config,
             windowed,
@@ -151,7 +155,6 @@ impl AxiomCompositor {
         Ok(())
     }
 
-    /// Phase 3: Process all pending compositor events with real input handling
     /// Process all pending compositor events with real input handling
     async fn process_events(&mut self) -> Result<()> {
         // Process backend events (Wayland, input devices)
@@ -169,115 +172,14 @@ impl AxiomCompositor {
             }
         }
 
-        // Phase 3: Simulate input processing for demonstration
-        // In a real implementation, this would receive events from Smithay
-        self.process_simulated_input_events().await?;
-
-        Ok(())
-    }
-
-    /// Phase 3: Simulate input events for testing (until real Smithay integration)
-    async fn process_simulated_input_events(&mut self) -> Result<()> {
-        // This is a placeholder that simulates occasional input events
-        // for testing purposes. Real implementation would receive these from Smithay.
-
-        use crate::input::InputEvent;
-
-        // Simulate a scroll event occasionally (for demo purposes)
-        if rand::random::<f32>() < 0.001 {
-            // Very low probability
-            let event = InputEvent::Scroll {
-                x: 100.0,
-                y: 100.0,
-                delta_x: if rand::random::<bool>() { 10.0 } else { -10.0 },
-                delta_y: 0.0,
-            };
-
-            let actions = self.input_manager.write().process_input_event(event);
-            for action in actions {
-                self.handle_compositor_action(action).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Phase 3: Handle compositor actions triggered by input events
-    async fn handle_compositor_action(
-        &mut self,
-        action: crate::input::CompositorAction,
-    ) -> Result<()> {
-        use crate::input::CompositorAction;
-
-        match action {
-            CompositorAction::ScrollWorkspaceLeft => {
-                debug!("🎨 Input triggered: Scroll workspace left");
-                self.scroll_workspace_left();
-            }
-            CompositorAction::ScrollWorkspaceRight => {
-                debug!("🎨 Input triggered: Scroll workspace right");
-                self.scroll_workspace_right();
-            }
-            CompositorAction::MoveWindowLeft => {
-                debug!("🎨 Input triggered: Move window left");
-                if let Some((_window_id, _, _, _)) = self.get_workspace_info().into() {
-                    // Get first window in current workspace for demo
-                    // We need to lock workspace manager
-                    let windows = self.workspace_manager.read().get_focused_column_windows();
-                    if let Some(&window_id) = windows.first() {
-                        self.move_window_left(window_id);
-                    }
-                }
-            }
-            CompositorAction::MoveWindowRight => {
-                debug!("🎨 Input triggered: Move window right");
-                if let Some((_window_id, _, _, _)) = self.get_workspace_info().into() {
-                    let windows = self.workspace_manager.read().get_focused_column_windows();
-                    if let Some(&window_id) = windows.first() {
-                        self.move_window_right(window_id);
-                    }
-                }
-            }
-            CompositorAction::CloseWindow => {
-                debug!("🎨 Input triggered: Close window");
-                // Need window manager lock
-                let focused_id = self.window_manager.read().focused_window_id();
-
-                if let Some(focused_id) = focused_id {
-                    self.remove_window(focused_id);
-                    self.effects_engine.write().animate_window_close(focused_id);
-                }
-            }
-            CompositorAction::ToggleFullscreen => {
-                debug!("🎨 Input triggered: Toggle fullscreen");
-                let focused_id = self.window_manager.read().focused_window_id();
-                if let Some(focused_id) = focused_id {
-                    let _ = self.window_manager.write().toggle_fullscreen(focused_id);
-                }
-            }
-            CompositorAction::Quit => {
-                info!("💼 Input triggered: Quit compositor");
-                self.shutdown().await?;
-            }
-            CompositorAction::Custom(command) => {
-                debug!("🎨 Input triggered custom command: {}", command);
-                // TODO: Handle custom commands
-            }
-        }
-
         Ok(())
     }
 
     /// Phase 4: Enhanced frame rendering with visual effects
     #[allow(clippy::unused_async)]
     async fn render_frame(&mut self) -> Result<()> {
-        // 1. Update workspace positions/animations
-        self.workspace_manager.write().update_animations()?;
-
-        // 2. Update visual effects (animations, blur, shadows)
-        self.effects_engine.write().update()?;
-
-        // 3. Calculate workspace layouts for all visible windows
+        // 1. Calculate workspace layouts for all visible windows
+        // (animations are already updated every cycle in the backend)
         let workspace_layouts = self.workspace_manager.read().calculate_workspace_layouts();
 
         // 4. Update window positions and collect render data
@@ -406,7 +308,8 @@ impl AxiomCompositor {
         self.running = false;
 
         // Clean up XWayland first
-        if let Some(ref mut xwayland) = self.xwayland_manager {
+        // tokio::sync::RwLock guards are safe to hold across .await
+        if let Some(ref xwayland) = self.xwayland_manager {
             debug!("🔗 Shutting down XWayland...");
             xwayland.write().await.shutdown().await?;
         }
@@ -468,6 +371,15 @@ impl AxiomCompositor {
             // Stable tick, reset error count
             self.consecutive_error_count = 0;
         }
+
+        // Broadcast IPC performance metrics to Lazy UI (~10Hz rate-limited internally)
+        let frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+        let (workspace_idx, _, column_count, _) = self.get_workspace_info();
+        self.ipc_server.maybe_broadcast_performance_metrics(
+            frame_time_ms,
+            column_count as u32,
+            workspace_idx,
+        );
 
         // Frame pacing: sleep for remaining time to target ~60 FPS
         let elapsed = frame_start.elapsed();
@@ -600,5 +512,206 @@ impl AxiomCompositor {
     }
 }
 
-// TODO: Future versions will integrate deeply with Smithay for full Wayland compositor functionality
-// For now, we focus on getting the basic architecture working and communicating with Lazy UI
+impl AxiomCompositor {
+    /// Test-only constructor that skips real backend initialization.
+    /// Subsystems are fully initialized. Smithay backend uses a test
+    /// constructor that doesn't bind Wayland sockets. WGPU renderer is
+    /// a real headless instance (requires GPU adapter).
+    #[cfg(test)]
+    pub(crate) async fn new_for_test(
+        config: AxiomConfig,
+        workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
+        effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
+        window_manager: Arc<parking_lot::RwLock<WindowManager>>,
+        decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
+        input_manager: Arc<parking_lot::RwLock<InputManager>>,
+    ) -> Result<Self> {
+        let renderer = Arc::new(parking_lot::RwLock::new(
+            AxiomRenderer::new_headless().await
+                .context("Failed to create headless renderer")?
+        ));
+
+        // Dummy IPC server (skip socket bind)
+        let ipc_server = AxiomIPCServer::new();
+
+        // Test Smithay backend (no socket bind, no GPU init)
+        let smithay_backend = AxiomSmithayBackendReal::new_for_test(
+            config.clone(),
+            window_manager.clone(),
+            workspace_manager.clone(),
+            effects_engine.clone(),
+            input_manager.clone(),
+            renderer.clone(),
+        )?;
+
+        // Wire effects engine into renderer for future GPU shadow/blur post-processing
+        renderer.write().set_effects_engine(effects_engine.clone());
+
+        Ok(Self {
+            config,
+            windowed: false,
+            workspace_manager,
+            effects_engine,
+            window_manager,
+            decoration_manager,
+            input_manager,
+            xwayland_manager: None,
+            ipc_server,
+            smithay_backend,
+            render_data_buffer: Vec::with_capacity(64),
+            consecutive_error_count: 0,
+            renderer,
+            running: false,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use parking_lot::RwLock;
+
+    /// Create subsystems and a test compositor for unit testing public API methods.
+    async fn make_test_compositor() -> AxiomCompositor {
+        let config = AxiomConfig::default();
+        let workspace_manager = Arc::new(RwLock::new(
+            ScrollableWorkspaces::new(&config.workspace).expect("workspace init")
+        ));
+        let window_manager = Arc::new(RwLock::new(
+            WindowManager::new(&config.window).expect("window init")
+        ));
+        let effects_engine = Arc::new(RwLock::new(
+            EffectsEngine::new(&config.effects).expect("effects init")
+        ));
+        let decoration_manager = Arc::new(RwLock::new(
+            DecorationManager::new(&config.window)
+        ));
+        let input_manager = Arc::new(RwLock::new(
+            InputManager::new(&config.input, &config.bindings).expect("input init")
+        ));
+
+        AxiomCompositor::new_for_test(
+            config,
+            workspace_manager,
+            effects_engine,
+            window_manager,
+            decoration_manager,
+            input_manager,
+        )
+        .await
+        .expect("compositor init")
+    }
+
+    #[tokio::test]
+    async fn test_compositor_initialization() {
+        let comp = make_test_compositor().await;
+        assert!(!comp.is_windowed());
+        assert!(comp.config().effects.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_add_and_remove_window() {
+        let mut comp = make_test_compositor().await;
+
+        let id = comp.add_window("Test Window".into());
+        assert_eq!(id, 1);
+
+        let (column, _pos, _count, _scrolling) = comp.get_workspace_info();
+        assert!(column >= 0);
+
+        comp.remove_window(id);
+    }
+
+    #[tokio::test]
+    async fn test_workspace_scrolling() {
+        let mut comp = make_test_compositor().await;
+
+        let _initial = comp.get_workspace_info();
+        // Verify scrolling doesn't panic
+        comp.scroll_workspace_right();
+        let _after_right = comp.get_workspace_info();
+        comp.scroll_workspace_left();
+        let _after_left = comp.get_workspace_info();
+    }
+
+    #[tokio::test]
+    async fn test_viewport_resize() {
+        let mut comp = make_test_compositor().await;
+
+        comp.set_viewport_size(1920, 1080);
+        comp.set_viewport_size(3840, 2160);
+        // No panic = success
+    }
+
+    #[tokio::test]
+    async fn test_effects_engine_access() {
+        let comp = make_test_compositor().await;
+
+        // Read-only access
+        {
+            let effects = comp.effects_engine();
+            let (_frame_time, _quality, _active) = effects.get_performance_stats();
+        }
+
+        // Write access
+        {
+            let mut effects = comp.effects_engine_mut();
+            effects.shutdown().expect("effects shutdown");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_window_movement_between_workspaces() {
+        let mut comp = make_test_compositor().await;
+
+        let id = comp.add_window("movable".into());
+        comp.move_window_right(id);
+        comp.move_window_left(id);
+        comp.remove_window(id);
+    }
+
+    #[tokio::test]
+    async fn test_config_access() {
+        let comp = make_test_compositor().await;
+        let config = comp.config();
+        assert!(config.workspace.scroll_speed > 0.0);
+        assert!(!config.window.focus_follows_mouse);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_windows() {
+        let mut comp = make_test_compositor().await;
+
+        let ids: Vec<u64> = (0..10)
+            .map(|i| comp.add_window(format!("Window {}", i)))
+            .collect();
+
+        assert_eq!(ids.len(), 10);
+        assert!(ids.windows(2).all(|w| w[0] + 1 == w[1]));
+
+        for id in ids {
+            comp.remove_window(id);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_cleans_up() {
+        let mut comp = make_test_compositor().await;
+        comp.add_window("pre-shutdown".into());
+        comp.shutdown().await.expect("shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_config_propagation_to_subsystems() {
+        let comp = make_test_compositor().await;
+
+        // Verify default blur radius is present
+        let initial_blur = comp.config().effects.blur.radius;
+        assert!(initial_blur > 0, "default blur radius should be nonzero");
+
+        // Modify config and propagate — should not panic
+        // (config is shared via Arc, full propagation test would need mutable config)
+        let (_frame_time, _quality, _active) = comp.effects_engine().get_performance_stats();
+    }
+}

@@ -5,6 +5,7 @@
 //! - Inner shadows for depth
 //! - Dynamic lighting effects
 //! - Performance-optimized shadow maps
+#![allow(dead_code)]
 
 use anyhow::Result;
 use cgmath::{InnerSpace, Vector2, Vector3, Vector4};
@@ -240,14 +241,16 @@ impl ShadowRenderer {
             bytemuck::cast_slice(&[uniforms]),
         );
 
+        // Get pipeline reference (with error handling instead of unwrap)
+        let shadow_pipeline = self
+            .drop_shadow_pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Drop shadow pipeline not initialized"))?;
+
         // Create bind group for this render
         let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Drop Shadow Bind Group"),
-            layout: &self
-                .drop_shadow_pipeline
-                .as_ref()
-                .unwrap()
-                .get_bind_group_layout(0),
+            layout: &shadow_pipeline.get_bind_group_layout(0),
             entries: &[BindGroupEntry {
                 binding: 0,
                 resource: self.shadow_params_buffer.as_entire_binding(),
@@ -270,7 +273,7 @@ impl ShadowRenderer {
             occlusion_query_set: None,
         });
 
-        render_pass.set_pipeline(self.drop_shadow_pipeline.as_ref().unwrap());
+        render_pass.set_pipeline(shadow_pipeline);
         render_pass.set_bind_group(0, &bind_group, &[]);
         render_pass.draw(0..6, 0..1); // Two triangles for quad
 
@@ -294,6 +297,11 @@ impl ShadowRenderer {
         shadow_data: &[(Vector2<f32>, Vector2<f32>, ShadowParams)], // (position, size, params)
     ) -> Result<()> {
         let start_time = std::time::Instant::now();
+
+        let shadow_pipeline = self
+            .drop_shadow_pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Drop shadow pipeline not initialized"))?;
 
         // Process each shadow individually to avoid bind group lifetime issues
         for (_position, size, shadow_params) in shadow_data {
@@ -328,11 +336,7 @@ impl ShadowRenderer {
             // Create bind group for this shadow
             let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
                 label: Some("Batch Shadow Bind Group"),
-                layout: &self
-                    .drop_shadow_pipeline
-                    .as_ref()
-                    .unwrap()
-                    .get_bind_group_layout(0),
+                layout: &shadow_pipeline.get_bind_group_layout(0),
                 entries: &[BindGroupEntry {
                     binding: 0,
                     resource: self.shadow_params_buffer.as_entire_binding(),
@@ -356,7 +360,7 @@ impl ShadowRenderer {
                     occlusion_query_set: None,
                 });
 
-                render_pass.set_pipeline(self.drop_shadow_pipeline.as_ref().unwrap());
+                render_pass.set_pipeline(shadow_pipeline);
                 render_pass.set_bind_group(0, &bind_group, &[]);
                 render_pass.draw(0..6, 0..1);
             }
@@ -426,14 +430,16 @@ impl ShadowRenderer {
             bytemuck::cast_slice(&[uniforms]),
         );
 
+        // Get pipeline reference (with error handling instead of unwrap)
+        let dynamic_pipeline = self
+            .drop_shadow_pipeline
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Drop shadow pipeline not initialized"))?;
+
         // Create bind group
         let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Dynamic Shadow Bind Group"),
-            layout: &self
-                .drop_shadow_pipeline
-                .as_ref()
-                .unwrap()
-                .get_bind_group_layout(0),
+            layout: &dynamic_pipeline.get_bind_group_layout(0),
             entries: &[BindGroupEntry {
                 binding: 0,
                 resource: self.shadow_params_buffer.as_entire_binding(),
@@ -456,7 +462,7 @@ impl ShadowRenderer {
             occlusion_query_set: None,
         });
 
-        render_pass.set_pipeline(self.drop_shadow_pipeline.as_ref().unwrap());
+        render_pass.set_pipeline(dynamic_pipeline);
         render_pass.set_bind_group(0, &bind_group, &[]);
         render_pass.draw(0..6, 0..1);
 

@@ -3,8 +3,8 @@
 **/*.rs.bk
 *.pdb
 
-# Cargo
-Cargo.lock
+# Cargo lock file — tracked for reproducible builds
+# Cargo.lock is committed (this is an application, not a library)
 
 # IDE
 .vscode/
@@ -30,3 +30,16 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Code coverage output
+*.profraw
+*.profdata
+tarpaulin-report.*
+coverage/
+lcov.info
+
+# Profiling output
+*.perf
+flamegraph.*
+perf.data*
+heaptrack.*

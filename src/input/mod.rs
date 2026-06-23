@@ -81,7 +81,9 @@ pub enum CompositorAction {
 /// Phase 3: Enhanced input manager with real processing
 #[derive(Debug)]
 pub struct InputManager {
+    #[allow(dead_code)]
     input_config: InputConfig,
+    #[allow(dead_code)]
     bindings_config: BindingsConfig,
 
     /// Key binding mappings
@@ -94,13 +96,17 @@ pub struct InputManager {
     mouse_position: (f64, f64),
 
     /// Gesture state for momentum scrolling
+    #[allow(dead_code)]
     gesture_state: Option<GestureState>,
 }
 
 #[derive(Debug, Clone)]
 struct GestureState {
+    #[allow(dead_code)]
     start_time: std::time::Instant,
+    #[allow(dead_code)]
     start_position: (f64, f64),
+    #[allow(dead_code)]
     current_velocity: (f64, f64),
 }
 
@@ -326,5 +332,104 @@ impl InputManager {
     pub fn shutdown(&mut self) -> Result<()> {
         info!("🔌 Input manager shutting down");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{BindingsConfig, InputConfig};
+
+    fn make_configs() -> (InputConfig, BindingsConfig) {
+        let input = InputConfig::default();
+        let bindings = BindingsConfig::default();
+        (input, bindings)
+    }
+
+    #[test]
+    fn test_input_manager_initialization() {
+        let (input_cfg, bindings_cfg) = make_configs();
+        let manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
+        assert_eq!(manager.mouse_position(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn test_simulate_key_press_known_binding() {
+        let (input_cfg, bindings_cfg) = make_configs();
+        let mut manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
+        // The default quit binding should work
+        let actions = manager.simulate_key_press(&bindings_cfg.quit);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0], CompositorAction::Quit);
+    }
+
+    #[test]
+    fn test_simulate_key_press_unknown_binding() {
+        let (input_cfg, bindings_cfg) = make_configs();
+        let mut manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
+        let actions = manager.simulate_key_press("unknown+key+binding");
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn test_scroll_navigation() {
+        let (input_cfg, bindings_cfg) = make_configs();
+        let mut manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
+
+        // Large scroll right should trigger workspace scroll right
+        let actions = manager.process_input_event(InputEvent::Scroll {
+            x: 100.0, y: 100.0, delta_x: 20.0, delta_y: 0.0,
+        });
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0], CompositorAction::ScrollWorkspaceRight);
+
+        // Large scroll left should trigger workspace scroll left
+        let actions = manager.process_input_event(InputEvent::Scroll {
+            x: 100.0, y: 100.0, delta_x: -20.0, delta_y: 0.0,
+        });
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0], CompositorAction::ScrollWorkspaceLeft);
+    }
+
+    #[test]
+    fn test_scroll_no_action_small() {
+        let (input_cfg, bindings_cfg) = make_configs();
+        let mut manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
+
+        // Small scroll should not trigger any action
+        let actions = manager.process_input_event(InputEvent::Scroll {
+            x: 100.0, y: 100.0, delta_x: 2.0, delta_y: 0.0,
+        });
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn test_keyboard_event_modifiers() {
+        let (input_cfg, bindings_cfg) = make_configs();
+        let mut manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
+
+        // Press Super key
+        let _actions = manager.process_input_event(InputEvent::Keyboard {
+            key: "Super_L".into(),
+            modifiers: vec!["Super".into()],
+            pressed: true,
+        });
+        // Super key alone might not have a binding, but should track modifiers
+        assert!(manager.is_modifier_active("Super"));
+
+        // Release (must include the modifier being released)
+        let _ = manager.process_input_event(InputEvent::Keyboard {
+            key: "Super_L".into(),
+            modifiers: vec!["Super".into()],
+            pressed: false,
+        });
+        assert!(!manager.is_modifier_active("Super"));
+    }
+
+    #[test]
+    fn test_shutdown() {
+        let (input_cfg, bindings_cfg) = make_configs();
+        let mut manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
+        manager.shutdown().expect("Shutdown should succeed");
     }
 }

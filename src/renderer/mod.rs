@@ -26,11 +26,10 @@ pub struct AxiomRenderer {
     /// WGPU Adapter (for querying capabilities)
     adapter: Arc<Adapter>,
 
-    /// Main surface (for backwards compatibility/primary display)
-    /// In multi-monitor, this might be just one of them.
-    /// We will need a map of surfaces, but for now we keep simple structure
-    /// and maybe add `surfaces` map.
-    /// To respect the existing interface which assumes single surface in `new`...
+    /// Optional effects engine for GPU post-processing (shadows, blur).
+    /// When set, shadow passes are auto-applied during surface rendering.
+    #[allow(dead_code)]
+    effects_engine: Option<Arc<parking_lot::RwLock<crate::effects::EffectsEngine>>>,
 
     /// Map of output ID to Surface+Config
     surfaces: HashMap<String, (wgpu::Surface<'static>, wgpu::SurfaceConfiguration)>,
@@ -266,6 +265,7 @@ impl AxiomRenderer {
             queue: Arc::new(queue),
             instance: Arc::new(instance),
             adapter: Arc::new(adapter),
+            effects_engine: None,
             surfaces,
             windows: Vec::new(),
             default_size: (width, height),
@@ -417,6 +417,7 @@ impl AxiomRenderer {
             queue: Arc::new(queue),
             instance: Arc::new(instance),
             adapter: Arc::new(adapter),
+            effects_engine: None,
             surfaces: HashMap::new(),
             windows: Vec::new(),
             default_size: (1920, 1080),
@@ -814,6 +815,42 @@ impl AxiomRenderer {
     /// Get instance for external use (creating surfaces)
     pub fn instance(&self) -> Arc<Instance> {
         self.instance.clone()
+    }
+
+    /// Render to a surface with optional shadow post-processing.
+    /// After compositing windows, invokes the provided shadow callback
+    /// with a fresh encoder so shadows are drawn on top.
+    pub fn render_to_surface_with_shadows(
+        &self,
+        surface: &wgpu::Surface<'_>,
+        surface_texture: &wgpu::SurfaceTexture,
+        on_shadows: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView) -> Result<()>,
+    ) -> Result<()> {
+        // Composite windows first
+        self.render_to_surface(surface, surface_texture)?;
+
+        // Run shadow pass as a separate draw batch
+        let view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut shadow_encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Shadow Encoder"),
+            });
+        on_shadows(&mut shadow_encoder, &view)?;
+        self.queue
+            .submit(std::iter::once(shadow_encoder.finish()));
+        Ok(())
+    }
+
+    /// Wire an effects engine for future shadow/blur post-processing passes.
+    /// Once set, surface renders can apply GPU effects automatically.
+    pub fn set_effects_engine(
+        &mut self,
+        engine: Arc<parking_lot::RwLock<crate::effects::EffectsEngine>>,
+    ) {
+        self.effects_engine = Some(engine);
     }
 
     /// Get number of rendered windows

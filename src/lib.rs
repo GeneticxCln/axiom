@@ -1,25 +1,4 @@
 //! Axiom Wayland Compositor Library
-#![allow(missing_docs)]
-#![allow(clippy::uninlined_format_args)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::doc_markdown)]
-#![allow(clippy::return_self_not_must_use)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::unused_self)]
-#![allow(clippy::cast_lossless)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::needless_pass_by_value)]
-#![allow(clippy::unnecessary_wraps)]
-#![allow(clippy::float_cmp)]
-#![allow(clippy::unnecessary_debug_formatting)]
-#![allow(clippy::ignored_unit_patterns)]
-#![allow(clippy::manual_let_else)]
-#![allow(clippy::single_match_else)]
 //!
 //! A hybrid Wayland compositor combining scrollable workspaces with beautiful visual effects.
 //! This library exposes the core functionality for building Wayland compositors with:
@@ -69,8 +48,7 @@
 //! }
 //! ```
 
-#![warn(missing_docs, rust_2018_idioms)]
-#![allow(dead_code)] // Remove this once development is complete
+#![warn(rust_2018_idioms)]
 
 // Re-export main compositor
 pub use crate::compositor::AxiomCompositor;

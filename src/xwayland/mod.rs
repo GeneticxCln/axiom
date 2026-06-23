@@ -30,6 +30,7 @@ pub struct XWaylandManager {
     stats: XWaylandStats,
 
     /// Start time for uptime tracking
+    #[allow(dead_code)]
     start_time: Instant,
 }
 
@@ -240,14 +241,14 @@ impl XWaylandManager {
             // Wait for process to exit
             let _ = process.wait().await;
 
-            self.server_state = XWaylandServerState::Stopped;
-            self.display_number = None;
-
-            // Clean up env var
-            std::env::remove_var("DISPLAY");
-
             info!("✅ XWayland server stopped");
         }
+
+        // Always reset state and display, even if no process was running
+        // (handles edge cases where startup failed mid-way)
+        self.server_state = XWaylandServerState::Stopped;
+        self.display_number = None;
+        std::env::remove_var("DISPLAY");
 
         Ok(())
     }

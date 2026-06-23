@@ -8,7 +8,6 @@
 use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
-use std::alloc::System;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -120,8 +119,6 @@ pub struct AxiomIPCServer {
     command_receiver: Option<mpsc::UnboundedReceiver<LazyUIMessage>>,
     /// Sender side of command channel (for wiring incoming commands)
     command_sender: Option<mpsc::UnboundedSender<LazyUIMessage>>,
-    // System info for metrics sampling
-    sys: Option<System>,
     last_metrics_sent: Instant,
     // Last CPU times for non-blocking CPU usage sampling
     last_cpu_times: Option<(u64, u64)>,
@@ -151,7 +148,6 @@ impl AxiomIPCServer {
             message_sender: None,
             command_receiver: None,
             command_sender: None,
-            sys: None,
             last_metrics_sent: Instant::now(),
             last_cpu_times: None,
             shutdown_token: None,
@@ -301,6 +297,7 @@ impl AxiomIPCServer {
 
     /// Accept incoming connections from Lazy UI (kept for compatibility)
     #[allow(clippy::unused_async)]
+    #[allow(dead_code)]
     async fn accept_connections(&mut self) -> Result<()> {
         // Deprecated path: connection acceptance is spawned in start() with a broadcast channel.
         // Keeping this method to satisfy older call sites; return Ok(()) without doing anything.
@@ -673,7 +670,7 @@ impl AxiomIPCServer {
         Ok(())
     }
 
-    /// Rate-limited helper that samples CPU/memory and broadcasts metrics (~10Hz)
+    /// Rate-limited helper that samples CPU/GPU/memory and broadcasts metrics (~10Hz)
     pub fn maybe_broadcast_performance_metrics(
         &mut self,
         frame_time_ms: f32,
@@ -685,15 +682,32 @@ impl AxiomIPCServer {
             return;
         }
         let (cpu, mem_mb) = self.sample_system_metrics_nonblocking();
+        let gpu = Self::sample_gpu_usage();
         let _ = self.broadcast_performance_metrics(
             cpu,
             mem_mb,
-            0.0, // GPU TBD
+            gpu,
             frame_time_ms,
             active_windows,
             current_workspace,
         );
         self.last_metrics_sent = Instant::now();
+    }
+
+    /// Sample GPU usage percentage from DRM sysfs (AMD/Intel) or return 0.0.
+    fn sample_gpu_usage() -> f32 {
+        // Try common paths for GPU utilisation via DRM
+        for path in &[
+            "/sys/class/drm/card0/device/gpu_busy_percent",
+            "/sys/class/drm/card1/device/gpu_busy_percent",
+        ] {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                if let Ok(val) = contents.trim().parse::<f32>() {
+                    return val;
+                }
+            }
+        }
+        0.0
     }
 
     /// Sample system CPU usage (%) and memory used (MB) by reading /proc

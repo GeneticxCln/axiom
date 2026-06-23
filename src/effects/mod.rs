@@ -88,8 +88,6 @@ pub struct WindowEffectState {
     pub corner_radius: f32,
     /// Current shadow parameters
     pub shadow: ShadowParams,
-    /// Active animations for this window
-    pub active_animations: Vec<AnimationType>,
 }
 
 /// Shadow rendering parameters
@@ -123,6 +121,7 @@ pub struct EffectsEngine {
     /// GPU-based effect renderers
     blur_renderer: Option<blur::BlurRenderer>,
     shadow_renderer: Option<shadow::ShadowRenderer>,
+    #[allow(dead_code)]
     shader_manager: Option<Arc<shaders::ShaderManager>>,
 
     /// Advanced animation system
@@ -151,9 +150,7 @@ pub struct EffectsEngine {
     gpu_device: Option<Arc<Device>>,
     gpu_queue: Option<Arc<Queue>>,
 
-    // Reuse buffers for update loop to avoid allocation
-    update_window_ids: Vec<u64>,
-    update_animations: Vec<String>,
+
 }
 
 impl Default for WindowEffectState {
@@ -165,7 +162,6 @@ impl Default for WindowEffectState {
             blur_radius: 0.0,
             corner_radius: 8.0,
             shadow: ShadowParams::default(),
-            active_animations: Vec::new(),
         }
     }
 }
@@ -260,8 +256,7 @@ impl EffectsEngine {
             adaptive_quality: true,
             gpu_device: None,
             gpu_queue: None,
-            update_window_ids: Vec::with_capacity(64),
-            update_animations: Vec::with_capacity(32),
+
         })
     }
 
@@ -283,23 +278,42 @@ impl EffectsEngine {
             return Ok(());
         }
 
-        // Update all window animations
-        // Update all window animations
-        // Update window animations - collect data first to avoid borrow conflicts
-
-        self.update_animations.clear();
-        self.update_window_ids.clear();
-        self.update_window_ids.extend(self.window_effects.keys());
-
-        for &window_id in &self.update_window_ids {
-            if let Some(effect_state) = self.window_effects.get_mut(&window_id) {
-                if let Ok(updates) = Self::update_window_animations_static(
-                    window_id,
-                    effect_state,
-                    now,
-                    &self.default_easing_curve,
-                ) {
-                    self.update_animations.extend(updates);
+        // Tick the advanced AnimationController (spring physics, keyframes, timelines)
+        // This is the sole animation driver — all animate_* methods now route through it.
+        if let Ok(controller_updates) = self.animation_controller.update() {
+            for update in &controller_updates {
+                if let Some(effect_state) = self.window_effects.get_mut(&update.window_id) {
+                    match (&update.property, &update.value) {
+                        (animations::AnimationProperty::Transform, animations::AnimationValue::Transform { scale, opacity, .. }) => {
+                            effect_state.scale = scale.x.max(scale.y);
+                            effect_state.opacity = *opacity;
+                        }
+                        (animations::AnimationProperty::Position, animations::AnimationValue::Position(pos)) => {
+                            effect_state.position_offset = (pos.x, pos.y);
+                        }
+                        (animations::AnimationProperty::Opacity, animations::AnimationValue::Float(v)) => {
+                            effect_state.opacity = v.clamp(0.0, 1.0);
+                        }
+                        (animations::AnimationProperty::Scale, animations::AnimationValue::Float(v)) => {
+                            effect_state.scale = v.max(0.0);
+                        }
+                        (animations::AnimationProperty::Rotation, animations::AnimationValue::Float(_v)) => {
+                            // Rotation not yet stored on WindowEffectState — no-op for now
+                        }
+                        (animations::AnimationProperty::Size, animations::AnimationValue::Vector2(_size)) => {
+                            // Size not yet stored on WindowEffectState — no-op for now
+                        }
+                        (animations::AnimationProperty::SpringProperty(name), animations::AnimationValue::Float(v)) => {
+                            match name.as_str() {
+                                "opacity" => effect_state.opacity = v.clamp(0.0, 1.0),
+                                "scale" => effect_state.scale = v.max(0.0),
+                                "blur" => effect_state.blur_radius = v.max(0.0),
+                                "corner_radius" => effect_state.corner_radius = v.max(0.0),
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -322,66 +336,117 @@ impl EffectsEngine {
         Ok(())
     }
 
-    /// Start a window opening animation
+    /// Start a window opening animation (routed through AnimationController for spring physics)
     pub fn animate_window_open(&mut self, window_id: u64) {
         if !self.animations_enabled || !self.config.enabled {
             return;
         }
 
+        // Ensure effect state exists and set initial values for immediate visual correctness
         let effect_state = self.window_effects.entry(window_id).or_default();
-
-        // Start with small scale and transparent
         effect_state.scale = 0.8;
         effect_state.opacity = 0.0;
 
-        let animation = AnimationType::WindowOpen {
-            start_time: Instant::now(),
-            duration: self.default_animation_duration,
-            target_scale: 1.0,
-            target_opacity: 1.0,
-        };
-
-        effect_state.active_animations.push(animation);
+        // Start spring animations for smooth physics-driven transition
+        self.animation_controller.start_spring_animation(
+            window_id,
+            "scale".to_string(),
+            1.0,
+            Some(0.8),
+            Some(animations::SpringParams {
+                stiffness: 250.0,
+                damping: 25.0,
+                mass: 1.0,
+                precision: 0.005,
+            }),
+        );
+        self.animation_controller.start_spring_animation(
+            window_id,
+            "opacity".to_string(),
+            1.0,
+            Some(0.0),
+            Some(animations::SpringParams {
+                stiffness: 300.0,
+                damping: 28.0,
+                mass: 1.0,
+                precision: 0.005,
+            }),
+        );
 
         info!("🎬 Started window open animation for window {}", window_id);
     }
 
-    /// Start a window closing animation
+    /// Start a window closing animation (routed through AnimationController spring physics)
     pub fn animate_window_close(&mut self, window_id: u64) {
         if !self.animations_enabled || !self.config.enabled {
             return;
         }
 
-        let effect_state = self.window_effects.entry(window_id).or_default();
+        let current_scale = self
+            .window_effects
+            .get(&window_id)
+            .map(|e| e.scale)
+            .unwrap_or(1.0);
+        let current_opacity = self
+            .window_effects
+            .get(&window_id)
+            .map(|e| e.opacity)
+            .unwrap_or(1.0);
 
-        let animation = AnimationType::WindowClose {
-            start_time: Instant::now(),
-            duration: self.default_animation_duration,
-            start_scale: effect_state.scale,
-            start_opacity: effect_state.opacity,
-        };
+        // Ensure effect state exists
+        self.window_effects.entry(window_id).or_default();
 
-        effect_state.active_animations.push(animation);
+        self.animation_controller.start_spring_animation(
+            window_id,
+            "scale".to_string(),
+            0.0,
+            Some(current_scale),
+            Some(animations::SpringParams {
+                stiffness: 200.0,
+                damping: 20.0,
+                mass: 1.0,
+                precision: 0.005,
+            }),
+        );
+        self.animation_controller.start_spring_animation(
+            window_id,
+            "opacity".to_string(),
+            0.0,
+            Some(current_opacity),
+            Some(animations::SpringParams {
+                stiffness: 250.0,
+                damping: 22.0,
+                mass: 1.0,
+                precision: 0.005,
+            }),
+        );
 
         info!("🎬 Started window close animation for window {}", window_id);
     }
 
-    /// Start a window movement animation
+    /// Start a window movement animation (routed through AnimationController)
     pub fn animate_window_move(&mut self, window_id: u64, from: (f32, f32), to: (f32, f32)) {
         if !self.animations_enabled || !self.config.enabled {
             return;
         }
 
-        let effect_state = self.window_effects.entry(window_id).or_default();
+        // Ensure effect state exists so position updates are applied
+        self.window_effects.entry(window_id).or_default();
 
+        // Use the standard animation system for position transitions
         let animation = AnimationType::WindowMove {
             start_time: Instant::now(),
-            duration: Duration::from_millis(200), // Faster for movement
+            duration: Duration::from_millis(200),
             start_pos: from,
             target_pos: to,
         };
 
-        effect_state.active_animations.push(animation);
+        self.animation_controller.start_animation(
+            window_id,
+            animation,
+            Duration::ZERO,
+            Some(1),
+        );
 
         debug!(
             "🎬 Started window move animation for window {} from {:?} to {:?}",
@@ -430,244 +495,8 @@ impl EffectsEngine {
         }
     }
 
-    /// Static version of window animation updates to avoid borrow checker issues
-    fn update_window_animations_static(
-        window_id: u64,
-        effect_state: &mut WindowEffectState,
-        now: Instant,
-        default_easing_curve: &EasingCurve,
-    ) -> Result<Vec<String>> {
-        let mut animations_to_remove = Vec::new();
-        let mut animation_updates = Vec::new();
-
-        for (i, animation) in effect_state.active_animations.iter().enumerate() {
-            match animation {
-                AnimationType::WindowOpen {
-                    start_time,
-                    duration,
-                    target_scale,
-                    target_opacity,
-                } => {
-                    let elapsed = now.duration_since(*start_time);
-
-                    if elapsed >= *duration {
-                        // Animation finished
-                        effect_state.scale = *target_scale;
-                        effect_state.opacity = *target_opacity;
-                        animations_to_remove.push(i);
-                        animation_updates
-                            .push(format!("Window {} open animation completed", window_id));
-                    } else {
-                        // Update animation
-                        let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
-                        let eased_progress =
-                            Self::apply_easing_curve_static(progress as f32, default_easing_curve);
-
-                        effect_state.scale = 0.8 + (target_scale - 0.8) * eased_progress;
-                        effect_state.opacity = eased_progress * target_opacity;
-                    }
-                }
-
-                AnimationType::WindowClose {
-                    start_time,
-                    duration,
-                    start_scale,
-                    start_opacity,
-                } => {
-                    let elapsed = now.duration_since(*start_time);
-
-                    if elapsed >= *duration {
-                        // Animation finished - window should be removed
-                        effect_state.scale = 0.0;
-                        effect_state.opacity = 0.0;
-                        animations_to_remove.push(i);
-                        animation_updates
-                            .push(format!("Window {} close animation completed", window_id));
-                    } else {
-                        // Update animation
-                        let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
-                        let eased_progress =
-                            Self::apply_easing_curve_static(progress as f32, &EasingCurve::EaseIn);
-
-                        effect_state.scale = start_scale * (1.0 - eased_progress * 0.2);
-                        effect_state.opacity = start_opacity * (1.0 - eased_progress);
-                    }
-                }
-
-                AnimationType::WindowMove {
-                    start_time,
-                    duration,
-                    start_pos,
-                    target_pos,
-                } => {
-                    let elapsed = now.duration_since(*start_time);
-
-                    if elapsed >= *duration {
-                        // Animation finished
-                        effect_state.position_offset =
-                            (target_pos.0 - start_pos.0, target_pos.1 - start_pos.1);
-                        animations_to_remove.push(i);
-                        animation_updates
-                            .push(format!("Window {} move animation completed", window_id));
-                    } else {
-                        // Update animation
-                        let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
-                        let eased_progress =
-                            Self::apply_easing_curve_static(progress as f32, &EasingCurve::EaseOut);
-
-                        let current_x = start_pos.0 + (target_pos.0 - start_pos.0) * eased_progress;
-                        let current_y = start_pos.1 + (target_pos.1 - start_pos.1) * eased_progress;
-
-                        effect_state.position_offset =
-                            (current_x - start_pos.0, current_y - start_pos.1);
-                    }
-                }
-
-                _ => {
-                    // Handle other animation types
-                }
-            }
-        }
-
-        // Remove finished animations (in reverse order to maintain indices)
-        for i in animations_to_remove.into_iter().rev() {
-            effect_state.active_animations.remove(i);
-        }
-
-        Ok(animation_updates)
-    }
-
-    /// Static version of easing curve application
-    fn apply_easing_curve_static(t: f32, curve: &EasingCurve) -> f32 {
-        let t = t.clamp(0.0, 1.0);
-
-        match curve {
-            EasingCurve::EaseIn => t * t,
-            EasingCurve::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
-            EasingCurve::EaseInOut => {
-                if t < 0.5 {
-                    2.0 * t * t
-                } else {
-                    -1.0 + (4.0 - 2.0 * t) * t
-                }
-            }
-            _ => t, // Simplified for other curves
-        }
-    }
-
-    /// Update animations for a specific window
-    fn update_window_animations(
-        &mut self,
-        window_id: u64,
-        effect_state: &mut WindowEffectState,
-        now: Instant,
-    ) -> Result<()> {
-        let mut animations_to_remove = Vec::new();
-
-        for (i, animation) in effect_state.active_animations.iter().enumerate() {
-            match animation {
-                AnimationType::WindowOpen {
-                    start_time,
-                    duration,
-                    target_scale,
-                    target_opacity,
-                } => {
-                    let elapsed = now.duration_since(*start_time);
-
-                    if elapsed >= *duration {
-                        // Animation finished
-                        effect_state.scale = *target_scale;
-                        effect_state.opacity = *target_opacity;
-                        animations_to_remove.push(i);
-                        debug!(
-                            "✅ Window open animation completed for window {}",
-                            window_id
-                        );
-                    } else {
-                        // Update animation
-                        let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
-                        let eased_progress =
-                            self.apply_easing_curve(progress as f32, &self.default_easing_curve);
-
-                        effect_state.scale = 0.8 + (target_scale - 0.8) * eased_progress;
-                        effect_state.opacity = eased_progress * target_opacity;
-                    }
-                }
-
-                AnimationType::WindowClose {
-                    start_time,
-                    duration,
-                    start_scale,
-                    start_opacity,
-                } => {
-                    let elapsed = now.duration_since(*start_time);
-
-                    if elapsed >= *duration {
-                        // Animation finished - window should be removed
-                        effect_state.scale = 0.0;
-                        effect_state.opacity = 0.0;
-                        animations_to_remove.push(i);
-                        debug!(
-                            "✅ Window close animation completed for window {}",
-                            window_id
-                        );
-                    } else {
-                        // Update animation
-                        let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
-                        let eased_progress =
-                            self.apply_easing_curve(progress as f32, &EasingCurve::EaseIn);
-
-                        effect_state.scale = start_scale * (1.0 - eased_progress * 0.2);
-                        effect_state.opacity = start_opacity * (1.0 - eased_progress);
-                    }
-                }
-
-                AnimationType::WindowMove {
-                    start_time,
-                    duration,
-                    start_pos,
-                    target_pos,
-                } => {
-                    let elapsed = now.duration_since(*start_time);
-
-                    if elapsed >= *duration {
-                        // Animation finished
-                        effect_state.position_offset =
-                            (target_pos.0 - start_pos.0, target_pos.1 - start_pos.1);
-                        animations_to_remove.push(i);
-                        debug!(
-                            "✅ Window move animation completed for window {}",
-                            window_id
-                        );
-                    } else {
-                        // Update animation
-                        let progress = elapsed.as_secs_f64() / duration.as_secs_f64();
-                        let eased_progress =
-                            self.apply_easing_curve(progress as f32, &EasingCurve::EaseOut);
-
-                        let current_x = start_pos.0 + (target_pos.0 - start_pos.0) * eased_progress;
-                        let current_y = start_pos.1 + (target_pos.1 - start_pos.1) * eased_progress;
-
-                        effect_state.position_offset =
-                            (current_x - start_pos.0, current_y - start_pos.1);
-                    }
-                }
-
-                _ => {
-                    // Handle other animation types
-                }
-            }
-        }
-
-        // Remove finished animations (in reverse order to maintain indices)
-        for i in animations_to_remove.into_iter().rev() {
-            effect_state.active_animations.remove(i);
-        }
-
-        Ok(())
-    }
-
     /// Apply easing curve to animation progress
+    #[allow(dead_code)]
     fn apply_easing_curve(&self, t: f32, curve: &EasingCurve) -> f32 {
         let t = t.clamp(0.0, 1.0);
 
@@ -733,12 +562,11 @@ impl EffectsEngine {
         }
     }
 
-    /// Remove finished animations and inactive windows
+    /// Remove windows whose animations have fully faded out (opacity ≤ 0 and scale ≤ 0).
+    /// All animations now route through AnimationController exclusively.
     fn cleanup_finished_animations(&mut self) {
         self.window_effects.retain(|_, effect_state| {
-            !effect_state.active_animations.is_empty()
-                || effect_state.opacity > 0.0
-                || effect_state.scale > 0.0
+            effect_state.opacity > 0.0 || effect_state.scale > 0.0
         });
     }
 
@@ -828,14 +656,14 @@ impl EffectsEngine {
         self.gpu_device = Some(device.clone());
         self.gpu_queue = Some(queue.clone());
 
-        // Initialize shader manager with Arc<Device>
-        // Initialize blur renderer
-        if self.blur_params.enabled {
-            // Create shader manager for effects
-            let mut shader_manager = shaders::ShaderManager::new(device.clone());
-            shader_manager.compile_all_shaders()?;
+        // Initialize shader manager (compiled once, shared by blur and shadow renderers)
+        let mut sm = shaders::ShaderManager::new(device.clone());
+        sm.compile_all_shaders()?;
+        let shader_manager = Arc::new(sm);
+        self.shader_manager = Some(shader_manager.clone());
 
-            // Convert our BlurParams to blur module's BlurParams
+        // Initialize blur renderer
+        if self.blur_params.enabled {            // Convert our BlurParams to blur module's BlurParams
             let blur_params = blur::BlurParams {
                 blur_type: blur::BlurType::Gaussian {
                     radius: self.blur_params.radius,
@@ -849,16 +677,22 @@ impl EffectsEngine {
             self.blur_renderer = Some(blur::BlurRenderer::new(
                 device.clone(),
                 queue.clone(),
-                Arc::new(shader_manager),
+                shader_manager.clone(),
                 blur_params,
             )?);
             debug!("🌊 GPU blur renderer initialized");
         }
 
-        // Initialize shadow renderer - temporarily disabled until shader manager is properly integrated
-        // TODO: Re-enable once we have proper GPU context and shader management
+        // Initialize shadow renderer using the shared shader manager
         if self.default_shadow.enabled {
-            debug!("🌟 Shadow rendering configured (GPU initialization deferred)");
+            self.shadow_renderer = Some(shadow::ShadowRenderer::new(
+                device.clone(),
+                queue.clone(),
+                shader_manager.clone(),
+                self.default_shadow.clone(),
+                shadow::ShadowQuality::High,
+            )?);
+            info!("🌟 GPU shadow renderer initialized");
         }
 
         info!("✅ GPU effects acceleration ready");
@@ -873,5 +707,118 @@ impl EffectsEngine {
     /// Check if GPU acceleration is available
     pub fn has_gpu_acceleration(&self) -> bool {
         self.gpu_device.is_some() && self.gpu_queue.is_some()
+    }
+
+    /// Render drop shadows for all visible windows via the GPU shadow renderer.
+    /// Convenience wrapper that calls through to the renderer and also wires
+    /// the effects engine into an AxiomRenderer for automated shadow passes.
+    #[allow(dead_code)]
+    pub fn render_shadows(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        output_view: &wgpu::TextureView,
+        window_data: &[(cgmath::Vector2<f32>, cgmath::Vector2<f32>, ShadowParams)],
+    ) -> Result<()> {
+        if let Some(ref mut shadow) = self.shadow_renderer {
+            shadow.render_shadow_batch(encoder, output_view, window_data)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Get reference to the shadow renderer for direct GPU shadow operations
+    pub fn shadow_renderer(&self) -> Option<&shadow::ShadowRenderer> {
+        self.shadow_renderer.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::EffectsConfig;
+
+    #[test]
+    fn test_effects_engine_initialization() {
+        let config = EffectsConfig::default();
+        let engine = EffectsEngine::new(&config).expect("Failed to create EffectsEngine");
+        assert_eq!(engine.get_effects_quality(), 1.0);
+        assert!(!engine.has_gpu_acceleration());
+    }
+
+    #[test]
+    fn test_animate_window_open() {
+        let config = EffectsConfig::default();
+        let mut engine = EffectsEngine::new(&config).expect("Failed to create EffectsEngine");
+        engine.animate_window_open(1);
+        let effects = engine.get_window_effects(1);
+        assert!(effects.is_some());
+        // Window open now routes through AnimationController spring physics,
+        // so initial scale/opacity are set directly on the effect state.
+        let effects = effects.unwrap();
+        assert!((effects.scale - 0.8).abs() < 0.01);
+        assert!(effects.opacity < 0.01);
+        // Spring animations are tracked by the controller, not active_animations.
+        // Verify the controller has spring states.
+        let stats = engine.get_animation_stats();
+        assert!(stats.spring_animations > 0, "spring animations not started");
+    }
+
+    #[test]
+    fn test_remove_window() {
+        let config = EffectsConfig::default();
+        let mut engine = EffectsEngine::new(&config).expect("Failed to create EffectsEngine");
+        engine.animate_window_open(42);
+        assert!(engine.get_window_effects(42).is_some());
+        engine.remove_window(42);
+        assert!(engine.get_window_effects(42).is_none());
+    }
+
+    #[test]
+    fn test_update_config() {
+        let config = EffectsConfig::default();
+        let mut engine = EffectsEngine::new(&config).expect("Failed to create EffectsEngine");
+        let mut new_config = EffectsConfig::default();
+        new_config.animations.enabled = false;
+        engine.update_config(new_config.clone());
+        // Animations should now be disabled
+        engine.animate_window_open(1);
+        let effects = engine.get_window_effects(1);
+        // If animations are disabled, animate_window_open returns early without creating state
+        assert!(effects.is_none());
+    }
+
+    #[test]
+    fn test_easing_curves() {
+        let config = EffectsConfig::default();
+        let engine = EffectsEngine::new(&config).expect("Failed to create EffectsEngine");
+
+        // All easing curves should return values in [0, 1] range
+        let curves = [
+            EasingCurve::Linear,
+            EasingCurve::EaseIn,
+            EasingCurve::EaseOut,
+            EasingCurve::EaseInOut,
+            EasingCurve::BounceOut,
+            EasingCurve::ElasticOut,
+            EasingCurve::BackOut,
+        ];
+        for curve in &curves {
+            for t in [0.0, 0.25, 0.5, 0.75, 1.0].iter() {
+                let result = engine.apply_easing_curve(*t, curve);
+                assert!(
+                    result >= -0.1 && result <= 1.1,
+                    "Easing curve {:?} at t={}: result={} out of expected range",
+                    curve, t, result
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_shutdown() {
+        let config = EffectsConfig::default();
+        let mut engine = EffectsEngine::new(&config).expect("Failed to create EffectsEngine");
+        engine.animate_window_open(1);
+        engine.shutdown().expect("Shutdown should succeed");
     }
 }

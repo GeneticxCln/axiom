@@ -7,11 +7,6 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 // Backend window type
-#[cfg(feature = "experimental-smithay")]
-use crate::experimental::smithay::real_window::BackendWindow;
-
-// Minimal fallback backend window when experimental-smithay is disabled
-#[cfg(not(feature = "experimental-smithay"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct BackendWindow {
     pub id: u64,
@@ -20,7 +15,6 @@ pub struct BackendWindow {
     pub size: (u32, u32),
 }
 
-#[cfg(not(feature = "experimental-smithay"))]
 impl BackendWindow {
     pub fn new(id: u64, title: String) -> Self {
         Self {
@@ -287,5 +281,119 @@ impl WindowManager {
     pub fn shutdown(&mut self) -> Result<()> {
         self.windows.clear();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::WindowConfig;
+
+    #[test]
+    fn test_window_manager_initialization() {
+        let config = WindowConfig::default();
+        let wm = WindowManager::new(&config).expect("Failed to create WindowManager");
+        assert_eq!(wm.focused_window_id(), None);
+    }
+
+    #[test]
+    fn test_add_window() {
+        let config = WindowConfig::default();
+        let mut wm = WindowManager::new(&config).expect("Failed to create WindowManager");
+        let id = wm.add_window("test".into());
+        assert_eq!(id, 1);
+        // First window should be auto-focused
+        assert_eq!(wm.focused_window_id(), Some(1));
+        assert!(wm.get_window(1).is_some());
+    }
+
+    #[test]
+    fn test_add_multiple_windows() {
+        let config = WindowConfig::default();
+        let mut wm = WindowManager::new(&config).expect("Failed to create WindowManager");
+        let id1 = wm.add_window("first".into());
+        let id2 = wm.add_window("second".into());
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        // Focus should stay on first window
+        assert_eq!(wm.focused_window_id(), Some(1));
+    }
+
+    #[test]
+    fn test_remove_window() {
+        let config = WindowConfig::default();
+        let mut wm = WindowManager::new(&config).expect("Failed to create WindowManager");
+        let id = wm.add_window("test".into());
+        assert!(wm.get_window(id).is_some());
+        let removed = wm.remove_window(id);
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().window.id, id);
+        assert!(wm.get_window(id).is_none());
+    }
+
+    #[test]
+    fn test_remove_focused_window_clears_focus() {
+        let config = WindowConfig::default();
+        let mut wm = WindowManager::new(&config).expect("Failed to create WindowManager");
+        let id = wm.add_window("test".into());
+        assert_eq!(wm.focused_window_id(), Some(id));
+        wm.remove_window(id);
+        assert_eq!(wm.focused_window_id(), None);
+    }
+
+    #[test]
+    fn test_focus_window() {
+        let config = WindowConfig::default();
+        let mut wm = WindowManager::new(&config).expect("Failed to create WindowManager");
+        let _id1 = wm.add_window("first".into());
+        let id2 = wm.add_window("second".into());
+        assert_eq!(wm.focused_window_id(), Some(1));
+        wm.focus_window(id2).expect("Focus should succeed");
+        assert_eq!(wm.focused_window_id(), Some(2));
+    }
+
+    #[test]
+    fn test_focus_nonexistent_window() {
+        let config = WindowConfig::default();
+        let mut wm = WindowManager::new(&config).expect("Failed to create WindowManager");
+        wm.add_window("test".into());
+        let result = wm.focus_window(999);
+        assert!(result.is_ok());
+        // Focus should not change
+        assert_eq!(wm.focused_window_id(), Some(1));
+    }
+
+    #[test]
+    fn test_calculate_layout_horizontal() {
+        let mut config = WindowConfig::default();
+        config.default_layout = "horizontal".into();
+        let mut wm = WindowManager::new(&config).expect("Failed to create WindowManager");
+        wm.add_window("a".into());
+        wm.add_window("b".into());
+        let bounds = Rectangle { x: 0, y: 0, width: 1920, height: 1080 };
+        let layouts = wm.calculate_layout(bounds);
+        assert_eq!(layouts.len(), 2);
+        // Both windows should have distinct x positions
+        assert_ne!(layouts[0].1.x, layouts[1].1.x);
+    }
+
+    #[test]
+    fn test_toggle_fullscreen() {
+        let config = WindowConfig::default();
+        let mut wm = WindowManager::new(&config).expect("Failed to create WindowManager");
+        let id = wm.add_window("test".into());
+        let win = wm.get_window(id).unwrap();
+        assert!(!win.properties.fullscreen);
+        wm.toggle_fullscreen(id).expect("Toggle should succeed");
+        let win = wm.get_window(id).unwrap();
+        assert!(win.properties.fullscreen);
+    }
+
+    #[test]
+    fn test_shutdown_clears_windows() {
+        let config = WindowConfig::default();
+        let mut wm = WindowManager::new(&config).expect("Failed to create WindowManager");
+        wm.add_window("test".into());
+        wm.shutdown().expect("Shutdown should succeed");
     }
 }
