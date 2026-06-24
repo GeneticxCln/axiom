@@ -454,6 +454,16 @@ impl AxiomConfig {
             anyhow::bail!("Invalid shadow opacity: must be between 0.0 and 1.0");
         }
 
+        // Validate max_fps: 0 means unlimited, otherwise clamp-friendly range
+        // [1, 1000]. Catches typos like max_fps = u32::MAX at TOML load time
+        // instead of letting tick() clamp them silently.
+        if self.general.max_fps > 1000 {
+            anyhow::bail!(
+                "Invalid general.max_fps: {} (must be 0 for unlimited, or in [1, 1000])",
+                self.general.max_fps
+            );
+        }
+
         Ok(())
     }
 

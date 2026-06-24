@@ -53,30 +53,27 @@ smithay = { version = "0.7.0", default-features = false, features = [
 smithay-client-toolkit = "0.20"
 
 # Graphics and input
-glium = "0.34"
+# glium   (removed v0.7.5 audit: unused — Smithay 0.7's GlesRenderer covers GL)
+# calloop (removed v0.7.5 audit: unused — Smithay 0.7 uses calloop internally)
+# drm     (removed v0.7.5 audit: unused — Smithay 0.7 backend_drm feature re-exports)
+# gbm     (removed v0.7.5 audit: unused — Smithay 0.7 backend_drm feature re-exports)
+# input   (removed v0.7.5 audit: unused as a first-party dep — smithay::reexports::input::Axis works)
+# winit   (removed v0.7.5 audit: unused as a first-party dep — smithay::backend::winit re-exports)
+# dbus    (removed v0.7.5 audit: unused — IPC is via Unix sockets only)
+# ctrlc   (removed v0.7.5 audit: unused — graceful shutdown handled by tokio::signal)
+# tracing + tracing-subscriber (removed v0.7.5 audit: unused — log/env_logger covers observability)
 cgmath = "0.18"
 xkbcommon = "0.7"  # Smithay 0.7 backend uses xkbcommon for keyboard handling
 libc = "0.2"
-calloop = "0.12"
 x11rb = "0.13"
-input = "0.9"  # Smithay 0.7 re-exports input crate types (Axis, PointerAxisEvent)
-drm = "0.11"  # DRM backend support (Smithay 0.7 backend_drm feature)
-gbm = "0.14"
-gl = "0.14"  # OpenGL bindings for GLES 2.0 rendering pipeline
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+gl = "0.14"  # OpenGL bindings for GLES 2.0 rendering pipeline (raw gl::* in backend)
 
 # Graphics and rendering
 wgpu = "0.19"  # GPU compute and rendering (independent of Smithay's GLES renderer)
-winit = "0.29"  # Smithay 0.7 backend_winit feature; compile-checked compatible
 
 # IPC for Lazy UI integration
 serde_json = "1.0"
 interprocess = "1.2"  # For Unix socket communication
-dbus = "0.9"  # Alternative IPC method
-ctrlc = "3.4"  # For graceful shutdown
 
 # Utilities
 rand = "0.8"  # For input simulation in Phase 3

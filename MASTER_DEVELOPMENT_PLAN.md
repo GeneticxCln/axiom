@@ -1,8 +1,8 @@
 # 🗺️ Axiom Master Development Plan
 
 **Status**: Active 🟢
-**Current Phase**: Phase 6 (Real Compositor Integration)
-**Last Updated**: 2026-01-30
+**Current Phase**: Phase 7 (Production Polish)
+**Last Updated**: 2026-06-24
 
 ---
 
@@ -26,55 +26,58 @@ All core subsystems are architected, implemented, and verified in simulation mod
 
 ---
 
-## 🚀 Active Phase: Phase 6 - Real Compositor Integration
+## 🚀 Phase 6: Real Compositor Integration (✅ COMPLETE)
 **Goal**: Replace simulation with a fully functional Wayland backend capable of running real applications (Firefox, Terminal, etc.).
 
 ### 6.1 Backend Migration (✅ Completed)
-- [x] **Canonical Backend**: Migrated `run_real_backend` to use `smithay_backend_real.rs`.
-- [x] **Cleanup**: Removed legacy `backend_real.rs` and unused modules.
-- [x] **Compilation**: Verified clean build with `real-compositor` feature.
-- [x] **Protocols**: Integrated core Wayland protocols (Compositor, XDG Shell, Seat, Output) and extensions (Layer Shell, Viewporter).
+- [x] **Canonical Backend**: Migrated to `smithay_backend_real.rs`.
+- [x] **Protocols**: Integrated core Wayland protocols (Compositor, XDG Shell, Seat, Output).
 
-### 6.2 Real Window Lifecycle (🔄 Next Priorities)
-**Goal**: Map Smithay `XdgSurface` events to `AxiomWindow` structures to make windows "exist" in the workspace logic.
+### 6.2 Real Window Lifecycle (✅ Completed)
+- [x] **Surface Mapping**: `XdgShellHandler::new_toplevel` → `create_window_from_surface` → `WindowManager` + `ScrollableWorkspaces`.
+- [x] **Lifecycle Hooks**: `destroy_window` cleans up all three subsystems (WM, workspace, renderer).
+- [x] **State Sync**: Initial `configure` with 1024×720 default; dynamic tiling-based resizes via `configured_sizes` tracking in `render()`; serialized with `pending_configure` to avoid flooding clients.
+- [x] **Dead Surface Pruning**: `prune_dead_surfaces` cleans up disconnected client state.
 
-- [ ] **Surface Mapping**: Create `AxiomWindow` from `XdgToplevel`.
-- [ ] **Lifecycle Hooks**: Connect `request_map`, `request_unmap`, `destroy` to `WindowManager`.
-- [ ] **State Sync**: Implement `configure` events to resize windows based on tiling layout.
-- [ ] **Decorations**: Negotiate Server-Side Decorations (SSD) vs Client-Side Decorations (CSD).
+### 6.3 Input Routing (✅ Completed)
+- [x] **Pointer**: `PointerMotionAbsolute` → `element_under()` hit test → surface focus via `pointer.motion()`.
+- [x] **Pointer Buttons**: Left/right/middle clicks forwarded via `pointer.button()`.
+- [x] **Keyboard**: `InputManager` intercepts global shortcuts (Super+key) → `FilterResult::Intercept`; non-shortcuts → `FilterResult::Forward` to clients.
+- [x] **Bindings**: `process_actions` handles ScrollLeft/Right, Quit, CloseWindow, ToggleFullscreen, MoveWindowLeft/Right.
+- [x] **Focus Chasing**: `SeatHandler::focus_changed` syncs Wayland focus → `WindowManager::focus_window`.
+- [x] **Scroll**: Axis events forwarded to clients AND trigger workspace navigation.
 
-### 6.3 Input Routing
-**Goal**: Route physical events (libinput) from Smithay -> Axiom InputManager -> Wayland Clients.
-
-- [ ] **Pointer**: Map mouse movement/clicks to the focused window surface.
-- [ ] **Keyboard**: Forward key events to the active `wl_seat` focus.
-- [ ] **Bindings**: Ensure global shortcuts (e.g., `Super+Enter`) intercept before client delivery.
-- [ ] **Focus Chasing**: Update Wayland focus when `WindowManager` changes active window.
-
-### 6.4 Rendering Pipeline
-**Goal**: Draw the actual client pixels (buffers) onto the screen using WGPU/OpenGL.
-
-- [ ] **Buffer Management**: Import `wl_shm` and DMA-BUF buffers into textures.
-- [ ] **Compositor Loop**: Render `AxiomWindow` textures at their calculated workspace positions.
-- [ ] **Effects Integration**: Apply shaders (blur, rounded corners) to these real textures.
-- [ ] **Cursor Rendering**: Draw the hardware cursor overlay.
+### 6.4 Rendering Pipeline (✅ Completed)
+- [x] **Buffer Management**: SHM buffer data cached on commit; uploaded to GL textures in `render()`.
+- [x] **Compositor Loop**: `calculate_workspace_layouts()` positions windows via tiling; positions synced to `WindowManager`.
+- [x] **GL Rendering**: `GlesRenderer` with lazy-compiled GLES 2.0 shader for textured quads; scissor-based placeholders for untextured windows.
+- [x] **WGPU Renderer**: Parallel WGPU renderer with `upsert_window_rect`, shadow/blur queuing, and `render_to_surface_auto()`.
+- [x] **Dual Render Path**: Backend GL pass runs first (layout + texture); compositor `render_frame()` follows (WGPU effects post-processing).
+- [x] **Cursor**: Pointer position tracked; cursor image handler present (no-op).
 
 ---
 
-## 🔮 Future Phase: Phase 7 - Production Polish
+## 🔮 Active Phase: Phase 7 - Production Polish
 **Goal**: Stability, compatibility, and distribution.
 
 ### 7.1 Stability & Performance
-- [ ] **Error Recovery**: Graceful handling of GPU context loss or client crashes.
+- [x] **Error Recovery**: Consecutive-error threshold (5) triggers emergency shutdown; `force_next_tick_error` test mechanism validates recovery.
 - [ ] **Optimization**: Reduce CPU/memory footprint of the composite loop.
 - [ ] **Multi-Monitor**: Robust handling of hotplugging and DPI scaling.
+- [x] **Integration Tests**: 22 integration tests covering IPC, window lifecycle, effects, compositor event loop, frame pacing, viewport resize, and error recovery.
 
 ### 7.2 Application Compatibility
-- [ ] **XWayland**: Full integration for X11 apps (Steam, older tools).
-- [ ] **Clipboard**: Implement `wl_data_device` for copy/paste.
-- [ ] **Popups**: Correct handling of menus and tooltips (XDG Popups).
+- [x] **XWayland**: XWM event polling integrated into main loop; X11 window lifecycle (MapRequest, ConfigureRequest, UnmapNotify) tracked; clipboard atoms + SelectionRequest handling. (Remaining: Wayland→X11 data extraction from SelectionSource, XWM→Surface wrapping for layout integration.)
+- [x] **Clipboard**: `SelectionHandler::new_selection` stores Wayland source + claims X11 ownership; `AxiomXwm::handle_selection_request` serves cached data to X11 apps; `set_clipboard_data()` lets IPC/compositor layer populate cache. (Remaining: async pipe-based data extraction from `SelectionSource`, Wayland←X11 direction via `send_selection`.)
+- [x] **Popups**: Popup buffer uploads wired (SHM → GL textures); render pass draws popups above windows at correct absolute positions; grab-based dismissal on outside click; `send_popup_done()` lifecycle.
+- [ ] **DPI Scaling**: Fractional scaling support for HiDPI displays.
 
-### 7.3 Distribution
+### 7.3 Effects Integration
+- [x] **GPU Effects Pipeline**: WGPU `render()` now dispatches shadow/blur passes via headless target; `render_frame()` populates per-frame effect queues consumed by GPU passes. (Next: wire headless target into GL compositing for on-screen output.)
+- [ ] **GL Effects**: Alternatively, implement GL-based blur/shadow shaders for the GL rendering path.
+- [ ] **Animations**: Wire `AnimationController` spring physics and easing curves into window transitions.
+
+### 7.4 Distribution
 - [ ] **Packaging**: AUR, RPM, DEB packages.
 - [ ] **Docs**: User guide for configuration and installation.
 
@@ -86,15 +89,16 @@ Use these as pass/fail gates while implementing each sub-phase:
 | # | Checkpoint | Phase | Status |
 |---|------------|-------|--------|
 | 1 | Backend brings up a Wayland socket | 6.1 | ✅ Done |
-| 2 | `weston-simple-egl` or `weston-terminal` connects and creates a surface | 6.2 | ⬜ Pending |
-| 3 | Window appears in Axiom layout and is tracked in `WindowManager` | 6.2 | ⬜ Pending |
-| 4 | Mouse/keyboard events are routed and keybindings still work | 6.3 | ⬜ Pending |
-| 5 | The client buffer is visible in the renderer | 6.4 | ⬜ Pending |
+| 2 | `weston-simple-egl` or `weston-terminal` connects and creates a surface | 6.2 | ✅ Done |
+| 3 | Window appears in Axiom layout and is tracked in `WindowManager` | 6.2 | ✅ Done |
+| 4 | Mouse/keyboard events are routed and keybindings still work | 6.3 | ✅ Done |
+| 5 | The client buffer is visible in the renderer | 6.4 | ✅ Done |
 
 ---
 
-## 🛠️ Immediate Next Steps (Continuation Plan)
+## 🛠️ Immediate Next Steps (Phase 7 Kick-off)
 
-1.  **Window Mapping**: Implement `XdgShellHandler` in `smithay_backend_real.rs` to call `WindowManager::create_window`.
-2.  **Buffer Access**: Implement `shm` buffer access to get pixel data for rendering.
-3.  **Render Loop**: Update `AxiomRenderer` to accept `Smithay` surfaces instead of dummy data.
+1. **GPU Effects Integration**: ✅ WGPU blur/shadows wired; popups render in GL pass. Next: wire headless WGPU output into GL compositing.
+2. **XWayland Clipboard**: ✅ XWM polling + SelectionHandler + clipboard bridge. Next: async SelectionSource→cache data extraction.
+3. **Animations**: Wire `AnimationController` spring physics into window transitions.
+4. **Multi-Monitor**: Test and fix hotplug DPI scaling.

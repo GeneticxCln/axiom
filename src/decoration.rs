@@ -693,3 +693,127 @@ impl Rectangle {
             && y < self.y + self.height as i32
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::WindowConfig;
+
+    #[test]
+    fn test_decoration_manager_initialization() {
+        let mgr = DecorationManager::new(&WindowConfig::default());
+        assert_eq!(mgr.default_mode, DecorationMode::ServerSide);
+        assert!(mgr.theme().corner_radius > 0.0);
+    }
+
+    #[test]
+    fn test_add_and_remove_window() {
+        let mut mgr = DecorationManager::new(&WindowConfig::default());
+        mgr.add_window(1, "Test".into(), true);
+        assert!(mgr.get_decoration(1).is_some());
+        assert_eq!(mgr.get_decoration(1).unwrap().title, "Test");
+
+        mgr.remove_window(1);
+        assert!(mgr.get_decoration(1).is_none());
+    }
+
+    #[test]
+    fn test_set_window_focus_flips() {
+        let mut mgr = DecorationManager::new(&WindowConfig::default());
+        mgr.add_window(7, "X".into(), true);
+        assert!(!mgr.get_decoration(7).unwrap().focused);
+        mgr.set_window_focus(7, true);
+        assert!(mgr.get_decoration(7).unwrap().focused);
+        mgr.set_window_focus(7, false);
+        assert!(!mgr.get_decoration(7).unwrap().focused);
+    }
+
+    #[test]
+    fn test_set_window_focus_unknown_noop() {
+        let mut mgr = DecorationManager::new(&WindowConfig::default());
+        mgr.set_window_focus(999, true); // shouldn't panic
+    }
+
+    #[test]
+    fn test_set_window_title_updates() {
+        let mut mgr = DecorationManager::new(&WindowConfig::default());
+        mgr.add_window(1, "Old".into(), true);
+        mgr.set_window_title(1, "New".into());
+        assert_eq!(mgr.get_decoration(1).unwrap().title, "New");
+    }
+
+    #[test]
+    fn test_parse_color_valid_hex() {
+        let c = DecorationManager::parse_color("#FFAA33").unwrap();
+        assert!((c[0] - 1.0).abs() < 1e-6);
+        assert!((c[1] - (0xAA as f32 / 255.0)).abs() < 1e-6);
+        assert!((c[2] - (0x33 as f32 / 255.0)).abs() < 1e-6);
+        assert!((c[3] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_parse_color_rejects_invalid() {
+        assert!(DecorationManager::parse_color("FFAA33").is_none()); // no '#'
+        assert!(DecorationManager::parse_color("#FFF").is_none());   // wrong length
+        assert!(DecorationManager::parse_color("#ZZZZZZ").is_none()); // not hex
+        assert!(DecorationManager::parse_color("").is_none());
+    }
+
+    #[test]
+    fn test_client_side_decoration_skips_titlebar() {
+        let mut mgr = DecorationManager::new(&WindowConfig::default());
+        // prefers_server_side=false => ClientSide => no titlebar
+        mgr.add_window(1, "CSD".into(), false);
+        assert_eq!(mgr.get_decoration(1).unwrap().mode, DecorationMode::ClientSide);
+        assert_eq!(mgr.get_decoration(1).unwrap().titlebar_height, 0);
+    }
+
+    #[test]
+    fn test_button_press_in_titlebar_returns_start_move() {
+        let mut mgr = DecorationManager::new(&WindowConfig::default());
+        mgr.add_window(1, "T".into(), true);
+        // titlebar_rect has width 1000 in helper code for now;
+        // a click at (10, 5) is well inside the titlebar (height default = 32)
+        let action = mgr.handle_button_press(1, 10, 5);
+        assert_eq!(action, Some(DecorationAction::StartMove));
+    }
+
+    #[test]
+    fn test_button_press_outside_returns_none() {
+        let mut mgr = DecorationManager::new(&WindowConfig::default());
+        mgr.add_window(1, "T".into(), true);
+        // y=500 is well below the 32-pixel titlebar
+        let action = mgr.handle_button_press(1, 10, 500);
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_button_press_then_release_clears_pressed() {
+        let mut mgr = DecorationManager::new(&WindowConfig::default());
+        mgr.add_window(1, "T".into(), true);
+        // Baseline: nothing is pressed.
+        assert!(!mgr.get_decoration(1).unwrap().buttons.close.pressed);
+        // The titlebar rect in handle_button_press is hardcoded width=1000,
+        // height=titlebar_height (32). A click at (10, 5) is inside the
+        // titlebar and outside any button bounds (which start at x≈704).
+        let _action = mgr.handle_button_press(1, 10, 5);
+        // Trigger a button-press by clicking on the close button bounds
+        // (close.bounds.x = 800 - 24 - 8 = 768 in update_button_positions).
+        let close_action = mgr.handle_button_press(1, 770, 12);
+        assert_eq!(close_action, Some(DecorationAction::Close));
+        assert!(mgr.get_decoration(1).unwrap().buttons.close.pressed);
+        // Releasing must clear the pressed flag.
+        mgr.handle_button_release(1, 770, 12);
+        assert!(!mgr.get_decoration(1).unwrap().buttons.close.pressed);
+    }
+
+    #[test]
+    fn test_contains_point() {
+        let r = Rectangle { x: 10, y: 20, width: 30, height: 40 };
+        assert!(r.contains_point(10, 20));
+        assert!(r.contains_point(39, 59));
+        assert!(!r.contains_point(40, 20)); // right edge exclusive
+        assert!(!r.contains_point(10, 60)); // bottom edge exclusive
+        assert!(!r.contains_point(9, 20));  // left edge exclusive
+    }
+}

@@ -5,7 +5,6 @@
 //! - Background blur (behind windows)
 //! - Window content blur
 //! - Bokeh blur for special effects
-#![allow(dead_code)]
 
 use anyhow::Result;
 use cgmath::Vector2;
@@ -499,7 +498,8 @@ impl BlurRenderer {
         Ok(())
     }
 
-    /// Create sampler for blur effects
+    /// Create sampler for blur effects (reserved for future custom sampling modes)
+    #[allow(dead_code)]
     fn create_blur_sampler(&self) -> wgpu::Sampler {
         self.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Blur Sampler"),

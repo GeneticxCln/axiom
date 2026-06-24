@@ -11,8 +11,8 @@ use tokio::process::Child as TokioChild;
 
 /// XWayland manager for X11 application support
 pub struct XWaylandManager {
-    /// XWayland configuration
-    config: XWaylandConfig,
+    /// XWayland configuration (retained for runtime reference)
+    _config: XWaylandConfig,
 
     /// XWayland server process
     xwayland_process: Option<TokioChild>,
@@ -88,7 +88,7 @@ impl XWaylandManager {
         info!("🔗 Initializing XWayland manager");
 
         let mut manager = Self {
-            config: config.clone(),
+            _config: config.clone(),
             xwayland_process: None,
             display_number: None,
             x11_windows: HashMap::new(),
@@ -184,7 +184,7 @@ impl XWaylandManager {
     /// Find a free X11 display number
     fn find_free_display(&self) -> Result<u32> {
         // If config specifies a display, try that first
-        if let Some(display) = self.config.display {
+        if let Some(display) = self._config.display {
             if !self.is_display_locked(display) {
                 return Ok(display);
             }

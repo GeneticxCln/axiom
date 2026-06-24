@@ -10,6 +10,10 @@ use anyhow::Result;
 use log::{debug, info};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+
+// Type aliases for renderer effect queues reduce type complexity.
+type ShadowQueue = HashMap<u64, ((f32, f32), (f32, f32), crate::effects::ShadowParams)>;
+type BlurQueue = HashMap<u64, ((f32, f32), (f32, f32), crate::effects::BlurParams)>;
 use std::time::Duration;
 use wgpu::util::DeviceExt;
 #[allow(clippy::wildcard_imports)]
@@ -28,7 +32,6 @@ pub struct AxiomRenderer {
 
     /// Optional effects engine for GPU post-processing (shadows, blur).
     /// When set, shadow passes are auto-applied during surface rendering.
-    #[allow(dead_code)]
     effects_engine: Option<Arc<parking_lot::RwLock<crate::effects::EffectsEngine>>>,
 
     /// Map of output ID to Surface+Config
@@ -37,8 +40,21 @@ pub struct AxiomRenderer {
     /// Rendered windows (global list, layout determines where they go)
     windows: Vec<RenderedWindow>,
 
+    /// Per-frame shadow queue: window_id -> (position, size, shadow_params)
+    /// Populated by render_frame() each tick, consumed by surface rendering passes.
+    window_shadows: ShadowQueue,
+
+    /// Per-frame blur queue: window_id -> (position, size, blur_params)
+    /// Populated by render_frame() each tick, consumed by surface rendering passes.
+    window_blurs: BlurQueue,
+
     /// Fallback size if no surface found
     default_size: (u32, u32),
+
+    /// Headless output texture + view for off-screen shadow/blur passes.
+    /// Created lazily and resized when dimensions change. Used by render()
+    /// for GPU effects compositing when no surface is attached.
+    headless_target: Option<(Texture, TextureView)>,
 
     /// WGPU Render Pipeline
     render_pipeline: RenderPipeline,
@@ -268,7 +284,10 @@ impl AxiomRenderer {
             effects_engine: None,
             surfaces,
             windows: Vec::new(),
+            window_shadows: HashMap::with_capacity(64),
+            window_blurs: HashMap::with_capacity(64),
             default_size: (width, height),
+            headless_target: None,
             render_pipeline,
             sampler,
         })
@@ -420,7 +439,10 @@ impl AxiomRenderer {
             effects_engine: None,
             surfaces: HashMap::new(),
             windows: Vec::new(),
+            window_shadows: HashMap::with_capacity(64),
+            window_blurs: HashMap::with_capacity(64),
             default_size: (1920, 1080),
+            headless_target: None,
             render_pipeline,
             sampler,
         })
@@ -586,26 +608,90 @@ impl AxiomRenderer {
         }
     }
 
-    /// Render all windows (simplified for now - needs actual surface)
+    /// Render all windows and apply post-processing effects (shadows, blur).
+    ///
+    /// Processes the per-frame shadow and blur queues that were populated by
+    /// render_frame(). Uses the headless target texture for GPU compositing
+    /// when no surface is attached. The queues are consumed on each call.
     pub fn render(&mut self) -> Result<()> {
-        // Reduced logging level to avoid spamming I/O at 60fps
-        log::trace!("🎨 Rendering {} windows to GPU", self.windows.len());
+        use cgmath::Vector2;
 
-        // For now, just validate that we have the GPU device and queue
-        // In a real implementation, this would render to an actual surface
+        let window_count = self.windows.len();
+        let shadow_count = self.window_shadows.len();
+        let blur_count = self.window_blurs.len();
 
-        for window in &self.windows {
-            if window.texture_view.is_some() {
-                log::trace!("✅ Would render window {} with texture", window.id);
-            } else {
-                log::trace!(
-                    "🟦 Rendering placeholder quad for window {} at ({:.1},{:.1}) size {:.1}x{:.1} opacity {:.2}",
-                    window.id, window.position.0, window.position.1, window.size.0, window.size.1, window.opacity
-                );
+        if shadow_count > 0 || blur_count > 0 {
+            debug!(
+                "🎨 Rendering {} windows + {} shadows + {} blurs to GPU",
+                window_count, shadow_count, blur_count
+            );
+        } else {
+            log::trace!("🎨 Rendering {} windows to GPU", window_count);
+        }
+
+        let has_work = shadow_count > 0 || blur_count > 0;
+        if !has_work {
+            return Ok(());
+        }
+
+        // Create or reuse headless target for off-screen effects compositing.
+        // Shadows and blurs are rendered into this texture; the result can
+        // later be sampled by the GL pass for full-screen compositing.
+        let (w, h) = self.default_size;
+        let target_view =
+            ensure_headless_target(&self.device, &mut self.headless_target, w, h);
+
+        let Some(ref effects_engine) = self.effects_engine else {
+            // No effects engine wired yet — clear queues and bail
+            self.window_shadows.clear();
+            self.window_blurs.clear();
+            return Ok(());
+        };
+
+        let mut encoder = self.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
+                label: Some("Headless Effects Encoder"),
+            },
+        );
+
+        // Dispatch shadow passes from the per-frame queue
+        if shadow_count > 0 {
+            let shadow_data: Vec<_> = self
+                .window_shadows
+                .values()
+                .map(|((px, py), (sx, sy), params)| {
+                    (
+                        Vector2::new(*px, *py),
+                        Vector2::new(*sx, *sy),
+                        params.clone(),
+                    )
+                })
+                .collect();
+
+            if let Err(e) =
+                effects_engine.write().render_shadows(&mut encoder, target_view, &shadow_data)
+            {
+                log::warn!("⚠️ Headless shadow render failed: {}", e);
             }
         }
 
-        log::trace!("🖥️ Frame rendered with {} windows", self.windows.len());
+        // Dispatch blur passes from the per-frame queue
+        if blur_count > 0 {
+            let tex_size = cgmath::Vector2::new(w, h);
+            if let Err(e) =
+                effects_engine.write().render_blurs(&mut encoder, target_view, target_view, tex_size)
+            {
+                log::warn!("⚠️ Headless blur render failed: {}", e);
+            }
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Consume per-frame effect queues
+        self.window_shadows.clear();
+        self.window_blurs.clear();
+
+        log::trace!("🖥️ Headless frame rendered with {} windows + {} shadows + {} blurs", window_count, shadow_count, blur_count);
         Ok(())
     }
 
@@ -844,6 +930,89 @@ impl AxiomRenderer {
         Ok(())
     }
 
+    /// Render to a surface and auto-dispatch shadows + blurs from internal queues.
+    /// This is the preferred surface rendering path — it composites windows,
+    /// then applies GPU shadow and blur post-processing from the per-frame
+    /// queues populated by render_frame(), all in a single encoder.
+    pub fn render_to_surface_auto(
+        &mut self,
+        surface: &wgpu::Surface<'_>,
+        surface_texture: &wgpu::SurfaceTexture,
+    ) -> Result<()> {
+        use cgmath::Vector2;
+
+        // Composite windows first
+        self.render_to_surface(surface, surface_texture)?;
+
+        let view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let has_shadows = !self.window_shadows.is_empty();
+        let has_blurs = !self.window_blurs.is_empty();
+
+        if has_shadows || has_blurs {
+            let mut encoder = self.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor {
+                    label: Some("Effects Post-Process Encoder"),
+                },
+            );
+
+            // Dispatch shadow passes from internal queue
+            if has_shadows {
+                if let Some(ref effects_engine) = self.effects_engine {
+                    let shadow_data: Vec<_> = self
+                        .window_shadows
+                        .values()
+                        .map(|((px, py), (sx, sy), params)| {
+                            (
+                                Vector2::new(*px, *py),
+                                Vector2::new(*sx, *sy),
+                                params.clone(),
+                            )
+                        })
+                        .collect();
+
+                    if !shadow_data.is_empty() {
+                        if let Err(e) = effects_engine.write().render_shadows(
+                            &mut encoder,
+                            &view,
+                            &shadow_data,
+                        ) {
+                            log::warn!("⚠️ Surface shadow render failed: {}", e);
+                        }
+                    }
+                }
+            }
+
+            // Dispatch blur passes from internal queue via GPU BlurRenderer
+            if has_blurs {
+                if let Some(ref effects_engine) = self.effects_engine {
+                    let tex_size = cgmath::Vector2::new(
+                        surface_texture.texture.width(),
+                        surface_texture.texture.height(),
+                    );
+                    if let Err(e) = effects_engine.write().render_blurs(
+                        &mut encoder,
+                        &view,
+                        &view,
+                        tex_size,
+                    ) {
+                        log::warn!("⚠️ Surface blur render failed: {}", e);
+                    }
+                }
+            }
+
+            self.queue.submit(std::iter::once(encoder.finish()));
+        }
+
+        // Clear per-frame effect queues after consumption
+        self.window_shadows.clear();
+        self.window_blurs.clear();
+
+        Ok(())
+    }
+
     /// Wire an effects engine for future shadow/blur post-processing passes.
     /// Once set, surface renders can apply GPU effects automatically.
     pub fn set_effects_engine(
@@ -853,9 +1022,72 @@ impl AxiomRenderer {
         self.effects_engine = Some(engine);
     }
 
+    /// Queue shadow rendering for a window. Called each frame from render_frame()
+    /// with data pulled from the effects engine. Shadows are consumed by the
+    /// surface rendering pass (render_to_surface_with_shadows).
+    pub fn queue_shadow(
+        &mut self,
+        id: u64,
+        position: (f32, f32),
+        size: (f32, f32),
+        params: crate::effects::ShadowParams,
+    ) {
+        self.window_shadows.insert(id, (position, size, params));
+    }
+
+    /// Clear the per-frame shadow queue (should be called at the start of each frame).
+    pub fn clear_shadows(&mut self) {
+        self.window_shadows.clear();
+    }
+
+    /// Queue blur rendering for a window. Called each frame from render_frame()
+    /// with data pulled from the effects engine.
+    pub fn queue_blur(
+        &mut self,
+        id: u64,
+        position: (f32, f32),
+        size: (f32, f32),
+        params: crate::effects::BlurParams,
+    ) {
+        self.window_blurs.insert(id, (position, size, params));
+    }
+
+    /// Clear the per-frame blur queue (should be called at the start of each frame).
+    pub fn clear_blurs(&mut self) {
+        self.window_blurs.clear();
+    }
+
+    /// Get the current blur queue for surface rendering.
+    #[allow(dead_code)]
+    pub fn blur_queue(&self) -> &BlurQueue {
+        &self.window_blurs
+    }
+
+    /// Get the current shadow queue for surface rendering.
+    /// Consumed by the backend when calling render_to_surface_with_shadows.
+    #[allow(dead_code)]
+    pub fn shadow_queue(&self) -> &ShadowQueue {
+        &self.window_shadows
+    }
+
     /// Get number of rendered windows
     pub fn window_count(&self) -> usize {
         self.windows.len()
+    }
+
+    /// Remove a window and its associated state (texture, queued shadow/blur).
+    /// GPU textures owned by this renderer are dropped along with the
+    /// `RenderedWindow` entry, fixing a long-running compositor that would
+    /// otherwise accumulate stale GPU resources across window lifecycle.
+    pub fn remove_window(&mut self, id: u64) {
+        let before = self.windows.len();
+        self.windows.retain(|w| w.id != id);
+        let removed = self.windows.len() != before;
+        if removed {
+            self.window_shadows.remove(&id);
+            self.window_blurs.remove(&id);
+            log::trace!("🗑️ Renderer: removed window {}", id);
+        }
     }
 
     /// Start a simple headless render loop at ~60 FPS for development
@@ -907,6 +1139,43 @@ impl Vertex {
             ],
         }
     }
+}
+
+/// Get or create a headless output texture for off-screen shadow/blur rendering.
+/// Free function to support disjoint borrows — the returned reference only
+/// borrows `headless_target`, not the entire struct.
+fn ensure_headless_target<'a>(
+    device: &Device,
+    headless_target: &'a mut Option<(Texture, TextureView)>,
+    width: u32,
+    height: u32,
+) -> &'a TextureView {
+    let recreate = headless_target
+        .as_ref()
+        .is_none_or(|(tex, _)| tex.width() != width || tex.height() != height);
+
+    if recreate {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Headless Render Target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        *headless_target = Some((texture, view));
+    }
+
+    &headless_target.as_ref().unwrap().1
 }
 
 /// Create orthographic projection matrix

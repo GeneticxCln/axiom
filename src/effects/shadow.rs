@@ -5,7 +5,6 @@
 //! - Inner shadows for depth
 //! - Dynamic lighting effects
 //! - Performance-optimized shadow maps
-#![allow(dead_code)]
 
 use anyhow::Result;
 use cgmath::{InnerSpace, Vector2, Vector3, Vector4};
@@ -21,9 +20,9 @@ use wgpu::{
 use super::shaders::{ShaderManager, ShaderType};
 use super::ShadowParams;
 
-/// Different types of shadow effects
+/// Different types of shadow effects (reserved for future shadow modes)
 #[derive(Debug, Clone)]
-#[allow(clippy::enum_variant_names)]
+#[allow(clippy::enum_variant_names, dead_code)]
 pub enum ShadowType {
     /// Standard drop shadow
     DropShadow {
@@ -65,13 +64,18 @@ pub struct ShadowRenderer {
 
     // Render pipelines for shadow effects
     drop_shadow_pipeline: Option<RenderPipeline>,
+    // Reserve for InnerShadow pipeline (future shadow modes)
+    #[allow(dead_code)]
     inner_shadow_pipeline: Option<RenderPipeline>,
 
     // Uniform buffers
     shadow_params_buffer: Buffer,
 
     // Shadow map textures for complex shadows
+    // Shadow map textures for complex shadows (reserved for Ultra quality)
+    #[allow(dead_code)]
     shadow_map_texture: Option<Texture>,
+    #[allow(dead_code)]
     shadow_map_view: Option<TextureView>,
 
     // Current shadow settings
@@ -496,7 +500,8 @@ impl ShadowRenderer {
         (self.last_render_time, self.current_quality)
     }
 
-    /// Create a shadow map texture for advanced shadow techniques
+    /// Create a shadow map texture for advanced shadow techniques (reserved for Ultra quality)
+    #[allow(dead_code)]
     fn ensure_shadow_map(&mut self, size: Vector2<u32>) -> Result<()> {
         let needs_creation = self
             .shadow_map_texture

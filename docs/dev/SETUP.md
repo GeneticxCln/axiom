@@ -2,13 +2,13 @@
 
 ## Prerequisites for Real Wayland Compositor Development
 
-### System Dependencies (CachyOS/Arch Linux)
+### System Dependencies (Arch / CachyOS)
 
 ```bash
 # Install Wayland development libraries
 sudo pacman -S wayland wayland-protocols libxkbcommon mesa
 
-# Install input and graphics libraries  
+# Install input and graphics libraries
 sudo pacman -S libinput libudev0-shim libdrm
 
 # Install development tools
@@ -18,248 +18,101 @@ sudo pacman -S pkg-config cmake ninja
 sudo pacman -S weston wayland-utils
 ```
 
-### Rust Dependencies
+Plenty of these (`libdrm`, `libinput`, `wayland-protocols`) are pulled transitively by Smithay 0.7 through its feature set. The explicit install is mostly useful when you want the `weston` test client binary.
 
-Add to your `Cargo.toml` for real Smithay integration:
+### What Cargo Provides
 
-```toml
-[dependencies]
-# Update Smithay with all required features
-smithay = { version = "0.3.0", features = [
-    "backend_winit",
-    "backend_drm", 
-    "backend_libinput",
-    "renderer_gl",
-    "wayland_frontend"
-] }
+Smithay 0.7 already supplies:
+- `calloop` event loop internals
+- `libinput` re-exports
+- `drm` / `gbm` abstractions for the DRM backend (the `backend_drm` feature)
+- `wgpu`-friendly `GlesRenderer`
 
-# Add missing dependencies for real compositor
-libloading = "0.8"
-gbm = "0.12"
-drm = "0.9"
-input = "0.8"
-```
+So the first-party `Cargo.toml` deps (`calloop`, `drm`, `gbm`, `input`, `xkbcommon`) are mostly safe to trim in a future cleanup pass — they are either unused in `src/` or re-exported by Smithay.
 
 ## Development Environment Setup
 
-### 1. Wayland Testing Setup
-
-Create a nested Wayland session for testing:
+### 1. Wayland Testing Setup (Nested Session)
 
 ```bash
-# Terminal 1: Start a Wayland compositor (weston) for testing
-weston --backend=wayland-backend.so --width=1920 --height=1080
+# Terminal 1: Start a parent Wayland compositor (e.g. weston)
+weston --width=1920 --height=1080 &
 
-# Terminal 2: Set WAYLAND_DISPLAY for your compositor
-export WAYLAND_DISPLAY=wayland-1
-cd /home/sasha/axiom
+# Terminal 2: Build and run Axiom under the nested session
 cargo run -- --debug --windowed
 ```
 
-### 2. Create First Real Smithay Backend
+### 2. Code Layout
 
-Replace `smithay_backend_simple.rs` with minimal real implementation:
+The compositor is structured around one event loop (`AxiomCompositor::run`) that drives a Smithay 0.7 backend (`AxiomSmithayBackendReal`) plus Tokio-flavoured helpers (IPC, XWayland manager). The key files:
 
-```rust
-// Start with this minimal real backend
-use smithay::{
-    backend::winit::{self, WinitError, WinitGraphicsBackend},
-    desktop::{Space, Window},
-    output::{Output, PhysicalProperties, Subpixel, Mode as OutputMode},
-    reexports::{
-        calloop::EventLoop,
-        wayland_server::{Display, DisplayHandle, Client},
-        winit::event_loop::EventLoop as WinitEventLoop,
-    },
-    wayland::{
-        compositor::{CompositorState, CompositorHandler},
-        shell::xdg::{XdgShellState, XdgShellHandler, ToplevelSurface},
-        shm::{ShmState, ShmHandler},
-        seat::{SeatState, SeatHandler, Seat, CursorImageStatus},
-    },
-    delegate_compositor, delegate_xdg_shell, delegate_shm, delegate_seat,
-};
-
-pub struct AxiomState {
-    pub compositor_state: CompositorState,
-    pub xdg_shell_state: XdgShellState,
-    pub shm_state: ShmState,
-    pub seat_state: SeatState<Self>,
-    pub space: Space<Window>,
-    pub seat: Seat<Self>,
-}
-
-// Implement required handlers
-impl CompositorHandler for AxiomState {
-    fn compositor_state(&mut self) -> &mut CompositorState {
-        &mut self.compositor_state
-    }
-
-    fn new_surface(&mut self, surface: &wayland_server::protocol::wl_surface::WlSurface) {
-        // Hook into your existing window management system
-    }
-}
-
-impl XdgShellHandler for AxiomState {
-    fn xdg_shell_state(&mut self) -> &mut XdgShellState {
-        &mut self.xdg_shell_state
-    }
-
-    fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        let window = Window::new(surface);
-        self.space.map_element(window, (0, 0), false);
-        
-        // Connect to your workspace manager here
-        // self.workspace_manager.add_window(window_id);
-    }
-}
+```
+src/lib.rs                       — re-exports + BuildInfo
+src/main.rs                      — CLI + subsystem wiring
+src/compositor.rs                — event loop, tick, render orchestration
+src/backend/mod.rs               — Smithay 0.7 backend (new + new_for_test)
+src/backend/xwm.rs               — x11rb window-manager side of XWayland
+src/renderer/mod.rs              — wgpu 0.19 surface + texture management
+src/workspace/mod.rs             — niri-style scrollable tapes
+src/effects/{mod,animations,blur,shadow,shaders}.rs — wgpu blur/shadow + spring physics
+src/window/mod.rs                — window manager + tiling layout
+src/input/mod.rs                 — keybindings + scroll/gesture actions
+src/ipc/mod.rs                   — Tokio Unix-domain-socket IPC
+src/xwayland/mod.rs              — `Xwayland` subprocess
+src/decoration.rs                — server-side decorations
+src/config/mod.rs                — TOML config + validation
 ```
 
-### 3. Testing Applications
-
-Start with simple applications for testing:
+### 3. Testing
 
 ```bash
-# Test with simple terminal
-weston-terminal
+# Run unit tests (CI runs with --test-threads=1 to avoid WGPU races)
+cargo test --lib -- --test-threads=1
 
-# Test with basic image viewer  
-weston-image /path/to/image.png
+# Run integration tests
+cargo test --test integration_tests -- --test-threads=1
 
-# Test with calculator
-gnome-calculator
+# Property tests run as part of `cargo test --lib`
+cargo test --lib workspace
+cargo test --lib config
 ```
 
-### 4. Debugging Tools
+### 4. Smoke Test with `weston-terminal`
 
-Install helpful debugging tools:
+The real-compositor path expects a Wayland client to connect via the socket exposed in `$WAYLAND_DISPLAY`. To verify in a winit window:
 
 ```bash
-# Install wayland debugging utilities
-sudo pacman -S wayland-utils
+# Terminal 1
+cargo run -- --windowed
 
-# Monitor Wayland protocol messages
-wayland-scanner client-header /usr/share/wayland/wayland.xml wayland-client-protocol.h
-
-# Use weston-info to see available protocols
-weston-info
-
-# Monitor performance
-htop
+# Terminal 2 (with WAYLAND_DISPLAY pointing at Axiom)
+WAYLAND_DISPLAY=wayland-axiom-$$ weston-terminal
 ```
 
-### 5. Development Workflow
+If weston-terminal opens a window inside the winit window, the WLGPU + SHM upload path is wired correctly.
 
-Recommended development cycle:
+### 5. Common Issues
 
-1. **Start Simple**: Get basic window creation working
-2. **Test Incrementally**: Test each feature with real applications
-3. **Debug Protocol Issues**: Use `WAYLAND_DEBUG=1` for protocol debugging
-4. **Performance Monitor**: Watch memory and CPU usage constantly
-5. **Version Control**: Commit working states frequently
-
-### 6. Example Testing Script
-
-Create `test_compositor.sh`:
-
+#### "No Wayland display found"
 ```bash
-#!/bin/bash
-# Test script for Axiom development
-
-echo "🚀 Testing Axiom Compositor Development"
-
-# Build in debug mode
-echo "📦 Building..."
-cargo build --debug || exit 1
-
-# Kill any existing compositor
-pkill axiom
-
-# Start compositor in background
-echo "🏗️ Starting Axiom..."
-./target/debug/axiom --debug --windowed &
-AXIOM_PID=$!
-
-# Wait a bit for startup
-sleep 2
-
-# Test with simple application
-echo "🧪 Testing with weston-terminal..."
-weston-terminal &
-TERM_PID=$!
-
-# Wait for user to test
-echo "✨ Axiom is running! Press Enter to stop..."
-read
-
-# Clean shutdown
-echo "🛑 Shutting down..."
-kill $TERM_PID 2>/dev/null
-kill $AXIOM_PID 2>/dev/null
-
-echo "✅ Test complete!"
+export WAYLAND_DISPLAY=wayland-0  # or whatever Axiom listens on (check logs)
 ```
 
-## Quick Start Commands
-
-```bash
-# Setup environment
-cd /home/sasha/axiom
-
-# Install dependencies (if needed)
-sudo pacman -S wayland-protocols libxkbcommon libinput
-
-# Start development
-cargo build --debug
-./target/debug/axiom --debug --windowed --demo
-
-# In another terminal, test IPC
-python3 test_ipc.py
-```
+#### WGPU adapter unavailable on CI
+The CI workflow uses `cargo test --lib -- --test-threads=1`; if you see wgpu initialization failures locally, run with `WGPU_BACKEND=vulkan` or `WGPU_BACKEND=gl`.
 
 ## Performance Monitoring
 
-Monitor your compositor during development:
-
 ```bash
-# Watch memory usage
+# Watch compositor memory
 watch -n 1 'ps aux | grep axiom'
 
-# Monitor frame timing
-perf top -p $(pgrep axiom)
-
-# Check GPU usage (if available)
-nvidia-smi  # or similar for your GPU
-```
-
-## Common Issues and Solutions
-
-### Issue: "No Wayland display found"
-**Solution**: Make sure `WAYLAND_DISPLAY` is set correctly
-```bash
-export WAYLAND_DISPLAY=wayland-0  # or wayland-1
-```
-
-### Issue: Permission denied for DRM
-**Solution**: Add user to video group
-```bash
-sudo usermod -a -G video $USER
-# Log out and back in
-```
-
-### Issue: Applications don't appear
-**Solution**: Check protocol implementation
-```bash
-# Enable Wayland debugging
-export WAYLAND_DEBUG=1
-./target/debug/axiom --debug
+# Frame timing via Perfetto / tokio-console (when enabled)
+RUST_LOG=trace cargo run -- --windowed
 ```
 
 ## Next Steps
 
-1. **Week 1**: Replace `smithay_backend_simple.rs` with minimal real implementation
-2. **Week 2**: Get `weston-terminal` running successfully  
-3. **Week 3**: Add proper input handling
-4. **Week 4**: Connect workspace manager to real windows
-
-Your existing architecture is excellent - this is just about connecting it to real Wayland protocols! 🚀
+1. Implement `WorkspaceCommand` + `EffectsControl` IPC handlers in `src/ipc/mod.rs`.
+2. Wire `effects/blur.rs` and `effects/shadow.rs` into the live Smithay render path (currently exercised only by tests).
+3. Implement `wl_data_device` (clipboard) + XDG popup handling for full X11 compatibility.

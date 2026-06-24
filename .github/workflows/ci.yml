@@ -74,8 +74,8 @@ jobs:
       
     - name: Run unit tests
       run: |
-        # Run unit tests (no graphics context needed)
-        cargo test --lib --verbose --all-features
+        # Run unit tests with single thread to avoid wgpu parallelism races
+        cargo test --lib --verbose --all-features -- --test-threads=1
         
     - name: Run property tests
       run: |

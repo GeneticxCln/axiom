@@ -219,55 +219,67 @@ impl AxiomXwm {
         // For now, identifying that X11 selection changed is enough to log.
     }
 
-    #[allow(dead_code)]
-    fn handle_selection_request(
-        &mut self,
-        event: x11rb::protocol::xproto::SelectionRequestEvent,
+    /// Respond to an X11 selection request with the given clipboard content.
+    /// If `clipboard_data` is `Some`, sends those bytes as the selection value.
+    /// If `None`, sends a default placeholder and logs a warning.
+    pub fn handle_selection_request(
+        &self,
+        requestor: Window,
+        selection: x11rb::protocol::xproto::Atom,
+        target: x11rb::protocol::xproto::Atom,
+        property: x11rb::protocol::xproto::Atom,
+        time: x11rb::protocol::xproto::Timestamp,
+        clipboard_data: Option<&[u8]>,
     ) -> Result<()> {
-        log::info!(
+        log::debug!(
             "📋 SelectionRequest: requestor={}, selection={:?}, target={:?}, property={:?}",
-            event.requestor,
-            event.selection,
-            event.target,
-            event.property
+            requestor, selection, target, property
         );
 
-        // Basic handling: If they ask for TARGETS, we say we support UTF8_STRING using our atoms.
-        // If they ask for UTF8_STRING, we send some dummy data for now.
-
-        if event.target == self.atoms.TARGETS {
+        if target == self.atoms.TARGETS {
+            // Advertise supported formats
             let targets = [self.atoms.TARGETS, self.atoms.UTF8_STRING, self.atoms.TEXT];
             self.conn.change_property32(
                 x11rb::protocol::xproto::PropMode::REPLACE,
-                event.requestor,
-                event.property,
+                requestor,
+                property,
                 x11rb::protocol::xproto::AtomEnum::ATOM,
                 &targets,
             )?;
-        } else if event.target == self.atoms.UTF8_STRING || event.target == self.atoms.TEXT {
-            let data = "Hello from Axiom Wayland!".as_bytes();
+        } else if target == self.atoms.UTF8_STRING || target == self.atoms.TEXT {
+            let data = clipboard_data.unwrap_or_else(|| {
+                log::warn!("⚠️ X11 clipboard request but no Wayland data cached — sending placeholder");
+                b"[axiom: no Wayland clipboard data]"
+            });
             self.conn.change_property8(
                 x11rb::protocol::xproto::PropMode::REPLACE,
-                event.requestor,
-                event.property,
+                requestor,
+                property,
                 self.atoms.UTF8_STRING,
                 data,
             )?;
         }
 
-        // Notify events
+        // Notify the requestor that the selection data is ready
         let notify = x11rb::protocol::xproto::SelectionNotifyEvent {
             response_type: x11rb::protocol::xproto::SELECTION_NOTIFY_EVENT,
             sequence: 0,
-            time: event.time,
-            requestor: event.requestor,
-            selection: event.selection,
-            target: event.target,
-            property: event.property,
+            time,
+            requestor,
+            selection,
+            target,
+            property: if target == self.atoms.TARGETS
+                || target == self.atoms.UTF8_STRING
+                || target == self.atoms.TEXT
+            {
+                property
+            } else {
+                x11rb::protocol::xproto::AtomEnum::NONE.into()
+            },
         };
 
         self.conn
-            .send_event(false, event.requestor, EventMask::NO_EVENT, notify)?;
+            .send_event(false, requestor, EventMask::NO_EVENT, notify)?;
         self.conn.flush()?;
 
         Ok(())

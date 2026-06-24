@@ -7,7 +7,7 @@
 use crate::config::EffectsConfig;
 use crate::effects::animations::AnimationStats;
 use anyhow::Result;
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -121,7 +121,6 @@ pub struct EffectsEngine {
     /// GPU-based effect renderers
     blur_renderer: Option<blur::BlurRenderer>,
     shadow_renderer: Option<shadow::ShadowRenderer>,
-    #[allow(dead_code)]
     shader_manager: Option<Arc<shaders::ShaderManager>>,
 
     /// Advanced animation system
@@ -610,6 +609,69 @@ impl EffectsEngine {
         // Intentionally left as no-op for now.
     }
 
+    /// Apply a [`crate::ipc::LazyUIMessage::EffectsControl`] payload to
+    /// live engine state. This is the runtime mutator used by the IPC
+    /// `process_messages`-returned dispatch loop in `AxiomCompositor`.
+    /// Field validation is performed at the IPC layer (see
+    /// `validate_blur_radius` / `validate_animation_speed` in
+    /// `src/ipc/mod.rs`); this method re-validates inline as defense in
+    /// depth so direct callers (tests, future modules) cannot bypass
+    /// bounds.
+    ///
+    /// `enabled` toggles the global effects enabled flag.
+    /// `blur_radius` is in pixels (0..=32); non-finite or out-of-range are
+    ///   rejected with a `warn!` and leave the live value untouched.
+    /// `animation_speed` is a unitless multiplier (1.0 = realtime,
+    ///   >1 faster). Non-finite or non-positive input is rejected.
+    pub fn apply_live_effects_control(
+        &mut self,
+        enabled: Option<bool>,
+        blur_radius: Option<f32>,
+        animation_speed: Option<f32>,
+    ) {
+        // Mirrors `MAX_EFFECTS_BLUR_RADIUS_PX` in src/ipc/mod.rs. Inlined to
+        // avoid a circular module dependency (effects <- ipc today; ipc
+        // does not import effects). Update both together if changed.
+        const MAX_BLUR_RADIUS_PX: f32 = 32.0;
+        const MAX_ANIMATION_SPEED: f32 = 10.0;
+        if let Some(e) = enabled {
+            self.config.enabled = e;
+            debug!("✨ Effects enabled flag set to {}", e);
+        }
+        if let Some(r) = blur_radius {
+            if r.is_finite() && (0.0..=MAX_BLUR_RADIUS_PX).contains(&r) {
+                self.blur_params.radius = r;
+                debug!("✨ Live blur radius set to {:.1}px", r);
+            } else {
+                warn!(
+                    "⚠️ apply_live_effects_control: blur_radius {} rejected (non-finite or out of [0, 32]px)",
+                    r
+                );
+            }
+        }
+        if let Some(s) = animation_speed {
+            if s.is_finite() && (0.0..=MAX_ANIMATION_SPEED).contains(&s) && s > 0.0 {
+                // Reinterpret "speed" as duration divisor: a faster speed
+                // compresses the same base duration. Floor at 1ms to avoid
+                // a zero-duration timer that freezes animations at start.
+                let base_ms = self.config.animations.duration as f32;
+                let multiplier = 1.0 / s;
+                let new_duration_ms = (base_ms * multiplier).max(1.0) as u64;
+                self.default_animation_duration =
+                    Duration::from_millis(new_duration_ms);
+                debug!(
+                    "✨ Animation speed set to {:.2}x (duration {} -> {}ms)",
+                    s, base_ms as u64, new_duration_ms
+                );
+            } else {
+                warn!(
+                    "⚠️ apply_live_effects_control: animation_speed {} rejected (non-finite, non-positive, or > {})",
+                    s, MAX_ANIMATION_SPEED
+                );
+            }
+        }
+    }
+
     /// Update configuration
     pub fn update_config(&mut self, config: EffectsConfig) {
         info!("🔄 Updating Effects Engine configuration");
@@ -710,9 +772,6 @@ impl EffectsEngine {
     }
 
     /// Render drop shadows for all visible windows via the GPU shadow renderer.
-    /// Convenience wrapper that calls through to the renderer and also wires
-    /// the effects engine into an AxiomRenderer for automated shadow passes.
-    #[allow(dead_code)]
     pub fn render_shadows(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -726,9 +785,31 @@ impl EffectsEngine {
         }
     }
 
-    /// Get reference to the shadow renderer for direct GPU shadow operations
+    /// Render blur passes for windows via the GPU BlurRenderer.
+    /// Applies a dual-pass Gaussian blur to the composited output texture
+    /// for each window region specified in `window_data`.
+    pub fn render_blurs(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        input_view: &wgpu::TextureView,
+        output_view: &wgpu::TextureView,
+        texture_size: cgmath::Vector2<u32>,
+    ) -> Result<()> {
+        if let Some(ref mut blur) = self.blur_renderer {
+            blur.apply_blur(encoder, input_view, output_view, texture_size)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Get reference to the shadow renderer for direct GPU shadow operations.
     pub fn shadow_renderer(&self) -> Option<&shadow::ShadowRenderer> {
         self.shadow_renderer.as_ref()
+    }
+
+    /// Get mutable reference to the blur renderer for direct GPU blur operations.
+    pub fn blur_renderer_mut(&mut self) -> Option<&mut blur::BlurRenderer> {
+        self.blur_renderer.as_mut()
     }
 }
 
@@ -820,5 +901,84 @@ mod tests {
         let mut engine = EffectsEngine::new(&config).expect("Failed to create EffectsEngine");
         engine.animate_window_open(1);
         engine.shutdown().expect("Shutdown should succeed");
+    }
+
+    #[test]
+    fn test_apply_live_effects_control_enable_and_blur() {
+        let config = EffectsConfig::default();
+        let mut engine = EffectsEngine::new(&config).expect("Failed to create EffectsEngine");
+        // Baseline: effects enabled, blur radius from config (~10 px).
+        assert!(engine.config.enabled);
+
+        // Disable effects via the IPC mutator.
+        engine.apply_live_effects_control(Some(false), None, None);
+        assert!(!engine.config.enabled, "effects.enabled should be toggled off");
+
+        // Set blur radius within the 0..=32 px range.
+        engine.apply_live_effects_control(None, Some(14.5), None);
+        assert!(
+            (engine.blur_params.radius - 14.5).abs() < 1e-4,
+            "blur_params.radius should be 14.5, got {}",
+            engine.blur_params.radius
+        );
+    }
+
+    #[test]
+    fn test_apply_live_effects_control_rejects_bad_blur() {
+        let config = EffectsConfig::default();
+        let mut engine = EffectsEngine::new(&config).expect("Failed to create EffectsEngine");
+        let original_radius = engine.blur_params.radius;
+
+        // Reject negative, NaN, Inf, over-max.
+        engine.apply_live_effects_control(None, Some(-1.0), None);
+        assert!((engine.blur_params.radius - original_radius).abs() < 1e-6);
+        engine.apply_live_effects_control(None, Some(f32::NAN), None);
+        assert!((engine.blur_params.radius - original_radius).abs() < 1e-6);
+        engine.apply_live_effects_control(None, Some(f32::INFINITY), None);
+        assert!((engine.blur_params.radius - original_radius).abs() < 1e-6);
+        engine.apply_live_effects_control(None, Some(33.0), None);
+        assert!((engine.blur_params.radius - original_radius).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_apply_live_effects_control_rejects_bad_speed() {
+        let config = EffectsConfig::default();
+        let mut engine = EffectsEngine::new(&config).expect("Failed to create EffectsEngine");
+        // The mutator writes to `default_animation_duration` (the runtime
+        // field), NOT `config.animations.duration` (the source config).
+        // Snapshot the runtime field, not the source config, otherwise the
+        // assertion vacuously passes when the function is a no-op.
+        let original_duration_ms = engine.default_animation_duration.as_millis();
+
+        // Reject non-finite, non-positive, over-max.
+        engine.apply_live_effects_control(None, None, Some(0.0));
+        assert!((engine.default_animation_duration.as_millis() as i128 - original_duration_ms as i128).abs() < 1);
+        engine.apply_live_effects_control(None, None, Some(f32::NAN));
+        assert!((engine.default_animation_duration.as_millis() as i128 - original_duration_ms as i128).abs() < 1);
+        engine.apply_live_effects_control(None, None, Some(11.0));
+        assert!((engine.default_animation_duration.as_millis() as i128 - original_duration_ms as i128).abs() < 1);
+    }
+
+    #[test]
+    fn test_apply_live_effects_control_speed_shortens_duration() {
+        let config = EffectsConfig::default();
+        let mut engine = EffectsEngine::new(&config).expect("Failed to create EffectsEngine");
+        let base_ms = engine.config.animations.duration as u64;
+        // speed=2.0 should halve the default duration (floor of 1ms).
+        engine.apply_live_effects_control(None, None, Some(2.0));
+        let new_ms = engine.default_animation_duration.as_millis() as u64;
+        assert!(
+            new_ms < base_ms,
+            "speed=2.0 should shorten animation duration ({} -> {})",
+            base_ms, new_ms
+        );
+        // speed=0.5 should roughly double it (subject to floor).
+        engine.apply_live_effects_control(None, None, Some(0.5));
+        let slower_ms = engine.default_animation_duration.as_millis() as u64;
+        assert!(
+            slower_ms > new_ms,
+            "speed=0.5 should lengthen animation duration ({} -> {})",
+            new_ms, slower_ms
+        );
     }
 }

@@ -24,6 +24,57 @@ const MAX_CONNECTIONS: usize = 16;
 /// Idle timeout for client connections (seconds).
 const CLIENT_IDLE_TIMEOUT_SECS: u64 = 60;
 
+/// Whitelisted `LazyUIMessage::WorkspaceCommand.action` strings. Unknown actions
+/// are rejected with status `unknown_action` so callers can distinguish
+/// future-supported actions from outright typos. The compositor-side
+/// executor wires these to `WorkspaceTape::scroll_left/right` etc. when the
+/// `process_messages` dispatch table is extended.
+const KNOWN_WORKSPACE_ACTIONS: &[&str] = &[
+    "scroll_left",
+    "scroll_right",
+    "add_window",
+    "remove_window",
+    "move_focus_left",
+    "move_focus_right",
+];
+
+/// Maximum accepted blur radius in **pixels**. Anything above this is
+/// rejected as out-of-range to prevent absurd GPU work. The unit suffix is
+/// exposed in Python/dashboard clients via the rejection reason, which
+/// mentions `0..=32` so an off-by-one normalised float gets caught early.
+const MAX_EFFECTS_BLUR_RADIUS_PX: f32 = 32.0;
+/// Maximum accepted animation speed multiplier (1.0 = realtime, >1 faster).
+const MAX_EFFECTS_ANIMATION_SPEED: f32 = 10.0;
+
+/// Returns true when `action` is in the whitelisted
+/// [`KNOWN_WORKSPACE_ACTIONS`] set. Whitelist is enforced to avoid
+/// silently executing untyped JSON parameters against `workspace_manager`.
+fn is_known_workspace_action(action: &str) -> bool {
+    KNOWN_WORKSPACE_ACTIONS.contains(&action)
+}
+
+/// Validates a `LazyUIMessage::EffectsControl.blur_radius`. Returns
+/// `Some(radius)` on success and `None` for non-finite or out-of-range
+/// values. The compositor side of the IPC mirror in `process_messages`
+/// can rely on this having been called before applying the change.
+fn validate_blur_radius(radius: f32) -> Option<f32> {
+    if radius.is_finite() && (0.0..=MAX_EFFECTS_BLUR_RADIUS_PX).contains(&radius) {
+        Some(radius)
+    } else {
+        None
+    }
+}
+
+/// Validates a `LazyUIMessage::EffectsControl.animation_speed`. Returns
+/// `Some(speed)` on success and `None` otherwise.
+fn validate_animation_speed(speed: f32) -> Option<f32> {
+    if speed.is_finite() && (0.0..=MAX_EFFECTS_ANIMATION_SPEED).contains(&speed) {
+        Some(speed)
+    } else {
+        None
+    }
+}
+
 /// Messages sent from Axiom to Lazy UI (performance metrics, events)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
@@ -65,6 +116,34 @@ pub enum AxiomMessage {
         version: String,
         capabilities: Vec<String>,
     },
+
+    /// Comprehensive performance report answering a `GetPerformanceReport`
+    /// request. Distinct from `PerformanceMetrics` (broadcast, sampling-only)
+    /// so a request-response client can read typed fields and a note string.
+    /// Fields with no live readout from the IPC layer report 0.0 / 0; the
+    /// `note` field explains the gap so clients do not silently treat zeros
+    /// as accurate readings.
+    ///
+    /// **Migration note:** This variant replaces a previous `UserEvent`
+    /// with `event_type == "PerformanceReport"`. Clients that decoded
+    /// messages by the `event_type` discriminator string must now switch
+    /// on `data["type"] == "PerformanceReport"` (the serde tag). Clients
+    /// that already switched on `data["type"]` need no change — serde
+    /// emits this variant with `"type":"PerformanceReport"` automatically.
+    /// Wire schema (serde JSON):
+    /// ```json
+    /// {"type":"PerformanceReport","timestamp":<u64>,"gpu_usage":<f32>,
+    ///  "frame_time_ms":<f32>,"active_windows":<u32>,
+    ///  "current_workspace":<i32>,"note":"<str>"}
+    /// ```
+    PerformanceReport {
+        timestamp: u64,
+        gpu_usage: f32,
+        frame_time_ms: f32,
+        active_windows: u32,
+        current_workspace: i32,
+        note: String,
+    },
 }
 
 /// Messages sent from Lazy UI to Axiom (optimization commands)
@@ -86,7 +165,15 @@ pub enum LazyUIMessage {
         value: serde_json::Value,
     },
 
-    /// Workspace management commands
+    /// Workspace management commands. The handler validates the `action`
+    /// against `KNOWN_WORKSPACE_ACTIONS` and forwards the message via the
+    /// mpsc command channel to the compositor's `process_messages`. The
+    /// compositor-side dispatch arm for `WorkspaceCommand` is currently
+    /// missing — accepted actions are queued (`dispatched_via_mpsc: true`
+    /// in the ACK) but not executed. Tracked as a follow-up to wire
+    /// `scroll_left`, `scroll_right`, `add_window`, `remove_window`,
+    /// `move_focus_left`, and `move_focus_right` to
+    /// `ScrollableWorkspaces` mutations.
     WorkspaceCommand {
         action: String,
         parameters: serde_json::Value,
@@ -109,16 +196,15 @@ pub enum LazyUIMessage {
 /// IPC server for handling communication with Lazy UI
 pub struct AxiomIPCServer {
     socket_path: PathBuf,
-    #[allow(dead_code)]
-    listener: Option<UnixListener>,
     /// Broadcast channel for outgoing Axiom messages to all clients
     broadcast_tx: Option<broadcast::Sender<AxiomMessage>>,
-    /// Optional per-process message sender (kept for compatibility)
-    #[allow(dead_code)]
-    message_sender: Option<mpsc::UnboundedSender<AxiomMessage>>,
     command_receiver: Option<mpsc::UnboundedReceiver<LazyUIMessage>>,
     /// Sender side of command channel (for wiring incoming commands)
     command_sender: Option<mpsc::UnboundedSender<LazyUIMessage>>,
+    /// Live read-only handle to the compositor's `AxiomConfig`. Lazily wired
+    /// via `set_config_handle` so test-only constructors (`new()`) can keep
+    /// working without a config.
+    config_handle: Option<Arc<parking_lot::RwLock<AxiomConfig>>>,
     last_metrics_sent: Instant,
     // Last CPU times for non-blocking CPU usage sampling
     last_cpu_times: Option<(u64, u64)>,
@@ -143,17 +229,29 @@ impl AxiomIPCServer {
 
         Self {
             socket_path,
-            listener: None,
             broadcast_tx: None,
-            message_sender: None,
             command_receiver: None,
             command_sender: None,
+            config_handle: None,
             last_metrics_sent: Instant::now(),
             last_cpu_times: None,
             shutdown_token: None,
             accept_handle: None,
             connection_semaphore: None,
         }
+    }
+
+    /// Wire a read-only handle to the live `AxiomConfig` for `GetConfig`
+    /// queries. **The compositor remains the canonical owner** — this
+    /// field is only the IPC-side read source. To avoid drift, callers
+    /// (e.g. `AxiomCompositor::process_events`) MUST refresh this handle
+    /// after every write to the compositor's owned config, typically via
+    /// `self.ipc_server.set_config_handle(Arc::new(RwLock::new(self.config.clone())))`.
+    /// Mutating config keys (`OptimizeConfig` / `SetConfig`) flow back via
+    /// the mpsc `command_channel` so the compositor can apply them through
+    /// `process_messages` before refreshing the handle.
+    pub fn set_config_handle(&mut self, config: Arc<parking_lot::RwLock<AxiomConfig>>) {
+        self.config_handle = Some(config);
     }
 
     /// Start the IPC server
@@ -215,6 +313,9 @@ impl AxiomIPCServer {
 
         info!("🔗 Axiom IPC server listening on: {:?}", self.socket_path);
 
+        // Forward the config handle so per-client handlers can resolve GetConfig queries.
+        let config_handle = self.config_handle.clone();
+
         // Start accepting connections in a separate task
         let handle = tokio::spawn(Self::accept_connections_static(
             listener,
@@ -223,6 +324,7 @@ impl AxiomIPCServer {
             shutdown_token,
             semaphore,
             our_uid,
+            config_handle,
         ));
         self.accept_handle = Some(handle);
 
@@ -237,6 +339,7 @@ impl AxiomIPCServer {
         shutdown_token: CancellationToken,
         semaphore: Arc<Semaphore>,
         our_uid: u32,
+        config_handle: Option<Arc<parking_lot::RwLock<AxiomConfig>>>,
     ) -> Result<()> {
         loop {
             tokio::select! {
@@ -278,9 +381,10 @@ impl AxiomIPCServer {
                             info!("🤝 Lazy UI connected to Axiom IPC");
                             let rx = tx.subscribe();
                             let cmd_tx_clone = cmd_tx.clone();
+                            let config_for_client = config_handle.clone();
                             tokio::spawn(async move {
                                 let _permit = permit; // Hold permit for duration of connection
-                                if let Err(e) = Self::handle_client(stream, rx, cmd_tx_clone).await {
+                                if let Err(e) = Self::handle_client(stream, rx, cmd_tx_clone, config_for_client).await {
                                     debug!("IPC client handler ended: {}", e);
                                 }
                             });
@@ -309,6 +413,7 @@ impl AxiomIPCServer {
         stream: UnixStream,
         mut rx: broadcast::Receiver<AxiomMessage>,
         cmd_tx: mpsc::UnboundedSender<LazyUIMessage>,
+        config_handle: Option<Arc<parking_lot::RwLock<AxiomConfig>>>,
     ) -> Result<()> {
         let (reader, mut writer) = stream.into_split();
         let mut lines = BufReader::new(reader).lines();
@@ -352,8 +457,14 @@ impl AxiomIPCServer {
                         Ok(message) => {
                             // Forward command to compositor via channel
                             let _ = cmd_tx.send(message.clone());
+                            // Snapshot the live config (if wired) so the per-client
+                            // handler can resolve GetConfig queries without
+                            // holding locks across await points.
+                            let cfg_snapshot = config_handle
+                                .as_ref()
+                                .map(|h| h.read().clone());
                             // Also process inline for immediate response
-                            if let Err(e) = Self::process_lazy_ui_message(message, &mut writer).await {
+                            if let Err(e) = Self::process_lazy_ui_message(message, &mut writer, cfg_snapshot.as_ref()).await {
                                 warn!("⚠️ Error processing message: {}", e);
                             }
                         }
@@ -386,6 +497,7 @@ impl AxiomIPCServer {
     async fn process_lazy_ui_message(
         message: LazyUIMessage,
         writer: &mut tokio::net::unix::OwnedWriteHalf,
+        config: Option<&AxiomConfig>,
     ) -> Result<()> {
         match message {
             LazyUIMessage::OptimizeConfig { changes, reason } => {
@@ -424,10 +536,25 @@ impl AxiomIPCServer {
             LazyUIMessage::GetConfig { key } => {
                 debug!("📋 Config query: {}", key);
 
-                // TODO: Get actual configuration value from Axiom
+                // Resolve against the live `AxiomConfig` snapshot taken when the
+                // client connected. Each dot-separated "section.field" path is
+                // walked against the supported schema; unknown paths return Null
+                // so callers can distinguish "missing" from "default".
+                let value = config
+                    .and_then(|cfg| Self::resolve_config_path(cfg, &key))
+                    .unwrap_or(serde_json::Value::Null);
+                if value.is_null() {
+                    debug!(
+                        "GetConfig '{}' returned Null (key not recognised in live config)",
+                        key
+                    );
+                } else {
+                    debug!("GetConfig '{}' resolved against live config", key);
+                }
+
                 let response = AxiomMessage::ConfigResponse {
                     key: key.clone(),
-                    value: serde_json::Value::String("default_value".to_string()),
+                    value,
                 };
 
                 Self::send_message(writer, &response).await?;
@@ -445,11 +572,30 @@ impl AxiomIPCServer {
             }
 
             LazyUIMessage::WorkspaceCommand { action, parameters } => {
+                // Whitelist validation: only known actions are accepted, otherwise
+                // we respond with status `unknown_action` so the caller can
+                // distinguish a typo from a future-supported action. The existing
+                // cmd_tx forward in `handle_client` already routes the message into
+                // the compositor's `process_messages` queue, so `dispatched` is
+                // honest (`executor_pending` is true until a compositor-side
+                // dispatch arm is wired up).
+                let accepted = is_known_workspace_action(&action);
                 info!(
-                    "🖥️ Workspace command: {} with params: {:?}",
-                    action, parameters
+                    "🖥️ Workspace command: {} (accepted: {}, params: {:?})",
+                    action, accepted, parameters
                 );
-                // TODO: Execute workspace command
+                let ack = AxiomMessage::UserEvent {
+                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                    event_type: "WorkspaceCommandAck".into(),
+                    details: serde_json::json!({
+                        "action": action,
+                        "status": if accepted { "accepted" } else { "unknown_action" },
+                        // See doc-comment on `LazyUIMessage::WorkspaceCommand`
+                        // for the gap on compositor-side execution.
+                        "dispatched_via_mpsc": accepted,
+                    }),
+                };
+                Self::send_message(writer, &ack).await?;
             }
 
             LazyUIMessage::EffectsControl {
@@ -457,11 +603,50 @@ impl AxiomIPCServer {
                 blur_radius,
                 animation_speed,
             } => {
+                // Per-field range validation. `enabled` is a bool (always valid).
+                // `blur_radius` and `animation_speed` are bounded floats. Invalid
+                // values are reported back in `rejected` so callers can retry.
+                let mut accepted: Vec<String> = Vec::new();
+                let mut rejected: Vec<(String, String)> = Vec::new();
+                if let Some(e) = enabled {
+                    accepted.push(format!("enabled={}", e));
+                }
+                if let Some(r) = blur_radius {
+                    match validate_blur_radius(r) {
+                        Some(_) => accepted.push(format!("blur_radius={}", r)),
+                        None => rejected.push((
+                            "blur_radius".into(),
+                            format!("out_of_range_0..={}px", MAX_EFFECTS_BLUR_RADIUS_PX),
+                        )),
+                    }
+                }
+                if let Some(s) = animation_speed {
+                    match validate_animation_speed(s) {
+                        Some(_) => accepted.push(format!("animation_speed={}", s)),
+                        None => rejected.push((
+                            "animation_speed".into(),
+                            format!("out_of_range_0..={}", MAX_EFFECTS_ANIMATION_SPEED),
+                        )),
+                    }
+                }
                 info!(
-                    "✨ Effects control - enabled: {:?}, blur: {:?}, animation: {:?}",
-                    enabled, blur_radius, animation_speed
+                    "✨ Effects control — accepted: {}, rejected: {}",
+                    accepted.len(),
+                    rejected.len()
                 );
-                // TODO: Apply effects changes
+                // Compositor-side application: route via mpsc to `process_messages`
+                // once an effects dispatch arm is added; today the per-client ACK
+                // is the contract. `accepted` means the value passed whitelist +
+                // range checks; compositor-side application is outstanding.
+                let ack = AxiomMessage::UserEvent {
+                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                    event_type: "EffectsControlAck".into(),
+                    details: serde_json::json!({
+                        "accepted": accepted,
+                        "rejected": rejected,
+                    }),
+                };
+                Self::send_message(writer, &ack).await?;
             }
 
             LazyUIMessage::HealthCheck => {
@@ -483,7 +668,24 @@ impl AxiomIPCServer {
 
             LazyUIMessage::GetPerformanceReport => {
                 debug!("📊 Performance report request");
-                // TODO: Generate comprehensive performance report
+                // Live system metrics are sampled via the static helpers below
+                // (they only touch OS files, no compositor state required).
+                // `frame_time`, `active_windows`, and `current_workspace` are
+                // compositor-runtime data that need `&self` access; we report
+                // them as 0 with a `note` field so the caller knows the fields
+                // are placeholders rather than zero readings. The
+                // rate-limited `maybe_broadcast_performance_metrics` path on the
+                // compositor side already publishes these continuously.
+                let gpu_usage = Self::sample_gpu_usage();
+                let report = AxiomMessage::PerformanceReport {
+                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                    gpu_usage,
+                    frame_time_ms: 0.0,
+                    active_windows: 0,
+                    current_workspace: 0,
+                    note: "frame_time/windows/workspace are 0 — see broadcast PerformanceMetrics for live values".into(),
+                };
+                Self::send_message(writer, &report).await?;
             }
         }
 
@@ -511,7 +713,7 @@ impl AxiomIPCServer {
         Ok(())
     }
 
-    /// Send performance metrics to Lazy UI
+    /// Send performance metrics to Lazy UI (via broadcast channel)
     #[allow(dead_code)]
     #[allow(clippy::unused_async)]
     pub async fn send_performance_metrics(
@@ -523,8 +725,8 @@ impl AxiomIPCServer {
         active_windows: u32,
         current_workspace: i32,
     ) -> Result<()> {
-        if let Some(sender) = &self.message_sender {
-            let metrics = AxiomMessage::PerformanceMetrics {
+        if let Some(tx) = &self.broadcast_tx {
+            let _ = tx.send(AxiomMessage::PerformanceMetrics {
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)?
                     .as_secs(),
@@ -534,21 +736,27 @@ impl AxiomIPCServer {
                 frame_time,
                 active_windows,
                 current_workspace,
-            };
-
-            sender
-                .send(metrics)
-                .map_err(|_| anyhow::anyhow!("Failed to send performance metrics"))?;
+            });
         }
 
         Ok(())
     }
 
-    /// Phase 3: Process pending IPC messages and apply configuration changes
-    /// Returns true if configuration was modified
-    pub async fn process_messages(&mut self, config: &mut AxiomConfig) -> Result<bool> {
-        // Process any pending messages from Lazy UI
+    /// Phase 3: Process pending IPC messages and apply configuration changes.
+    /// Returns `(config_changed, pending_actions)`:
+    /// - `config_changed`: true if any `OptimizeConfig` / `SetConfig` mutator
+    ///   wrote to the config-owned path. Callers typically call
+    ///   `update_subsystems_config()` and refresh the IPC handle when set.
+    /// - `pending_actions`: messages from `WorkspaceCommand` /
+    ///   `EffectsControl` (already validated at the per-client layer) that
+    ///   the compositor owns — they require real subsystem access that the
+    ///   IPC server does not hold. Caller is responsible for dispatch.
+    pub async fn process_messages(
+        &mut self,
+        config: &mut AxiomConfig,
+    ) -> Result<(bool, Vec<LazyUIMessage>)> {
         let mut config_changed = false;
+        let mut pending_actions: Vec<LazyUIMessage> = Vec::new();
 
         if let Some(receiver) = &mut self.command_receiver {
             while let Ok(message) = receiver.try_recv() {
@@ -603,6 +811,12 @@ impl AxiomIPCServer {
                             }
                         }
                     }
+                    // Sub-system-bound actions: validated upstream, dispatched
+                    // by the compositor in `AxiomCompositor::process_events`.
+                    LazyUIMessage::WorkspaceCommand { .. }
+                    | LazyUIMessage::EffectsControl { .. } => {
+                        pending_actions.push(message);
+                    }
                     _ => {
                         debug!("📑 Other message type processed (no main thread action needed)");
                     }
@@ -612,28 +826,24 @@ impl AxiomIPCServer {
 
         // Small delay to prevent busy loop
         tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-        Ok(config_changed)
+        Ok((config_changed, pending_actions))
     }
 
-    /// Send user event to Lazy UI
+    /// Send user event to Lazy UI (via broadcast channel)
     #[allow(clippy::unused_async)]
     pub async fn send_user_event(
         &self,
         event_type: String,
         details: serde_json::Value,
     ) -> Result<()> {
-        if let Some(sender) = &self.message_sender {
-            let event = AxiomMessage::UserEvent {
+        if let Some(tx) = &self.broadcast_tx {
+            let _ = tx.send(AxiomMessage::UserEvent {
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)?
                     .as_secs(),
                 event_type,
                 details,
-            };
-
-            sender
-                .send(event)
-                .map_err(|_| anyhow::anyhow!("Failed to send user event"))?;
+            });
         }
 
         Ok(())
@@ -642,6 +852,12 @@ impl AxiomIPCServer {
     /// Get the socket path
     pub fn socket_path(&self) -> &PathBuf {
         &self.socket_path
+    }
+
+    /// Public getter for testing — allows external test code to inject
+    /// LazyUIMessage variants into the command channel without a real IPC client.
+    pub fn command_sender_for_test(&self) -> Option<&mpsc::UnboundedSender<LazyUIMessage>> {
+        self.command_sender.as_ref()
     }
 
     /// Broadcast PerformanceMetrics to all connected clients
@@ -849,6 +1065,44 @@ impl Drop for AxiomIPCServer {
 }
 
 impl AxiomIPCServer {
+    /// Walk a dot-separated `section.field` path on the live `AxiomConfig`.
+    /// Supports the `workspace.*`, `effects.*`, `general.*`, and `xwayland.*`
+    /// subtrees. Returns `None` for unknown paths so the IPC layer can answer
+    /// with `Null` rather than a misleading default.
+    fn resolve_config_path(config: &AxiomConfig, key: &str) -> Option<serde_json::Value> {
+        match key {
+            "workspace.scroll_speed" => Some(serde_json::json!(config.workspace.scroll_speed)),
+            "workspace.infinite_scroll" => {
+                Some(serde_json::json!(config.workspace.infinite_scroll))
+            }
+            "workspace.auto_scroll" => Some(serde_json::json!(config.workspace.auto_scroll)),
+            "workspace.gaps" => Some(serde_json::json!(config.workspace.gaps)),
+            "workspace.workspace_width" => {
+                Some(serde_json::json!(config.workspace.workspace_width))
+            }
+            "workspace.smooth_scrolling" => {
+                Some(serde_json::json!(config.workspace.smooth_scrolling))
+            }
+            "window.focus_follows_mouse" => {
+                Some(serde_json::json!(config.window.focus_follows_mouse))
+            }
+            "window.border_width" => Some(serde_json::json!(config.window.border_width)),
+            "effects.enabled" => Some(serde_json::json!(config.effects.enabled)),
+            "effects.blur.radius" => Some(serde_json::json!(config.effects.blur.radius)),
+            "effects.blur.intensity" => Some(serde_json::json!(config.effects.blur.intensity)),
+            "effects.animations.duration" => {
+                Some(serde_json::json!(config.effects.animations.duration))
+            }
+            "effects.shadows.opacity" => {
+                Some(serde_json::json!(config.effects.shadows.opacity))
+            }
+            "general.max_fps" => Some(serde_json::json!(config.general.max_fps)),
+            "general.vsync" => Some(serde_json::json!(config.general.vsync)),
+            "xwayland.enabled" => Some(serde_json::json!(config.xwayland.enabled)),
+            _ => None,
+        }
+    }
+
     fn default_socket_path() -> PathBuf {
         // Prefer XDG_RUNTIME_DIR
         if let Ok(mut dir) = std::env::var("XDG_RUNTIME_DIR") {
@@ -898,6 +1152,88 @@ mod tests {
                 assert!(changes.contains_key("blur_radius"));
             }
             _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_known_workspace_actions() {
+        // Pin each whitelisted action as a literal — removing any single entry
+        // from `KNOWN_WORKSPACE_ACTIONS` should fail this test (otherwise we
+        // are testing the whitelist against itself).
+        assert!(is_known_workspace_action("scroll_left"));
+        assert!(is_known_workspace_action("scroll_right"));
+        assert!(is_known_workspace_action("add_window"));
+        assert!(is_known_workspace_action("remove_window"));
+        assert!(is_known_workspace_action("move_focus_left"));
+        assert!(is_known_workspace_action("move_focus_right"));
+        // Unknown actions should be rejected
+        assert!(!is_known_workspace_action("nuke_all_windows"));
+        assert!(!is_known_workspace_action(""));
+        assert!(!is_known_workspace_action("scroll"));
+        assert!(!is_known_workspace_action("SCROLL_LEFT")); // case-sensitive
+    }
+
+    #[test]
+    fn test_validate_blur_radius() {
+        // Valid: in-range finite values
+        assert_eq!(validate_blur_radius(0.0), Some(0.0));
+        assert_eq!(validate_blur_radius(8.5), Some(8.5));
+        assert_eq!(
+            validate_blur_radius(MAX_EFFECTS_BLUR_RADIUS_PX),
+            Some(MAX_EFFECTS_BLUR_RADIUS_PX)
+        );
+        // Invalid: out of range or non-finite
+        assert_eq!(validate_blur_radius(-1.0), None);
+        assert_eq!(validate_blur_radius(MAX_EFFECTS_BLUR_RADIUS_PX + 0.1), None);
+        assert_eq!(validate_blur_radius(f32::NAN), None);
+        assert_eq!(validate_blur_radius(f32::INFINITY), None);
+    }
+
+    #[test]
+    fn test_validate_animation_speed() {
+        assert_eq!(validate_animation_speed(0.0), Some(0.0));
+        assert_eq!(validate_animation_speed(1.5), Some(1.5));
+        assert_eq!(
+            validate_animation_speed(MAX_EFFECTS_ANIMATION_SPEED),
+            Some(MAX_EFFECTS_ANIMATION_SPEED)
+        );
+        assert_eq!(validate_animation_speed(-0.5), None);
+        assert_eq!(validate_animation_speed(MAX_EFFECTS_ANIMATION_SPEED + 1.0), None);
+        assert_eq!(validate_animation_speed(f32::NAN), None);
+    }
+
+    #[test]
+    fn test_performance_report_serialization() {
+        // Confirm the typed `PerformanceReport` variant round-trips through
+        // serde_json with all fields preserved. This is the typed-schema
+        // alternative to the prior UserEvent JSON-blob shape.
+        let msg = AxiomMessage::PerformanceReport {
+            timestamp: 12345,
+            gpu_usage: 7.5,
+            frame_time_ms: 16.7,
+            active_windows: 3,
+            current_workspace: 1,
+            note: "ok".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: AxiomMessage = serde_json::from_str(&json).unwrap();
+        match back {
+            AxiomMessage::PerformanceReport {
+                timestamp,
+                gpu_usage,
+                frame_time_ms,
+                active_windows,
+                current_workspace,
+                note,
+            } => {
+                assert_eq!(timestamp, 12345);
+                assert!((gpu_usage - 7.5).abs() < 1e-6);
+                assert!((frame_time_ms - 16.7).abs() < 1e-6);
+                assert_eq!(active_windows, 3);
+                assert_eq!(current_workspace, 1);
+                assert_eq!(note, "ok");
+            }
+            _ => panic!("Wrong message type after round-trip"),
         }
     }
 }
