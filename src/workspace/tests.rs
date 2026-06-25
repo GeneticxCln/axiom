@@ -5,24 +5,21 @@
 
 use super::*;
 use crate::config::WorkspaceConfig;
-use anyhow::Result;
 
 #[test]
-fn test_workspace_creation() -> Result<()> {
+fn test_workspace_creation() {
     let config = WorkspaceConfig::default();
-    let workspaces = ScrollableWorkspaces::new(&config)?;
+    let workspaces = ScrollableWorkspaces::new(&config);
 
     // Should start with one empty column
     assert_eq!(workspaces.active_column_count(), 1); // One column is created by default
     assert_eq!(workspaces.focused_column_index(), 0);
-
-    Ok(())
 }
 
 #[test]
-fn test_window_addition() -> Result<()> {
+fn test_window_addition() {
     let config = WorkspaceConfig::default();
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Add first window - goes to focused column (index 0)
     workspaces.add_window(1001);
@@ -32,14 +29,12 @@ fn test_window_addition() -> Result<()> {
     workspaces.add_window(1002);
     workspaces.add_window(1003);
     assert_eq!(workspaces.active_column_count(), 1); // Still 1 column
-
-    Ok(())
 }
 
 #[test]
-fn test_window_removal() -> Result<()> {
+fn test_window_removal() {
     let config = WorkspaceConfig::default();
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Add windows to the same focused column
     workspaces.add_window(1001);
@@ -56,14 +51,12 @@ fn test_window_removal() -> Result<()> {
     let not_removed = workspaces.remove_window_bool(9999);
     assert!(!not_removed);
     assert_eq!(workspaces.active_column_count(), 1); // No change
-
-    Ok(())
 }
 
 #[test]
-fn test_workspace_scrolling() -> Result<()> {
+fn test_workspace_scrolling() {
     let config = WorkspaceConfig::default();
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Add multiple windows and manually place them in different columns
     workspaces.add_window_to_column(1, 0); // First window in column 0
@@ -87,16 +80,16 @@ fn test_workspace_scrolling() -> Result<()> {
 
     workspaces.scroll_left();
     assert_eq!(workspaces.focused_column_index(), 0);
-
-    Ok(())
 }
 
 #[test]
-fn test_infinite_scrolling_bounds() -> Result<()> {
-    let mut config = WorkspaceConfig::default();
-    config.infinite_scroll = true;
+fn test_infinite_scrolling_bounds() {
+    let config = WorkspaceConfig {
+        infinite_scroll: true,
+        ..WorkspaceConfig::default()
+    };
 
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Add windows to different columns
     workspaces.add_window_to_column(1, 0);
@@ -109,14 +102,12 @@ fn test_infinite_scrolling_bounds() -> Result<()> {
 
     // With infinite scroll, this might go to -1 or wrap, depending on implementation
     // The exact behavior would depend on the ScrollableWorkspaces implementation
-
-    Ok(())
 }
 
 #[test]
-fn test_window_movement() -> Result<()> {
+fn test_window_movement() {
     let config = WorkspaceConfig::default();
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Add windows to different columns
     workspaces.add_window_to_column(1001, 0);
@@ -134,14 +125,12 @@ fn test_window_movement() -> Result<()> {
     // Test moving window left
     let moved_left = workspaces.move_window_left(1002);
     assert!(moved_left);
-
-    Ok(())
 }
 
 #[test]
-fn test_focused_column_retrieval() -> Result<()> {
+fn test_focused_column_retrieval() {
     let config = WorkspaceConfig::default();
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Add windows to different columns
     workspaces.add_window_to_column(1001, 0);
@@ -157,34 +146,32 @@ fn test_focused_column_retrieval() -> Result<()> {
     let focused_column = workspaces.get_focused_column_opt().unwrap();
     assert_eq!(focused_column.windows.len(), 1);
     assert_eq!(focused_column.windows[0], 1002);
-
-    Ok(())
 }
 
 #[test]
-fn test_workspace_update_cycle() -> Result<()> {
+fn test_workspace_update_cycle() {
     let config = WorkspaceConfig::default();
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Add windows to different columns
     workspaces.add_window_to_column(1001, 0);
     workspaces.add_window_to_column(1002, 1);
 
     // Test update cycle (should not crash)
-    workspaces.update_animations()?;
+    workspaces.update_animations();
 
     // Should still have the same number of columns
     assert_eq!(workspaces.active_column_count(), 2);
-
-    Ok(())
 }
 
 #[test]
-fn test_smooth_scrolling_state() -> Result<()> {
-    let mut config = WorkspaceConfig::default();
-    config.smooth_scrolling = true;
+fn test_smooth_scrolling_state() {
+    let config = WorkspaceConfig {
+        smooth_scrolling: true,
+        ..WorkspaceConfig::default()
+    };
 
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Add windows to different columns
     workspaces.add_window_to_column(1, 0);
@@ -197,37 +184,41 @@ fn test_smooth_scrolling_state() -> Result<()> {
     // The exact state would depend on implementation details
     // but the operation should succeed
     assert_eq!(workspaces.active_column_count(), 3);
-
-    Ok(())
 }
 
 #[test]
-fn test_workspace_configuration_effects() -> Result<()> {
-    let mut config = WorkspaceConfig::default();
-
+fn test_workspace_configuration_effects() {
     // Test with different scroll speeds
-    config.scroll_speed = 2.0;
-    let workspaces_fast = ScrollableWorkspaces::new(&config)?;
+    let config = WorkspaceConfig {
+        scroll_speed: 2.0,
+        ..WorkspaceConfig::default()
+    };
+    let workspaces_fast = ScrollableWorkspaces::new(&config);
 
-    config.scroll_speed = 0.5;
-    let workspaces_slow = ScrollableWorkspaces::new(&config)?;
+    let config = WorkspaceConfig {
+        scroll_speed: 0.5,
+        ..WorkspaceConfig::default()
+    };
+    let workspaces_slow = ScrollableWorkspaces::new(&config);
 
     // Both should create successfully
     assert_eq!(workspaces_fast.active_column_count(), 1); // Default column is created
     assert_eq!(workspaces_slow.active_column_count(), 1); // Default column is created
 
     // Test with different gap settings
-    config.gaps = 20;
-    let workspaces_large_gaps = ScrollableWorkspaces::new(&config)?;
+    let config = WorkspaceConfig {
+        gaps: 20,
+        scroll_speed: 0.5,
+        ..WorkspaceConfig::default()
+    };
+    let workspaces_large_gaps = ScrollableWorkspaces::new(&config);
     assert_eq!(workspaces_large_gaps.active_column_count(), 1); // Default column is created
-
-    Ok(())
 }
 
 #[test]
-fn test_window_in_column() -> Result<()> {
+fn test_window_in_column() {
     let config = WorkspaceConfig::default();
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Add windows to the same column
     workspaces.add_window(1001);
@@ -239,32 +230,28 @@ fn test_window_in_column() -> Result<()> {
 
     let not_exists = workspaces.window_exists(9999);
     assert!(!not_exists);
-
-    Ok(())
 }
 
 #[test]
-fn test_workspace_shutdown() -> Result<()> {
+fn test_workspace_shutdown() {
     let config = WorkspaceConfig::default();
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Add windows to the same column
     workspaces.add_window(1001);
     workspaces.add_window(1002);
 
     // Shutdown should succeed
-    workspaces.shutdown()?;
+    workspaces.shutdown();
 
     // After shutdown, operations might not work the same way
     // but the shutdown itself should not crash
-
-    Ok(())
 }
 
 #[test]
-fn test_large_number_of_windows() -> Result<()> {
+fn test_large_number_of_windows() {
     let config = WorkspaceConfig::default();
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Add many windows to different columns
     for i in 1..=100 {
@@ -298,14 +285,12 @@ fn test_large_number_of_windows() -> Result<()> {
         "Final count {} should not exceed original 100",
         final_count
     );
-
-    Ok(())
 }
 
 #[test]
-fn test_edge_case_empty_workspace() -> Result<()> {
+fn test_edge_case_empty_workspace() {
     let config = WorkspaceConfig::default();
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Test operations on empty workspace
     let moved = workspaces.move_window_right(1001);
@@ -319,14 +304,12 @@ fn test_edge_case_empty_workspace() -> Result<()> {
     workspaces.scroll_right();
 
     assert_eq!(workspaces.active_column_count(), 2); // We have columns 0 and -1 after scrolling left
-
-    Ok(())
 }
 
 #[test]
-fn test_workspace_bounds_checking() -> Result<()> {
+fn test_workspace_bounds_checking() {
     let config = WorkspaceConfig::default();
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Add a single window
     workspaces.add_window(1001);
@@ -343,14 +326,12 @@ fn test_workspace_bounds_checking() -> Result<()> {
     if !workspaces.is_infinite_scroll_enabled() {
         assert!(index < 10); // Reasonable upper bound
     }
-
-    Ok(())
 }
 
 #[test]
-fn test_multi_monitor_tapes() -> Result<()> {
+fn test_multi_monitor_tapes() {
     let config = WorkspaceConfig::default();
-    let mut workspaces = ScrollableWorkspaces::new(&config)?;
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // 1. Create tapes for two outputs
     workspaces.ensure_tape("output-1");
@@ -368,11 +349,7 @@ fn test_multi_monitor_tapes() -> Result<()> {
     workspaces.focused_output = "output-2".to_string();
 
     // Verify window does NOT exist in output-2's tape locally (though window_exists delegates globally in current impl, let's check column count directly)
-    assert_eq!(workspaces.active_tape().active_column_count(), 1); // Default empty column
-    assert!(workspaces
-        .active_tape()
-        .get_focused_column_windows()
-        .is_empty());
+    assert_eq!(workspaces.active_tape().active_column_count(), 1); // Default empty column    assert!(workspaces.active_tape().get_focused_column_windows().is_empty());
 
     // 4. Add window to output-2
     workspaces.add_window(2002);
@@ -387,8 +364,6 @@ fn test_multi_monitor_tapes() -> Result<()> {
         workspaces.active_tape().get_focused_column_windows(),
         vec![1001]
     );
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -402,7 +377,7 @@ mod property_tests {
             window_ids in prop::collection::vec(1u64..1000u64, 1..20)
         ) {
             let config = WorkspaceConfig::default();
-            let mut workspaces = ScrollableWorkspaces::new(&config).unwrap();
+            let mut workspaces = ScrollableWorkspaces::new(&config);
 
             // Add all windows to different columns
             for (i, &id) in window_ids.iter().enumerate() {
@@ -433,7 +408,7 @@ mod property_tests {
             scroll_ops in prop::collection::vec(any::<bool>(), 1..50)
         ) {
             let config = WorkspaceConfig::default();
-            let mut workspaces = ScrollableWorkspaces::new(&config).unwrap();
+            let mut workspaces = ScrollableWorkspaces::new(&config);
 
             // Add some windows for scrolling - to different columns
             for i in 1..=10 {
@@ -467,7 +442,7 @@ mod property_tests {
             moves in prop::collection::vec((1u64..10u64, any::<bool>()), 1..20)
         ) {
             let config = WorkspaceConfig::default();
-            let mut workspaces = ScrollableWorkspaces::new(&config).unwrap();
+            let mut workspaces = ScrollableWorkspaces::new(&config);
 
             // Add windows to different columns
             for i in 1..=10 {

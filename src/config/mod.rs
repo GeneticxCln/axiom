@@ -1,11 +1,20 @@
 //! Configuration management for Axiom
-#![allow(missing_docs)]
 //!
 //! This module handles loading, parsing, and validating configuration
 //! from TOML files. It combines settings for workspaces, effects,
 //! input handling, and more.
+//!
+//! The configuration is composed of several sections:
+//! - [`WorkspaceConfig`]: Scrollable workspace behavior
+//! - [`EffectsConfig`]: Visual effects and animations
+//! - [`WindowConfig`]: Window management and placement
+//! - [`InputConfig`]: Input device handling
+//! - [`BindingsConfig`]: Key binding mappings
+//! - [`XWaylandConfig`]: X11 compatibility settings
+//! - [`GeneralConfig`]: Global compositor settings
 
 use anyhow::{Context, Result};
+use log::warn;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -431,47 +440,143 @@ impl AxiomConfig {
         Ok(config)
     }
 
-    /// Validate the configuration
+    /// Validate the configuration, covering all ~30 fields.
     pub fn validate(&self) -> Result<()> {
-        // Validate scroll speed
+        // --- workspace ---
         if self.workspace.scroll_speed <= 0.0 || self.workspace.scroll_speed > 10.0 {
-            anyhow::bail!("Invalid scroll_speed: must be between 0.0 and 10.0");
+            anyhow::bail!("Invalid scroll_speed: must be in (0, 10]");
+        }
+        if self.workspace.workspace_width == 0 || self.workspace.workspace_width > 16_384 {
+            anyhow::bail!("workspace_width must be in [1, 16384]");
+        }
+        if self.workspace.gaps > 500 {
+            anyhow::bail!("gaps must be <= 500");
+        }
+        if !(0.0..=1.0).contains(&self.workspace.momentum_friction) {
+            anyhow::bail!("momentum_friction must be in [0, 1]");
+        }
+        if self.workspace.momentum_min_velocity < 0.0
+            || self.workspace.momentum_min_velocity > 10_000.0
+        {
+            anyhow::bail!("momentum_min_velocity must be in [0, 10000]");
+        }
+        if self.workspace.snap_threshold_px < 0.0 || self.workspace.snap_threshold_px > 10_000.0 {
+            anyhow::bail!("snap_threshold_px must be in [0, 10000]");
         }
 
-        // Validate animation curve
+        // --- effects ---
+        if self.effects.blur.radius > 256 {
+            anyhow::bail!("blur.radius must be <= 256");
+        }
+        if !(0.0..=1.0).contains(&self.effects.blur.intensity) {
+            anyhow::bail!("blur.intensity must be in [0, 1]");
+        }
+        if self.effects.animations.duration == 0 || self.effects.animations.duration > 60_000 {
+            anyhow::bail!("animation duration must be in [1, 60000] ms");
+        }
+        if self.effects.animations.workspace_transition > 60_000 {
+            anyhow::bail!("workspace transition duration must be <= 60000 ms");
+        }
+        if self.effects.animations.window_animation > 60_000 {
+            anyhow::bail!("window animation duration must be <= 60000 ms");
+        }
         let valid_curves = ["linear", "ease", "ease-in", "ease-out", "ease-in-out"];
         if !valid_curves.contains(&self.effects.animations.curve.as_str()) {
             anyhow::bail!("Invalid animation curve: {}", self.effects.animations.curve);
         }
-
-        // Validate blur intensity
-        if self.effects.blur.intensity < 0.0 || self.effects.blur.intensity > 1.0 {
-            anyhow::bail!("Invalid blur intensity: must be between 0.0 and 1.0");
+        if self.effects.rounded_corners.radius > 256 {
+            anyhow::bail!("rounded_corners.radius must be <= 256");
+        }
+        if !(1..=4).contains(&self.effects.rounded_corners.antialiasing) {
+            anyhow::bail!("rounded_corners.antialiasing must be 1-4");
+        }
+        if !(0.0..=1.0).contains(&self.effects.shadows.opacity) {
+            anyhow::bail!("shadows.opacity must be in [0, 1]");
+        }
+        if self.effects.shadows.size > 1024 {
+            anyhow::bail!("shadows.size must be <= 1024");
+        }
+        if self.effects.shadows.blur_radius > 512 {
+            anyhow::bail!("shadows.blur_radius must be <= 512");
+        }
+        // Validate shadow.color is a valid 6-char hex string
+        if !self.effects.shadows.color.starts_with('#') || self.effects.shadows.color.len() != 7 {
+            anyhow::bail!("shadows.color must be a #RRGGBB hex string");
         }
 
-        // Validate shadow opacity
-        if self.effects.shadows.opacity < 0.0 || self.effects.shadows.opacity > 1.0 {
-            anyhow::bail!("Invalid shadow opacity: must be between 0.0 and 1.0");
+        // --- window ---
+        if self.window.border_width > 100 {
+            anyhow::bail!("border_width must be <= 100");
+        }
+        if self.window.gap > 500 {
+            anyhow::bail!("window.gap must be <= 500");
+        }
+        let valid_placements = ["smart", "center", "mouse"];
+        if !valid_placements.contains(&self.window.placement.as_str()) {
+            anyhow::bail!("Invalid window placement: {}", self.window.placement);
+        }
+        let valid_layouts = ["horizontal", "vertical"];
+        if !valid_layouts.contains(&self.window.default_layout.as_str()) {
+            anyhow::bail!("Invalid default_layout: {}", self.window.default_layout);
         }
 
-        // Validate max_fps: 0 means unlimited, otherwise clamp-friendly range
-        // [1, 1000]. Catches typos like max_fps = u32::MAX at TOML load time
-        // instead of letting tick() clamp them silently.
+        // --- input ---
+        if self.input.keyboard_repeat_delay > 10_000 {
+            anyhow::bail!("keyboard_repeat_delay must be <= 10 000 ms");
+        }
+        if self.input.keyboard_repeat_rate == 0 || self.input.keyboard_repeat_rate > 1000 {
+            anyhow::bail!("keyboard_repeat_rate must be in [1, 1000]");
+        }
+        if !(-1.0..=10.0).contains(&self.input.mouse_accel) {
+            anyhow::bail!("mouse_accel must be in [-1, 10]");
+        }
+
+        // --- general ---
         if self.general.max_fps > 1000 {
             anyhow::bail!(
-                "Invalid general.max_fps: {} (must be 0 for unlimited, or in [1, 1000])",
+                "max_fps must be 0 (unlimited) or in [1, 1000], got {}",
                 self.general.max_fps
             );
+        }
+
+        // --- xwayland ---
+        if let Some(display) = self.xwayland.display {
+            if display > 99 {
+                anyhow::bail!("xwayland.display must be in [0, 99]");
+            }
         }
 
         Ok(())
     }
 
-    /// Save configuration to a TOML file
+    /// Save configuration to a TOML file (atomic write).
+    ///
+    /// Writes to a temp file in the same directory and renames, so a
+    /// mid-write crash leaves either the old file or the new one
+    /// intact. File permissions are set to 0600 to avoid leaking config.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let path = path.as_ref();
         let contents = toml::to_string_pretty(self).context("Failed to serialize configuration")?;
 
-        fs::write(path, contents).context("Failed to write configuration file")?;
+        let tmp_path = path.with_extension("tmp");
+        fs::write(&tmp_path, &contents)
+            .with_context(|| format!("Failed to write temp config: {}", tmp_path.display()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600)) {
+                warn!("⚠️ Failed to set 0600 on config tmp file: {}", e);
+            }
+        }
+
+        fs::rename(&tmp_path, path).with_context(|| {
+            format!(
+                "Failed to rename {} -> {}",
+                tmp_path.display(),
+                path.display()
+            )
+        })?;
 
         Ok(())
     }

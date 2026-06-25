@@ -233,7 +233,10 @@ impl AxiomXwm {
     ) -> Result<()> {
         log::debug!(
             "📋 SelectionRequest: requestor={}, selection={:?}, target={:?}, property={:?}",
-            requestor, selection, target, property
+            requestor,
+            selection,
+            target,
+            property
         );
 
         if target == self.atoms.TARGETS {
@@ -248,7 +251,9 @@ impl AxiomXwm {
             )?;
         } else if target == self.atoms.UTF8_STRING || target == self.atoms.TEXT {
             let data = clipboard_data.unwrap_or_else(|| {
-                log::warn!("⚠️ X11 clipboard request but no Wayland data cached — sending placeholder");
+                log::warn!(
+                    "⚠️ X11 clipboard request but no Wayland data cached — sending placeholder"
+                );
                 b"[axiom: no Wayland clipboard data]"
             });
             self.conn.change_property8(

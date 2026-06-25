@@ -64,6 +64,11 @@ struct WindowRenderData {
     opacity: f32,
 }
 
+/// Per-frame shadow effect queue entry for the WGPU renderer.
+type PendingShadow = (u64, (f32, f32), (f32, f32), crate::effects::ShadowParams);
+/// Per-frame blur effect queue entry for the WGPU renderer.
+type PendingBlur = (u64, (f32, f32), (f32, f32), crate::effects::BlurParams);
+
 impl AxiomCompositor {
     /// Create a new Axiom compositor instance
     #[allow(clippy::too_many_arguments)]
@@ -120,7 +125,10 @@ impl AxiomCompositor {
             .write()
             .initialize_gpu(device, queue)
             .unwrap_or_else(|e| {
-                warn!("⚠️ GPU effects initialization skipped ({}): blur/shadows will not render", e);
+                warn!(
+                    "⚠️ GPU effects initialization skipped ({}): blur/shadows will not render",
+                    e
+                );
             });
 
         // Wire effects engine into renderer for GPU shadow/blur post-processing
@@ -197,9 +205,8 @@ impl AxiomCompositor {
                     // returns stale data when Lazy UI re-queries. Matches
                     // the project's push-based config propagation model
                     // (see `update_subsystems_config`).
-                    self.ipc_server.set_config_handle(Arc::new(parking_lot::RwLock::new(
-                        self.config.clone(),
-                    )));
+                    self.ipc_server
+                        .set_config_handle(Arc::new(parking_lot::RwLock::new(self.config.clone())));
                 }
                 for action in pending_actions {
                     match action {
@@ -235,11 +242,7 @@ impl AxiomCompositor {
     /// method (`scroll_workspace_left`, `move_window_left`, …) takes and
     /// drops its own lock internally, so calling them in sequence avoids
     /// any cross-subsystem inversion.
-    fn dispatch_workspace_command(
-        &mut self,
-        action: &str,
-        parameters: &serde_json::Value,
-    ) {
+    fn dispatch_workspace_command(&mut self, action: &str, parameters: &serde_json::Value) {
         match action {
             "scroll_left" => self.scroll_workspace_left(),
             "scroll_right" => self.scroll_workspace_right(),
@@ -252,32 +255,24 @@ impl AxiomCompositor {
             }
             "remove_window" => match parameters.get("window_id").and_then(|v| v.as_u64()) {
                 Some(id) => self.remove_window(id),
-                None => warn!(
-                    "⚠️ WorkspaceCommand remove_window missing 'window_id' parameter — no-op"
-                ),
+                None => {
+                    warn!("⚠️ WorkspaceCommand remove_window missing 'window_id' parameter — no-op")
+                }
             },
             "move_focus_left" => {
-                let focused_id = self
-                    .workspace_manager
-                    .read()
-                    .get_focused_column_windows()
-                    .first()
-                    .copied();
+                let focused_id = self.window_manager.read().focused_window_id();
                 match focused_id {
                     Some(id) => self.move_window_left(id),
                     None => debug!("🖥️ WorkspaceCommand move_focus_left: no focused window, no-op"),
                 }
             }
             "move_focus_right" => {
-                let focused_id = self
-                    .workspace_manager
-                    .read()
-                    .get_focused_column_windows()
-                    .first()
-                    .copied();
+                let focused_id = self.window_manager.read().focused_window_id();
                 match focused_id {
                     Some(id) => self.move_window_right(id),
-                    None => debug!("🖥️ WorkspaceCommand move_focus_right: no focused window, no-op"),
+                    None => {
+                        debug!("🖥️ WorkspaceCommand move_focus_right: no focused window, no-op")
+                    }
                 }
             }
             // Defensive catch-all. The IPC layer's whitelist already rejects
@@ -299,41 +294,40 @@ impl AxiomCompositor {
         blur_radius: Option<f32>,
         animation_speed: Option<f32>,
     ) {
-        self.effects_engine
-            .write()
-            .apply_live_effects_control(enabled, blur_radius, animation_speed);
+        self.effects_engine.write().apply_live_effects_control(
+            enabled,
+            blur_radius,
+            animation_speed,
+        );
         debug!(
             "✨ Effects control dispatched — enabled: {:?}, blur: {:?}, animation: {:?}",
             enabled, blur_radius, animation_speed
         );
     }
 
-    /// Phase 4: Enhanced frame rendering with visual effects
+    /// Populate per-frame effect queues in the WGPU renderer from the effects engine.
     ///
-    /// Layout calculation and position updates are handled by the backend's
-    /// `render()` pass (which runs first in `process_events`). This method
-    /// focuses solely on visual post-processing: shadow/blur queueing,
-    /// WGPU renderer window rects, global effects, and performance monitoring.
-    #[allow(clippy::unused_async)]
-    async fn render_frame(&mut self) -> Result<()> {
-        // 1. Clear per-frame effect queues from previous frame
+    /// Must run BEFORE `process_events()` so the backend's GL render pass can
+    /// consume these queues for GPU post-processing (shadows, blur) between
+    /// window drawing and `backend.submit()`. Window positions are stale at
+    /// this point — the backend updates them during its own render pass — so
+    /// this only queues window-less effects that don't depend on exact layout.
+    fn prepare_frame_data(&mut self) -> Result<()> {
+        // Clear per-frame effect queues from previous frame
         if let Some(ref renderer) = self.renderer {
             let mut r = renderer.write();
             r.clear_shadows();
             r.clear_blurs();
         }
 
-        // 2. Collect render data from windows
-        // (positions already set by the backend's GL render pass)
+        // Collect render data from windows
         self.render_data_buffer.clear();
 
         {
             let wm = self.window_manager.read();
             wm.for_each_window(|window_id, window| {
-                let layout_rect = Rectangle::from_loc_and_size(
-                    window.window.position,
-                    window.window.size,
-                );
+                let layout_rect =
+                    Rectangle::from_loc_and_size(window.window.position, window.window.size);
 
                 self.render_data_buffer.push(WindowRenderData {
                     id: window_id,
@@ -343,39 +337,61 @@ impl AxiomCompositor {
             });
         } // Drop WM lock
 
-        // 4. Collect shadow and blur data from effects engine and queue for GPU rendering
+        // Queue shadow and blur data from effects engine for GPU rendering.
+        // Collect effect state first (only holding effects lock), then queue
+        // in renderer — avoids nesting effects.read() inside renderer.write()
+        // which would invert the lock order vs composite_effects_on_buffer
+        // (renderer &mut → effects.write()).
         if let Some(ref renderer) = self.renderer {
-            let effects = self.effects_engine.read();
-            let mut renderer = renderer.write();
-            for data in &self.render_data_buffer {
-                if let Some(effect_state) = effects.get_window_effects(data.id) {
-                    let pos = (data.layout_rect.x as f32, data.layout_rect.y as f32);
-                    let size = (
-                        data.layout_rect.width as f32,
-                        data.layout_rect.height as f32,
-                    );
-                    if effect_state.shadow.enabled {
-                        renderer.queue_shadow(data.id, pos, size, effect_state.shadow.clone());
-                    }
-                    if effect_state.blur_radius > 0.0 {
-                        // Pull actual blur config from effects engine, falling back to
-                        // the window's blur_radius if engine config is disabled.
-                        let engine_blur_params = crate::effects::BlurParams {
-                            enabled: true,
-                            radius: effect_state.blur_radius,
-                            intensity: 0.8,
-                            background_blur: true,
-                            window_blur: false,
-                        };
-                        renderer.queue_blur(data.id, pos, size, engine_blur_params);
+            let mut pending_shadows: Vec<PendingShadow> = Vec::new();
+            let mut pending_blurs: Vec<PendingBlur> = Vec::new();
+
+            {
+                let effects = self.effects_engine.read();
+                for data in &self.render_data_buffer {
+                    if let Some(effect_state) = effects.get_window_effects(data.id) {
+                        let pos = (data.layout_rect.x as f32, data.layout_rect.y as f32);
+                        let size = (
+                            data.layout_rect.width as f32,
+                            data.layout_rect.height as f32,
+                        );
+                        if effect_state.shadow.enabled {
+                            pending_shadows.push((data.id, pos, size, effect_state.shadow.clone()));
+                        }
+                        if effect_state.blur_radius > 0.0 {
+                            let engine_blur_params = crate::effects::BlurParams {
+                                enabled: true,
+                                radius: effect_state.blur_radius,
+                                intensity: 0.8,
+                                background_blur: true,
+                                window_blur: false,
+                            };
+                            pending_blurs.push((data.id, pos, size, engine_blur_params));
+                        }
                     }
                 }
-            }
-        } // Drop effects + renderer locks
+            } // Drop effects lock before acquiring renderer lock
 
-        // 5. Apply effects and push to renderer (without holding WM lock)
+            let mut r = renderer.write();
+            for (id, pos, size, params) in pending_shadows {
+                r.queue_shadow(id, pos, size, params);
+            }
+            for (id, pos, size, params) in pending_blurs {
+                r.queue_blur(id, pos, size, params);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Post-render phase: applies global effects, performance monitoring,
+    /// and window rect upserts for the renderer. The WGPU effects composite
+    /// now happens in the backend's GL render pass (between window drawing
+    /// and `submit`), so this method no longer calls `renderer.render()`.
+    #[allow(clippy::unused_async)]
+    async fn render_frame(&mut self) -> Result<()> {
+        // Push window rects to renderer for metrics/housekeeping
         for win_data in &self.render_data_buffer {
-            // Determine render-time properties
             let mut scale = 1.0_f32;
             let mut opacity = win_data.opacity;
             let mut offset = (0.0_f32, 0.0_f32);
@@ -387,12 +403,10 @@ impl AxiomCompositor {
                     opacity = effect_state.opacity;
                     offset = effect_state.position_offset;
                 }
-            } // Drop effects lock
+            }
 
-            // Feed to renderer: apply scale and offset
-            // Safely use write() instead of try_write() now that we don't hold other locks
-            if let Some(renderer) = &self.renderer {
-                let mut renderer = renderer.write();
+            if let Some(ref r) = self.renderer {
+                let mut renderer = r.write();
                 let x = win_data.layout_rect.x as f32 + offset.0;
                 let y = win_data.layout_rect.y as f32 + offset.1;
                 let w = win_data.layout_rect.width as f32 * scale;
@@ -401,23 +415,13 @@ impl AxiomCompositor {
             }
         }
 
-        // Render with headless renderer for now
-        if let Some(renderer) = &self.renderer {
-            if let Some(mut renderer) = renderer.try_write() {
-                if let Err(e) = renderer.render() {
-                    warn!("⚠️ Renderer error: {}", e);
-                }
-            }
-        }
-
-        // 5. Apply global effects (workspace transitions, blur backgrounds)
+        // Apply global effects (workspace transitions, blur backgrounds)
         self.apply_global_effects();
 
-        // 6. Performance monitoring for effects
+        // Performance monitoring for effects
         let (frame_time, effects_quality, active_effects) =
             self.effects_engine.read().get_performance_stats();
         if frame_time.as_millis() > 20 {
-            // More than ~50 FPS
             debug!(
                 "⚡ Frame time: {:.1}ms, effects quality: {:.1}, active effects: {}",
                 frame_time.as_secs_f64() * 1000.0,
@@ -453,7 +457,6 @@ impl AxiomCompositor {
     }
 
     /// Gracefully shutdown the compositor (with Smithay backend)
-    /// Gracefully shutdown the compositor (with Smithay backend)
     async fn shutdown(&mut self) -> Result<()> {
         info!("🔽 Shutting down Axiom compositor...");
 
@@ -475,10 +478,10 @@ impl AxiomCompositor {
         // Clean up other subsystems
         debug!("🧩 Cleaning up compositor subsystems...");
         self.ipc_server.shutdown().await?;
-        self.input_manager.write().shutdown()?;
-        self.effects_engine.write().shutdown()?;
-        self.workspace_manager.write().shutdown()?;
-        self.window_manager.write().shutdown()?;
+        self.input_manager.write().shutdown();
+        self.effects_engine.write().shutdown();
+        self.workspace_manager.write().shutdown();
+        self.window_manager.write().shutdown();
 
         info!("✅ Axiom compositor shutdown complete");
         Ok(())
@@ -510,7 +513,15 @@ impl AxiomCompositor {
 
         let mut tick_error = false;
 
-        // Process events
+        // Prepare frame data BEFORE processing events, so the backend's
+        // render() pass can consume pre-populated shadow/blur queues for
+        // WGPU GPU post-processing within the GL submit window.
+        if let Err(e) = self.prepare_frame_data() {
+            tick_error = true;
+            warn!("⚠️ Error preparing frame data: {}", e);
+        }
+
+        // Process events (calls backend.process_events → run_one_cycle → render)
         if self.force_next_tick_error {
             tick_error = true;
             self.force_next_tick_error = false;
@@ -520,7 +531,8 @@ impl AxiomCompositor {
             warn!("⚠️ Error processing events: {}", e);
         }
 
-        // Render frame
+        // Render frame — now only handles post-render monitoring after the
+        // backend has already presented the frame with effects applied.
         if let Err(e) = self.render_frame().await {
             tick_error = true;
             warn!("⚠️ Error rendering frame: {}", e);
@@ -786,28 +798,23 @@ impl AxiomCompositor {
 #[allow(clippy::too_many_arguments)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use parking_lot::RwLock;
     use serial_test::serial;
+    use std::sync::Arc;
 
     /// Create subsystems and a test compositor for unit testing public API methods.
     async fn make_test_compositor() -> AxiomCompositor {
         let config = AxiomConfig::default();
-        let workspace_manager = Arc::new(RwLock::new(
-            ScrollableWorkspaces::new(&config.workspace).expect("workspace init")
-        ));
-        let window_manager = Arc::new(RwLock::new(
-            WindowManager::new(&config.window).expect("window init")
-        ));
+        let workspace_manager = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)));
+        let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)));
         let effects_engine = Arc::new(RwLock::new(
-            EffectsEngine::new(&config.effects).expect("effects init")
+            EffectsEngine::new(&config.effects).expect("effects init"),
         ));
-        let decoration_manager = Arc::new(RwLock::new(
-            DecorationManager::new(&config.window)
-        ));
-        let input_manager = Arc::new(RwLock::new(
-            InputManager::new(&config.input, &config.bindings).expect("input init")
-        ));
+        let decoration_manager = Arc::new(RwLock::new(DecorationManager::new(&config.window)));
+        let input_manager = Arc::new(RwLock::new(InputManager::new(
+            &config.input,
+            &config.bindings,
+        )));
 
         AxiomCompositor::new_for_test(
             config,
@@ -880,7 +887,7 @@ mod tests {
         // Write access
         {
             let mut effects = comp.effects_engine_mut();
-            effects.shutdown().expect("effects shutdown");
+            effects.shutdown();
         }
     }
 

@@ -1,15 +1,13 @@
 //! Smithay 0.7 Backend for Axiom Compositor
 //!
 //! This module implements the Wayland compositor backend using Smithay 0.7's
-//! handler trait pattern.
+//! handler trait pattern. It manages the Wayland display, protocol state,
+//! input routing, and GL/WGPU rendering.
 //!
-//! Phase 6 completions:
-//!
+//! ## Phase 6 completions
 //! - 6.2: Wire toplevel state and window lifecycle
-//! - 6.3: Route winit input events through InputManager for global keybindings,
-//!   forward non-binding keys to Wayland clients via the seat
+//! - 6.3: Route winit input events through InputManager for global keybindings
 //! - 6.4: GL scissor-based window placeholder rendering at correct workspace positions
-#![allow(missing_docs)]
 
 use crate::config::AxiomConfig;
 use crate::effects::EffectsEngine;
@@ -27,14 +25,13 @@ use std::sync::Arc;
 use smithay::{
     backend::{
         input::{
-            AbsolutePositionEvent, InputEvent, KeyboardKeyEvent, PointerAxisEvent,
-            PointerButtonEvent, Axis,
+            AbsolutePositionEvent, Axis, InputEvent, KeyboardKeyEvent, PointerAxisEvent,
+            PointerButtonEvent,
         },
         renderer::{gles::GlesRenderer, utils::on_commit_buffer_handler},
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
-    delegate_compositor, delegate_data_device, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_seat, delegate_shm, delegate_xdg_shell,
     input::{
         keyboard::{FilterResult, XkbConfig},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
@@ -71,16 +68,14 @@ use wayland_server::{
 
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
 
+mod shm_upload;
+mod xwayland_dispatch;
 pub mod xwm;
-use self::xwm::{AxiomXwm, XwmEvent};
+use self::xwm::AxiomXwm;
 
 // Type alias to reduce complexity of the Rc<RefCell<Option<...>>> pattern
 // used for passing buffer data out of the SHM commit closure.
 type CachedBufferData = std::rc::Rc<std::cell::RefCell<Option<(Vec<u8>, i32, i32)>>>;
-
-// Type alias for pending GL texture uploads:
-// (surface_id, raw_rgba_data, (width, height))
-type PendingTextureUpload = (u32, Vec<u8>, (i32, i32));
 
 // ============================================================================
 // Surface Data
@@ -257,7 +252,10 @@ impl State {
 
         if let Some(data) = self.surfaces.remove(&surface_id) {
             if let Some(window_id) = data.window_id {
-                info!("🗑️ Destroying window {} (was: \"{}\")", window_id, data.title);
+                info!(
+                    "🗑️ Destroying window {} (was: \"{}\")",
+                    window_id, data.title
+                );
                 self.window_map.remove(&window_id);
                 self.window_manager.write().remove_window(window_id);
                 self.workspace_manager.write().remove_window(window_id);
@@ -277,9 +275,7 @@ impl State {
     /// Find the window ID for a given WlSurface
     pub fn window_id_for_surface(&self, surface: &WlSurface) -> Option<u64> {
         let surface_id = surface.id().protocol_id();
-        self.surfaces
-            .get(&surface_id)
-            .and_then(|s| s.window_id)
+        self.surfaces.get(&surface_id).and_then(|s| s.window_id)
     }
 
     /// Prune surfaces and toplevels whose WlSurface is no longer alive
@@ -288,11 +284,7 @@ impl State {
         let dead_surface_ids: Vec<u32> = self
             .surfaces
             .iter()
-            .filter(|(_, data)| {
-                data.surface
-                    .as_ref()
-                    .is_none_or(|s| !s.is_alive())
-            })
+            .filter(|(_, data)| data.surface.as_ref().is_none_or(|s| !s.is_alive()))
             .map(|(id, _)| *id)
             .collect();
 
@@ -309,7 +301,10 @@ impl State {
         }
 
         if count > 0 {
-            info!("🧹 Pruned {} dead surfaces from disconnected clients", count);
+            info!(
+                "🧹 Pruned {} dead surfaces from disconnected clients",
+                count
+            );
         }
         count
     }
@@ -350,10 +345,10 @@ impl CompositorHandler for State {
         }
 
         // Upload SHM buffer to wgpu renderer and cache raw data for GL upload
-        let window_id = self
-            .window_map
-            .iter()
-            .find_map(|(&wid, &sid)| if sid == surface_id { Some(wid) } else { None });
+        let window_id =
+            self.window_map
+                .iter()
+                .find_map(|(&wid, &sid)| if sid == surface_id { Some(wid) } else { None });
 
         if let Some(wid) = window_id {
             let renderer = self.renderer.clone();
@@ -361,7 +356,8 @@ impl CompositorHandler for State {
 
             // Use Rc<RefCell> to share mutable state with the closure without
             // conflicting with self's borrow
-            let cached_data: CachedBufferData = CachedBufferData::new(std::cell::RefCell::new(None));
+            let cached_data: CachedBufferData =
+                CachedBufferData::new(std::cell::RefCell::new(None));
             let cached_clone = cached_data.clone();
 
             with_states(surface, move |states| {
@@ -375,6 +371,11 @@ impl CompositorHandler for State {
                         let stride = spec.stride as usize;
 
                         if len > 0 {
+                            // SAFETY: Smithay's `with_buffer_contents` callback
+                            // guarantees that `ptr` points to `len` bytes of
+                            // valid SHM buffer data for the duration of this
+                            // closure. The slice is immediately copied (to_vec)
+                            // before the closure returns, so no aliasing occurs.
                             let data = unsafe { std::slice::from_raw_parts(ptr, len) };
 
                             // Upload to wgpu (if renderer is available)
@@ -387,7 +388,11 @@ impl CompositorHandler for State {
                             }
 
                             // Cache for GL upload
-                            cached_clone.borrow_mut().replace((data.to_vec(), spec.width, spec.height));
+                            cached_clone.borrow_mut().replace((
+                                data.to_vec(),
+                                spec.width,
+                                spec.height,
+                            ));
                         }
                     });
                 }
@@ -401,7 +406,8 @@ impl CompositorHandler for State {
                     sd.size = (w, h);
                 }
                 self.buffer_cache.insert(buffer_cache_sid, buf_data);
-                self.buffer_cache_dimensions.insert(buffer_cache_sid, (w, h));
+                self.buffer_cache_dimensions
+                    .insert(buffer_cache_sid, (w, h));
             }
         } else if self.popups.contains_key(&surface_id) {
             // Popup buffer upload — GL-only, no WGPU since popups render via GL pass
@@ -416,10 +422,14 @@ impl CompositorHandler for State {
                 if let Some(BufferAssignment::NewBuffer(wl_buffer)) = buffer {
                     let _ = with_buffer_contents(wl_buffer, |ptr, len, spec| {
                         if len > 0 {
+                            // SAFETY: Same as the toplevel window buffer path above.
+                            // Smithay guarantees ptr+len are valid for the closure.
                             let data = unsafe { std::slice::from_raw_parts(ptr, len) };
-                            cached_clone
-                                .borrow_mut()
-                                .replace((data.to_vec(), spec.width, spec.height));
+                            cached_clone.borrow_mut().replace((
+                                data.to_vec(),
+                                spec.width,
+                                spec.height,
+                            ));
                         }
                     });
                 }
@@ -453,7 +463,7 @@ impl SeatHandler for State {
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {
         if let Some(surface) = _focused {
             if let Some(window_id) = self.window_id_for_surface(surface) {
-                let _ = self.window_manager.write().focus_window(window_id);
+                self.window_manager.write().focus_window(window_id);
                 debug!("🎯 Wayland focus changed to window {}", window_id);
             }
         }
@@ -519,7 +529,10 @@ impl XdgShellHandler for State {
             state.geometry = rect;
         });
         if let Err(e) = surface.send_configure() {
-            warn!("⚠️ Popup configure failed for surface {}: {:?}", surface_id, e);
+            warn!(
+                "⚠️ Popup configure failed for surface {}: {:?}",
+                surface_id, e
+            );
         }
 
         info!(
@@ -541,7 +554,11 @@ impl XdgShellHandler for State {
         );
     }
 
-    fn ack_configure(&mut self, surface: WlSurface, _configure: smithay::wayland::shell::xdg::Configure) {
+    fn ack_configure(
+        &mut self,
+        surface: WlSurface,
+        _configure: smithay::wayland::shell::xdg::Configure,
+    ) {
         let surface_id = surface.id().protocol_id();
         self.pending_configure.remove(&surface_id);
         debug!("✅ Client ack'd configure for surface {}", surface_id);
@@ -646,20 +663,6 @@ delegate_seat!(State);
 delegate_xdg_shell!(State);
 delegate_data_device!(State);
 smithay::delegate_output!(State);
-
-// ============================================================================
-// GL Rendering Helpers
-// ============================================================================
-
-/// Params for drawing a textured GL quad.
-struct TexQuadParams {
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    screen_w: u32,
-    screen_h: u32,
-}
 
 // ============================================================================
 // Backend Struct
@@ -920,29 +923,9 @@ impl AxiomSmithayBackendReal {
             self.handle_input_event(event);
         }
 
-        // Poll X11 events from XWayland (if XWM is wired)
-        if let Some(xwm) = self.state.xwm.as_mut() {
-            while let Some(event) = xwm.poll_event() {
-                match xwm.handle_event(&event) {
-                    Ok(Some(XwmEvent::ClipboardRequest {
-                        requestor,
-                        selection,
-                        target,
-                        property,
-                        time,
-                    })) => {
-                        let clipboard_data = self.state.clipboard_cache.as_deref();
-                        if let Err(e) = xwm.handle_selection_request(
-                            requestor, selection, target, property, time, clipboard_data,
-                        ) {
-                            warn!("⚠️ Failed to serve X11 clipboard request: {}", e);
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => warn!("⚠️ XWM event error: {}", e),
-                }
-            }
-        }
+        // Poll X11 events from XWayland (if XWM is wired).
+        // The X11 selection/clipboard dispatch lives in xwayland_dispatch.rs.
+        self::xwayland_dispatch::poll_and_dispatch_events(&mut self.state)?;
 
         // Dispatch Wayland client events
         self.display.dispatch_clients(&mut self.state)?;
@@ -951,7 +934,7 @@ impl AxiomSmithayBackendReal {
         // Update animations after dispatch so newly-created windows (which
         // trigger animate_window_open() during dispatch) get their first
         // integration step before the render pass reads effect states.
-        let _ = self.state.workspace_manager.write().update_animations();
+        self.state.workspace_manager.write().update_animations();
         let _ = self.state.effects_engine.write().update();
 
         // Prune dead surfaces from disconnected clients
@@ -975,12 +958,10 @@ impl AxiomSmithayBackendReal {
                 if let Some(keyboard) = self.state.seat.get_keyboard() {
                     let serial = SERIAL_COUNTER.next_serial();
                     let time = Event::time_msec(&event);
-                    let pressed =
-                        event.state() == smithay::backend::input::KeyState::Pressed;
+                    let pressed = event.state() == smithay::backend::input::KeyState::Pressed;
 
                     let input_manager = self.state.input_manager.clone();
-                    let pending_actions =
-                        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                    let pending_actions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
                     let pending_clone = pending_actions.clone();
 
                     keyboard.input::<(), _>(
@@ -993,8 +974,7 @@ impl AxiomSmithayBackendReal {
                             if pressed {
                                 let syms = handle.modified_syms();
                                 if let Some(keysym) = syms.first() {
-                                    let key_name =
-                                        xkbcommon::xkb::keysym_get_name(*keysym);
+                                    let key_name = xkbcommon::xkb::keysym_get_name(*keysym);
 
                                     let mut mod_names: Vec<String> = Vec::new();
                                     if modifiers.ctrl {
@@ -1013,29 +993,20 @@ impl AxiomSmithayBackendReal {
                                     let key_combo = if mod_names.is_empty() {
                                         key_name.to_lowercase()
                                     } else {
-                                        format!(
-                                            "{}+{}",
-                                            mod_names.join("+"),
-                                            key_name
-                                        )
+                                        format!("{}+{}", mod_names.join("+"), key_name)
                                     };
 
-                                    let axiom_event =
-                                        crate::input::InputEvent::Keyboard {
-                                            key: key_combo.clone(),
-                                            modifiers: mod_names,
-                                            pressed: true,
-                                        };
+                                    let axiom_event = crate::input::InputEvent::Keyboard {
+                                        key: key_combo.clone(),
+                                        modifiers: mod_names,
+                                        pressed: true,
+                                    };
 
-                                    let actions = input_manager
-                                        .write()
-                                        .process_input_event(axiom_event);
+                                    let actions =
+                                        input_manager.write().process_input_event(axiom_event);
 
                                     if !actions.is_empty() {
-                                        debug!(
-                                            "⌨️ Global shortcut: {}",
-                                            key_combo
-                                        );
+                                        debug!("⌨️ Global shortcut: {}", key_combo);
                                         *pending_clone.borrow_mut() = actions;
                                         return FilterResult::Intercept(());
                                     }
@@ -1070,14 +1041,15 @@ impl AxiomSmithayBackendReal {
                             .window_map
                             .get(&window_id)
                             .and_then(|surface_id| {
-                                self.state
-                                    .surfaces
-                                    .get(surface_id)
-                                    .and_then(|sd| {
-                                        sd.surface.as_ref().and_then(|s| {
-                                            if s.is_alive() { Some(s.clone()) } else { None }
-                                        })
+                                self.state.surfaces.get(surface_id).and_then(|sd| {
+                                    sd.surface.as_ref().and_then(|s| {
+                                        if s.is_alive() {
+                                            Some(s.clone())
+                                        } else {
+                                            None
+                                        }
                                     })
+                                })
                             })
                             .map(|surface| (surface, Point::from((sx, sy))))
                     });
@@ -1107,9 +1079,11 @@ impl AxiomSmithayBackendReal {
                             .iter()
                             .find_map(|(&wid, &sid)| {
                                 if sid == p.parent_surface_id {
-                                    self.state.window_manager.read().get_window(wid).map(
-                                        |w| (w.window.position.0, w.window.position.1),
-                                    )
+                                    self.state
+                                        .window_manager
+                                        .read()
+                                        .get_window(wid)
+                                        .map(|w| (w.window.position.0, w.window.position.1))
                                 } else {
                                     None
                                 }
@@ -1214,24 +1188,19 @@ impl AxiomSmithayBackendReal {
                     self.state.running = false;
                 }
                 CompositorAction::CloseWindow => {
-                    let focused_id =
-                        self.state.window_manager.read().focused_window_id();
+                    let focused_id = self.state.window_manager.read().focused_window_id();
                     if let Some(window_id) = focused_id {
                         info!("🗑️  Input: Close window {}", window_id);
-                        if let Some(&surface_id) =
-                            self.state.window_map.get(&window_id)
-                        {
+                        if let Some(&surface_id) = self.state.window_map.get(&window_id) {
                             self.state.destroy_window(surface_id);
                             self.state.needs_redraw = true;
                         }
                     }
                 }
                 CompositorAction::ToggleFullscreen => {
-                    let focused_id =
-                        self.state.window_manager.read().focused_window_id();
+                    let focused_id = self.state.window_manager.read().focused_window_id();
                     if let Some(window_id) = focused_id {
-                        let _ = self
-                            .state
+                        self.state
                             .window_manager
                             .write()
                             .toggle_fullscreen(window_id);
@@ -1292,9 +1261,7 @@ impl AxiomSmithayBackendReal {
             let mut wm = self.state.window_manager.write();
             for (window_id, layout_rect) in &layouts {
                 if let Some(window) = wm.get_window_mut(*window_id) {
-                    window
-                        .window
-                        .set_position(layout_rect.x, layout_rect.y);
+                    window.window.set_position(layout_rect.x, layout_rect.y);
                     window
                         .window
                         .set_size(layout_rect.width, layout_rect.height);
@@ -1343,51 +1310,43 @@ impl AxiomSmithayBackendReal {
         backend.bind()?;
 
         // Delete any GPU textures queued for cleanup
-        unsafe {
-            for tex in self.state.dead_tex_handles.drain(..) {
-                gl::DeleteTextures(1, &tex);
-            }
-        }
-        Self::gl_check_error("texture cleanup");
+        // SAFETY: An active GL context is guaranteed by `backend.bind()` which
+        // is called above. Deleting texture handles that are no longer
+        // referenced is safe and idempotent once the context is current.
+        shm_upload::delete_textures(&mut self.state.dead_tex_handles);
 
         // Lazily compile the GLES 2.0 shader program if not yet ready
-        let shader_prog = Self::ensure_shader_program_static(&mut self.shader_program);
+        let shader_prog = shm_upload::ensure_shader_program(&mut self.shader_program);
 
-        // Upload pending SHM buffer data to GL textures
-        // (must access state before backend borrow)
-        // Only upload buffers that haven't been uploaded yet or have changed
-        let pending_uploads: Vec<PendingTextureUpload> = self
-            .state
-            .buffer_cache
-            .iter()
-            .filter(|(&sid, _)| {
-                // Skip if we already have a GL texture for this surface
-                !self.state.texture_cache.contains_key(&sid)
-            })
-            .map(|(&sid, data)| {
-                let dims = self.state.buffer_cache_dimensions.get(&sid).copied().unwrap_or((640, 480));
-                (sid, data.clone(), dims)
-            })
-            .collect();
-        self.state.buffer_cache.clear();
-        self.state.buffer_cache_dimensions.clear();
+        // Drain the SHM buffer cache into a batched upload list, then upload
+        // each. Helper consolidates the filter + clone + clear logic that
+        // would otherwise re-clone the renderer/surface assumptions inline.
+        let pending_uploads = shm_upload::collect_pending_uploads(
+            &mut self.state.buffer_cache,
+            &mut self.state.buffer_cache_dimensions,
+            &self.state.texture_cache,
+        );
 
         for (surface_id, data, (w, h)) in &pending_uploads {
-            Self::upload_gl_texture_static(&mut self.state.texture_cache, *surface_id, data, *w, *h);
+            shm_upload::upload_gl_texture(&mut self.state.texture_cache, *surface_id, data, *w, *h);
         }
         if !pending_uploads.is_empty() {
-            Self::gl_check_error("texture uploads");
+            shm_upload::gl_check_error("texture uploads");
         }
 
         // Render using GL
+        // SAFETY: GL context is current (backend.bind() succeeded above).
+        // ClearColor + Clear are always safe to call with a bound context.
         unsafe {
             gl::ClearColor(0.08, 0.08, 0.12, 1.0);
             gl::Clear(gl::COLOR_BUFFER_BIT);
         }
-        Self::gl_check_error("render clear");
+        shm_upload::gl_check_error("render clear");
 
+        // SAFETY: GL context is current. All GL scissor/draw calls operate on
+        // the currently bound framebuffer which Smithay owns. `layouts` entries
+        // have been validated to be non-zero size before this block is entered.
         unsafe {
-
             for (window_id, rect) in &layouts {
                 let w = (rect.width as i32).max(0);
                 let h = (rect.height as i32).max(0);
@@ -1410,14 +1369,18 @@ impl AxiomSmithayBackendReal {
 
                 if let Some(tex_id) = tex {
                     // Draw actual client texture using GLES 2.0 shader
-                    Self::draw_textured_quad_static(shader_prog, tex_id, &TexQuadParams {
-                        x: rect.x,
-                        y,
-                        w,
-                        h,
-                        screen_w: ww,
-                        screen_h: wh,
-                    });
+                    shm_upload::draw_textured_quad(
+                        shader_prog,
+                        tex_id,
+                        &shm_upload::TexQuadParams {
+                            x: rect.x,
+                            y,
+                            w,
+                            h,
+                            screen_w: ww,
+                            screen_h: wh,
+                        },
+                    );
                 } else {
                     // Scissor-based colored placeholder
                     gl::Enable(gl::SCISSOR_TEST);
@@ -1432,7 +1395,7 @@ impl AxiomSmithayBackendReal {
                 }
             }
         }
-        Self::gl_check_error("window rendering");
+        shm_upload::gl_check_error("window rendering");
 
         // Render popups on top of windows
         for (popup_id, popup) in &self.state.popups {
@@ -1463,24 +1426,31 @@ impl AxiomSmithayBackendReal {
             let popup_h = popup.height.max(1);
 
             // Flip Y for OpenGL
-            let gl_y = (wh as i32).saturating_sub(popup_y).saturating_sub(popup_h).max(0);
+            let gl_y = (wh as i32)
+                .saturating_sub(popup_y)
+                .saturating_sub(popup_h)
+                .max(0);
 
-            let tex = self
-                .state
-                .texture_cache
-                .get(popup_id)
-                .copied();
+            let tex = self.state.texture_cache.get(popup_id).copied();
 
+            // SAFETY: GL context is current. `tex_id` is a valid GL texture
+            // handle obtained from `texture_cache`; scissor coordinates are
+            // bounds-checked above (popup_w/popup_h > 0). All state is
+            // restored (SCISSOR_TEST disabled) before the block ends.
             unsafe {
                 if let Some(tex_id) = tex {
-                    Self::draw_textured_quad_static(shader_prog, tex_id, &TexQuadParams {
-                        x: popup_x,
-                        y: gl_y,
-                        w: popup_w,
-                        h: popup_h,
-                        screen_w: ww,
-                        screen_h: wh,
-                    });
+                    shm_upload::draw_textured_quad(
+                        shader_prog,
+                        tex_id,
+                        &shm_upload::TexQuadParams {
+                            x: popup_x,
+                            y: gl_y,
+                            w: popup_w,
+                            h: popup_h,
+                            screen_w: ww,
+                            screen_h: wh,
+                        },
+                    );
                 } else {
                     gl::Enable(gl::SCISSOR_TEST);
                     gl::Scissor(popup_x, gl_y, popup_w, popup_h);
@@ -1490,7 +1460,83 @@ impl AxiomSmithayBackendReal {
                 }
             }
         }
-        Self::gl_check_error("popup rendering");
+        shm_upload::gl_check_error("popup rendering");
+
+        // ── WGPU Post-Process: shadow / blur compositing ───────────────────
+        // Read the GL framebuffer, run GPU effects via the headless WGPU
+        // target, then blit the result back as a fullscreen GL quad.
+        // The per-frame effect queues were pre-populated by
+        // compositor::prepare_frame_data() before process_events().
+        if let Some(ref renderer) = self.state.renderer {
+            let gl_pixels = shm_upload::read_gl_framebuffer(ww, wh);
+            match renderer
+                .write()
+                .composite_effects_on_buffer(&gl_pixels, ww, wh)
+            {
+                Ok(processed) => {
+                    // Upload processed pixels to a temporary GL texture and
+                    // draw a fullscreen quad to replace the framebuffer.
+                    let mut tex: gl::types::GLuint = 0;
+                    // SAFETY: GL context is current. GenTextures + TexImage2D
+                    // are called with a fresh tex name and valid RGBA pixel
+                    // data from wgpu's staging readback. The texture is bound
+                    // exclusively within this block and unbound on cleanup.
+                    unsafe {
+                        gl::GenTextures(1, &mut tex);
+                        gl::BindTexture(gl::TEXTURE_2D, tex);
+                        gl::TexParameteri(
+                            gl::TEXTURE_2D,
+                            gl::TEXTURE_MIN_FILTER,
+                            gl::LINEAR as i32,
+                        );
+                        gl::TexParameteri(
+                            gl::TEXTURE_2D,
+                            gl::TEXTURE_MAG_FILTER,
+                            gl::LINEAR as i32,
+                        );
+                        gl::TexParameteri(
+                            gl::TEXTURE_2D,
+                            gl::TEXTURE_WRAP_S,
+                            gl::CLAMP_TO_EDGE as i32,
+                        );
+                        gl::TexParameteri(
+                            gl::TEXTURE_2D,
+                            gl::TEXTURE_WRAP_T,
+                            gl::CLAMP_TO_EDGE as i32,
+                        );
+                        gl::TexImage2D(
+                            gl::TEXTURE_2D,
+                            0,
+                            gl::RGBA as i32,
+                            ww as i32,
+                            wh as i32,
+                            0,
+                            gl::RGBA,
+                            gl::UNSIGNED_BYTE,
+                            processed.as_ptr() as *const std::ffi::c_void,
+                        );
+                    }
+                    shm_upload::gl_check_error("effects upload");
+
+                    // Overwrite the framebuffer by drawing a fullscreen quad.
+                    // This replaces the GL-rendered content with the
+                    // WGPU-composited result (shadows, blurs on top).
+                    shm_upload::draw_fullscreen_quad(shader_prog, tex);
+                    shm_upload::gl_check_error("effects fullscreen quad");
+
+                    unsafe {
+                        gl::DeleteTextures(1, &tex);
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "⚠️ WGPU effects composite failed: {} (showing unprocessed GL frame)",
+                        e
+                    );
+                }
+            }
+        }
+        // ── end WGPU post-process ─────────────────────────────────────────
 
         backend.submit(None)?;
 
@@ -1540,255 +1586,5 @@ impl AxiomSmithayBackendReal {
         info!("🛑 Shutting down Smithay backend");
         self.state.running = false;
         Ok(())
-    }
-
-    /// Check for OpenGL errors and log any found.
-    fn gl_check_error(context: &str) {
-        unsafe {
-            loop {
-                let err = gl::GetError();
-                if err == gl::NO_ERROR {
-                    break;
-                }
-                let err_name = match err {
-                    gl::INVALID_ENUM => "GL_INVALID_ENUM",
-                    gl::INVALID_VALUE => "GL_INVALID_VALUE",
-                    gl::INVALID_OPERATION => "GL_INVALID_OPERATION",
-                    gl::OUT_OF_MEMORY => "GL_OUT_OF_MEMORY",
-                    other => {
-                        warn!("⚠️ GL error ({}) in {}: code 0x{:X}", context, context, other);
-                        continue;
-                    }
-                };
-                warn!("⚠️ GL error ({}) in {}", err_name, context);
-            }
-        }
-    }
-
-    /// Upload raw SHM buffer data to an OpenGL texture for a surface.
-    /// Static method that doesn't borrow self — works with just the texture cache.
-    fn upload_gl_texture_static(
-        texture_cache: &mut HashMap<u32, gl::types::GLuint>,
-        surface_id: u32,
-        data: &[u8],
-        width: i32,
-        height: i32,
-    ) {
-        unsafe {
-            let tex_id = texture_cache.get(&surface_id).copied().unwrap_or_else(|| {
-                let mut tex: gl::types::GLuint = 0;
-                gl::GenTextures(1, &mut tex);
-                debug!("🖼️ Created GL texture {} for surface {}", tex, surface_id);
-                tex
-            });
-
-            gl::BindTexture(gl::TEXTURE_2D, tex_id);
-            gl::TexImage2D(
-                gl::TEXTURE_2D,
-                0,
-                gl::RGBA as i32,
-                width,
-                height,
-                0,
-                gl::RGBA,
-                gl::UNSIGNED_BYTE,
-                data.as_ptr() as *const std::ffi::c_void,
-            );
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
-            gl::BindTexture(gl::TEXTURE_2D, 0);
-
-            texture_cache.insert(surface_id, tex_id);
-        }
-    }
-
-    /// Compile a simple GLES 2.0 shader.
-    fn compile_shader(shader_type: gl::types::GLenum, source: &str) -> Option<gl::types::GLuint> {
-        unsafe {
-            let shader = gl::CreateShader(shader_type);
-            if shader == 0 {
-                return None;
-            }
-            gl::ShaderSource(
-                shader,
-                1,
-                &(source.as_ptr() as *const gl::types::GLchar),
-                &(source.len() as gl::types::GLint),
-            );
-            gl::CompileShader(shader);
-            let mut compiled: gl::types::GLint = 0;
-            gl::GetShaderiv(shader, gl::COMPILE_STATUS, &mut compiled);
-            if compiled == 0 {
-                let mut len = 0;
-                gl::GetShaderiv(shader, gl::INFO_LOG_LENGTH, &mut len);
-                let mut buf = vec![0u8; len as usize];
-                gl::GetShaderInfoLog(
-                    shader,
-                    len,
-                    std::ptr::null_mut(),
-                    buf.as_mut_ptr() as *mut gl::types::GLchar,
-                );
-                let log = String::from_utf8_lossy(&buf);
-                warn!("Shader compile failed: {}", log);
-                gl::DeleteShader(shader);
-                return None;
-            }
-            Some(shader)
-        }
-    }
-
-    /// Ensure the GLES 2.0 shader program for texture rendering is compiled and linked.
-    /// Static version that doesn't borrow self, to work with the backend borrow.
-    fn ensure_shader_program_static(shader_program: &mut Option<gl::types::GLuint>) -> Option<gl::types::GLuint> {
-        if let Some(prog) = *shader_program {
-            return Some(prog);
-        }
-
-        let vert_src = r#"
-            attribute vec2 a_position;
-            attribute vec2 a_texcoord;
-            varying vec2 v_texcoord;
-            void main() {
-                gl_Position = vec4(a_position, 0.0, 1.0);
-                v_texcoord = a_texcoord;
-            }
-        "#;
-
-        let frag_src = r#"
-            precision mediump float;
-            varying vec2 v_texcoord;
-            uniform sampler2D u_texture;
-            void main() {
-                gl_FragColor = texture2D(u_texture, v_texcoord);
-            }
-        "#;
-
-        unsafe {
-            let vs = Self::compile_shader(gl::VERTEX_SHADER, vert_src);
-            let fs = Self::compile_shader(gl::FRAGMENT_SHADER, frag_src);
-
-            if let (Some(vs), Some(fs)) = (vs, fs) {
-                let prog = gl::CreateProgram();
-                gl::AttachShader(prog, vs);
-                gl::AttachShader(prog, fs);
-                gl::LinkProgram(prog);
-
-                let mut linked: gl::types::GLint = 0;
-                gl::GetProgramiv(prog, gl::LINK_STATUS, &mut linked);
-                if linked != 0 {
-                    info!("🎨 GLES 2.0 texture shader compiled successfully (program {})", prog);
-                    *shader_program = Some(prog);
-                } else {
-                    let mut len = 0;
-                    gl::GetProgramiv(prog, gl::INFO_LOG_LENGTH, &mut len);
-                    let mut buf = vec![0u8; len as usize];
-                    gl::GetProgramInfoLog(
-                        prog,
-                        len,
-                        std::ptr::null_mut(),
-                        buf.as_mut_ptr() as *mut gl::types::GLchar,
-                    );
-                    warn!("Shader link failed: {}", String::from_utf8_lossy(&buf));
-                    gl::DeleteProgram(prog);
-                }
-
-                gl::DeleteShader(vs);
-                gl::DeleteShader(fs);
-                // Return the newly created program
-                return *shader_program;
-            }
-
-            // vs or fs failed to compile; both may already be deleted in compile_shader
-            // on failure, but we clean up any remaining handles
-            if let Some(v) = vs { gl::DeleteShader(v); }
-            if let Some(f) = fs { gl::DeleteShader(f); }
-        }
-
-        None
-    }
-
-    /// Draw a textured quad using the GLES 2.0 shader program.
-    /// Static version that takes shader_program explicitly to avoid borrowing self.
-    /// Coordinates are in pixel space; this method converts to NDC.
-    fn draw_textured_quad_static(
-        shader_program: Option<gl::types::GLuint>,
-        tex_id: gl::types::GLuint,
-        params: &TexQuadParams,
-    ) {
-        let Some(prog) = shader_program else {
-            return;
-        };
-
-        // Convert pixel coordinates to NDC [-1, 1]
-        let sw = params.screen_w as f32;
-        let sh = params.screen_h as f32;
-        let x1 = (params.x as f32 / sw) * 2.0 - 1.0;
-        let y1 = (params.y as f32 / sh) * 2.0 - 1.0;
-        let x2 = ((params.x + params.w) as f32 / sw) * 2.0 - 1.0;
-        let y2 = ((params.y + params.h) as f32 / sh) * 2.0 - 1.0;
-
-        #[rustfmt::skip]
-        let vertices: [f32; 16] = [
-            x1, y1, 0.0, 0.0,  // top-left    (flip V: SHM top-left → GL bottom-left)
-            x2, y1, 1.0, 0.0,  // top-right
-            x1, y2, 0.0, 1.0,  // bottom-left
-            x2, y2, 1.0, 1.0,  // bottom-right
-        ];
-
-        unsafe {
-            gl::UseProgram(prog);
-            gl::ActiveTexture(gl::TEXTURE0);
-            gl::BindTexture(gl::TEXTURE_2D, tex_id);
-
-            let pos_loc = gl::GetAttribLocation(
-                prog,
-                c"a_position"
-                    .as_ptr(),
-            );
-            let tex_loc = gl::GetAttribLocation(
-                prog,
-                c"a_texcoord"
-                    .as_ptr(),
-            );
-
-            let stride = (4 * std::mem::size_of::<f32>()) as gl::types::GLsizei;
-
-            if pos_loc >= 0 {
-                gl::EnableVertexAttribArray(pos_loc as gl::types::GLuint);
-                gl::VertexAttribPointer(
-                    pos_loc as gl::types::GLuint,
-                    2,
-                    gl::FLOAT,
-                    gl::FALSE,
-                    stride,
-                    vertices.as_ptr() as *const std::ffi::c_void,
-                );
-            }
-            if tex_loc >= 0 {
-                gl::EnableVertexAttribArray(tex_loc as gl::types::GLuint);
-                gl::VertexAttribPointer(
-                    tex_loc as gl::types::GLuint,
-                    2,
-                    gl::FLOAT,
-                    gl::FALSE,
-                    stride,
-                    vertices.as_ptr().add(2) as *const std::ffi::c_void,
-                );
-            }
-
-            gl::DrawArrays(gl::TRIANGLE_STRIP, 0, 4);
-
-            if pos_loc >= 0 {
-                gl::DisableVertexAttribArray(pos_loc as gl::types::GLuint);
-            }
-            if tex_loc >= 0 {
-                gl::DisableVertexAttribArray(tex_loc as gl::types::GLuint);
-            }
-
-            gl::BindTexture(gl::TEXTURE_2D, 0);
-            gl::UseProgram(0);
-        }
     }
 }

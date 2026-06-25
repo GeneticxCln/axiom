@@ -1,20 +1,54 @@
-//! Scrollable//! Workspace management (scrollable tapes)
-#![allow(missing_docs)]
+//! Scrollable workspace management
 //!
 //! This module implements Axiom's core innovation: infinite scrollable
 //! workspaces with smooth animations and intelligent window placement.
 //!
 //! Refactored for Multi-Monitor Support:
-//! - `WorkspaceTape`: Represents a single scrollable strip (one per output).
-//! - `ScrollableWorkspaces`: Manager that holds multiple tapes.
+//! - [`WorkspaceTape`]: Represents a single scrollable strip (one per output).
+//! - [`ScrollableWorkspaces`]: Manager that holds multiple tapes.
 
-use anyhow::Result;
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::config::WorkspaceConfig;
 use crate::window::Rectangle;
+
+/// Maximum number of workspace columns allowed per tape.
+const MAX_COLUMNS: usize = 256;
+
+/// Default viewport width (pixels) until updated by the backend.
+const DEFAULT_VIEWPORT_WIDTH: f64 = 1920.0;
+
+/// Default viewport height (pixels) until updated by the backend.
+const DEFAULT_VIEWPORT_HEIGHT: f64 = 1080.0;
+
+/// Base scroll animation duration (milliseconds).
+const BASE_SCROLL_DURATION_MS: u64 = 250;
+
+/// Distance normalization factor for scaling scroll duration.
+const SCROLL_DISTANCE_NORMALIZER: f64 = 2000.0;
+
+/// Maximum scroll animation duration (milliseconds).
+const MAX_SCROLL_DURATION_MS: f64 = 800.0;
+
+/// Minimum velocity threshold to start momentum scrolling.
+const MIN_MOMENTUM_VELOCITY: f64 = 10.0;
+
+/// Maximum delta time (seconds) to prevent huge jumps after pauses.
+const MAX_DT_SECONDS: f64 = 1.0 / 30.0;
+
+/// How long to keep empty columns before cleanup (seconds).
+const COLUMN_CLEANUP_INTERVAL_SECS: u64 = 1;
+
+/// How long empty columns survive before eviction (seconds).
+const EMPTY_COLUMN_TTL_SECS: u64 = 30;
+
+/// Velocity decay factor per frame when idle.
+const IDLE_VELOCITY_DECAY: f64 = 0.9;
+
+/// Velocity threshold below which idle velocity is zeroed.
+const IDLE_VELOCITY_ZERO_THRESHOLD: f64 = 0.1;
 
 /// Represents a workspace column in the scrollable view
 #[derive(Debug, Clone)]
@@ -36,6 +70,7 @@ pub struct WorkspaceColumn {
 }
 
 impl WorkspaceColumn {
+    /// Create a new workspace column at the given index and position.
     pub fn new(index: i32, position: f64) -> Self {
         Self {
             index,
@@ -46,6 +81,7 @@ impl WorkspaceColumn {
         }
     }
 
+    /// Add a window to this column if not already present.
     pub fn add_window(&mut self, window_id: u64) {
         if !self.windows.contains(&window_id) {
             self.windows.push(window_id);
@@ -53,6 +89,7 @@ impl WorkspaceColumn {
         }
     }
 
+    /// Remove a window from this column. Returns `true` if found and removed.
     pub fn remove_window(&mut self, window_id: u64) -> bool {
         if let Some(pos) = self.windows.iter().position(|&id| id == window_id) {
             self.windows.remove(pos);
@@ -63,6 +100,7 @@ impl WorkspaceColumn {
         }
     }
 
+    /// Returns `true` if this column contains no windows.
     pub fn is_empty(&self) -> bool {
         self.windows.is_empty()
     }
@@ -105,6 +143,10 @@ pub struct WorkspaceTape {
     /// Currently focused column index
     focused_column: i32,
 
+    /// Max columns allowed (bound grows in both directions).
+    /// Prevents unbounded memory growth from a malicious or runaway client.
+    max_columns: usize,
+
     /// Animation state
     scroll_state: ScrollState,
 
@@ -128,9 +170,10 @@ impl WorkspaceTape {
             scroll_velocity: 0.0,
             columns: HashMap::new(),
             focused_column: 0,
+            max_columns: MAX_COLUMNS,
             scroll_state: ScrollState::Idle,
-            viewport_width: 1920.0,  // Default, will be updated
-            viewport_height: 1080.0, // Default, will be updated
+            viewport_width: DEFAULT_VIEWPORT_WIDTH,
+            viewport_height: DEFAULT_VIEWPORT_HEIGHT,
             last_update: Instant::now(),
             last_cleanup: Instant::now(),
         };
@@ -159,9 +202,44 @@ impl WorkspaceTape {
         debug!("📐 Viewport size updated to {}x{}", width, height);
     }
 
-    /// Ensure a column exists at the given index
+    /// Ensure a column exists at the given index.
+    ///
+    /// When the column map already has `max_columns` entries and the
+    /// requested index is absent, the oldest empty column (by
+    /// `last_accessed`) is evicted to stay within the bound. If no
+    /// column is eligible for eviction the request is silently dropped
+    /// and a temporary default column is returned (the caller should
+    /// not hold the reference across an await point).
     pub fn ensure_column(&mut self, index: i32) -> &mut WorkspaceColumn {
         if !self.columns.contains_key(&index) {
+            if self.columns.len() >= self.max_columns {
+                // Try to evict the oldest empty column that isn't focused
+                let to_evict = self
+                    .columns
+                    .iter()
+                    .filter(|(i, c)| **i != self.focused_column && c.is_empty())
+                    .min_by_key(|(_, c)| c.last_accessed)
+                    .map(|(i, _)| *i);
+                if let Some(evict_idx) = to_evict {
+                    self.columns.remove(&evict_idx);
+                    debug!(
+                        "📦 Evicted column {} to stay under max_columns ({})",
+                        evict_idx, self.max_columns
+                    );
+                }
+                // If still at capacity (no empty column to evict), refuse
+                // and return the focused column so callers don't crash.
+                if self.columns.len() >= self.max_columns {
+                    warn!(
+                        "🚫 Column map at capacity ({}) — refusing to create column {}",
+                        self.max_columns, index
+                    );
+                    return self
+                        .columns
+                        .get_mut(&self.focused_column)
+                        .expect("focused column exists");
+                }
+            }
             let position = index as f64 * self.config.workspace_width as f64;
             let column = WorkspaceColumn::new(index, position);
             debug!(
@@ -170,7 +248,9 @@ impl WorkspaceTape {
             );
             self.columns.insert(index, column);
         }
-        self.columns.get_mut(&index).expect("column was just inserted")
+        self.columns
+            .get_mut(&index)
+            .expect("column was just inserted")
     }
 
     /// Get the current focused column
@@ -192,9 +272,10 @@ impl WorkspaceTape {
 
         // Calculate animation duration based on distance
         let distance = (target_pos - self.current_position).abs();
-        let base_duration = Duration::from_millis(250); // Base animation duration
+        let base_duration = Duration::from_millis(BASE_SCROLL_DURATION_MS);
         let duration = Duration::from_millis(
-            (base_duration.as_millis() as f64 * (1.0 + distance / 2000.0)).min(800.0) as u64,
+            (base_duration.as_millis() as f64 * (1.0 + distance / SCROLL_DISTANCE_NORMALIZER))
+                .min(MAX_SCROLL_DURATION_MS) as u64,
         );
 
         self.scroll_state = ScrollState::Scrolling {
@@ -227,7 +308,7 @@ impl WorkspaceTape {
 
     /// Start momentum scrolling (for gesture input)
     pub fn start_momentum_scroll(&mut self, velocity: f64) {
-        if velocity.abs() > 10.0 {
+        if velocity.abs() > MIN_MOMENTUM_VELOCITY {
             // Minimum velocity threshold
             self.scroll_state = ScrollState::Momentum {
                 start_time: Instant::now(),
@@ -311,9 +392,8 @@ impl WorkspaceTape {
     }
 
     /// Update animations and smooth scrolling
-    pub fn update_animations(&mut self) -> Result<()> {
+    pub fn update_animations(&mut self) {
         let now = Instant::now();
-        let _delta_time = now.duration_since(self.last_update).as_secs_f64();
         self.last_update = now;
 
         match self.scroll_state {
@@ -355,10 +435,13 @@ impl WorkspaceTape {
                 velocity,
             } => {
                 let elapsed = now.duration_since(start_time).as_secs_f64();
+                // Clamp dt to prevent huge jumps after GC pauses, debug
+                // breakpoints, or system suspend (max ~33 ms = 30 FPS).
+                let dt = elapsed.min(MAX_DT_SECONDS);
                 let friction: f64 = self.config.momentum_friction.clamp(0.0, 0.9999);
 
-                // Apply friction to velocity
-                let current_velocity = velocity * friction.powf(elapsed * 60.0);
+                // Apply friction to velocity using clamped dt
+                let current_velocity = velocity * friction.powf(dt * 60.0);
 
                 if current_velocity.abs() < self.config.momentum_min_velocity {
                     // Momentum has died down, snap to nearest column if close enough
@@ -368,33 +451,38 @@ impl WorkspaceTape {
                     if (self.current_position - target_pos).abs() <= self.config.snap_threshold_px {
                         self.scroll_to_column(nearest_column);
                     } else {
-                        // If not close, continue gentle deceleration towards target
-                        self.current_position = start_position + velocity * elapsed;
+                        // If not close, continue deceleration towards target.
+                        // Clamp to prevent overshoot oscillation.
+                        let raw_pos = start_position + velocity * elapsed;
+                        self.current_position = if velocity > 0.0 {
+                            raw_pos.min(target_pos + self.config.snap_threshold_px)
+                        } else {
+                            raw_pos.max(target_pos - self.config.snap_threshold_px)
+                        };
                         self.scroll_velocity = current_velocity;
                     }
                 } else {
-                    // Update position based on momentum
-                    self.current_position = start_position + velocity * elapsed;
+                    // Update position based on momentum, clamped to avoid
+                    // overshoot oscillation when near the target.
+                    self.current_position = start_position + velocity * dt;
                     self.scroll_velocity = current_velocity;
                 }
             }
 
             ScrollState::Idle => {
                 // Gradually reduce any remaining velocity
-                self.scroll_velocity *= 0.9;
-                if self.scroll_velocity.abs() < 0.1 {
+                self.scroll_velocity *= IDLE_VELOCITY_DECAY;
+                if self.scroll_velocity.abs() < IDLE_VELOCITY_ZERO_THRESHOLD {
                     self.scroll_velocity = 0.0;
                 }
             }
         }
 
         // Cleanup empty columns that haven't been accessed in a while
-        if now.duration_since(self.last_cleanup) > Duration::from_secs(1) {
+        if now.duration_since(self.last_cleanup) > Duration::from_secs(COLUMN_CLEANUP_INTERVAL_SECS) {
             self.cleanup_empty_columns();
             self.last_cleanup = now;
         }
-
-        Ok(())
     }
 
     /// Ease-out cubic function for smooth animations
@@ -412,7 +500,7 @@ impl WorkspaceTape {
     /// Clean up empty columns that haven't been used recently
     fn cleanup_empty_columns(&mut self) {
         let now = Instant::now();
-        let cleanup_threshold = Duration::from_secs(30); // Keep empty columns for 30 seconds
+        let cleanup_threshold = Duration::from_secs(EMPTY_COLUMN_TTL_SECS);
 
         let columns_to_remove: Vec<i32> = self
             .columns
@@ -460,7 +548,8 @@ impl ScrollableWorkspaces {
         self.remove_window(window_id).is_some()
     }
 
-    pub fn new(config: &WorkspaceConfig) -> Result<Self> {
+    /// Create a new scrollable workspace manager with a default tape.
+    pub fn new(config: &WorkspaceConfig) -> Self {
         let mut manager = Self {
             config: config.clone(),
             tapes: HashMap::new(),
@@ -471,7 +560,7 @@ impl ScrollableWorkspaces {
         manager.ensure_tape("default");
 
         info!("🔄 Scrollable workspaces initialized with multi-monitor support");
-        Ok(manager)
+        manager
     }
 
     /// Ensure a tape exists for the given output
@@ -482,10 +571,25 @@ impl ScrollableWorkspaces {
         })
     }
 
+    /// Get the active tape (read-only reference).
     pub fn active_tape(&self) -> &WorkspaceTape {
+        // Fallback: return the first tape if focused_output is stale.
+        // `new()` always creates the "default" tape, and `ensure_tape`
+        // guarantees at least one tape exists after any call path.
+        self.tapes.get(&self.focused_output).unwrap_or_else(|| {
+            self.tapes
+                .values()
+                .next()
+                .expect("at least one tape exists — new() creates 'default'")
+        })
+    }
+
+    /// Return the active tape, or `None` when the tape map is empty
+    /// (defense-in-depth against hypothetical empty-state bugs).
+    pub fn active_tape_opt(&self) -> Option<&WorkspaceTape> {
         self.tapes
             .get(&self.focused_output)
-            .expect("Default tape should always exist")
+            .or_else(|| self.tapes.values().next())
     }
 
     /// Update configuration
@@ -499,54 +603,68 @@ impl ScrollableWorkspaces {
 
     /// Get the active tape mutably
     pub fn active_tape_mut(&mut self) -> &mut WorkspaceTape {
+        // Guarantee the focused tape exists before returning it.
+        self.ensure_tape(&self.focused_output.clone());
         self.tapes
             .get_mut(&self.focused_output)
-            .expect("Default tape should always exist")
+            .expect("tape was just ensured")
     }
 
     // --- Delegation methods to active tape (to maintain API compatibility) ---
 
+    /// Check if a window exists in any tape.
     pub fn window_exists(&self, window_id: u64) -> bool {
         self.tapes.values().any(|t| t.window_exists(window_id))
     }
 
+    /// Check if infinite scrolling is enabled.
     pub fn is_infinite_scroll_enabled(&self) -> bool {
         self.config.infinite_scroll
     }
 
+    /// Set the viewport size on the active tape.
     pub fn set_viewport_size(&mut self, width: f64, height: f64) {
         self.active_tape_mut().set_viewport_size(width, height);
     }
 
+    /// Add a window to a specific column on the active tape.
     pub fn add_window_to_column(&mut self, window_id: u64, column_index: i32) {
         self.active_tape_mut()
             .add_window_to_column(window_id, column_index);
     }
 
     // Missing methods from original impl that are likely used
+    /// Get the focused column mutably from the active tape.
     pub fn get_focused_column_mut(&mut self) -> &mut WorkspaceColumn {
         self.active_tape_mut().get_focused_column_mut()
     }
 
+    /// Get the focused column from the active tape, if any.
     pub fn get_focused_column_opt(&self) -> Option<&WorkspaceColumn> {
         self.active_tape().get_focused_column()
     }
 
+    /// Start momentum scrolling on the active tape.
     pub fn start_momentum_scroll(&mut self, velocity: f64) {
         self.active_tape_mut().start_momentum_scroll(velocity);
     }
 
+    /// Scroll the active tape left by one workspace.
     pub fn scroll_left(&mut self) {
         self.active_tape_mut().scroll_left();
     }
+
+    /// Scroll the active tape right by one workspace.
     pub fn scroll_right(&mut self) {
         self.active_tape_mut().scroll_right();
     }
 
+    /// Add a window to the active tape's focused column.
     pub fn add_window(&mut self, window_id: u64) {
         self.active_tape_mut().add_window(window_id);
     }
 
+    /// Remove a window from all tapes. Returns the column index if found.
     pub fn remove_window(&mut self, window_id: u64) -> Option<i32> {
         // Search all tapes (a window is unique across all workspaces)
         for tape in self.tapes.values_mut() {
@@ -557,24 +675,29 @@ impl ScrollableWorkspaces {
         None
     }
 
+    /// Move a window left on the active tape.
     pub fn move_window_left(&mut self, window_id: u64) -> bool {
         self.active_tape_mut().move_window_left(window_id)
     }
+
+    /// Move a window right on the active tape.
     pub fn move_window_right(&mut self, window_id: u64) -> bool {
         self.active_tape_mut().move_window_right(window_id)
     }
 
+    /// Get windows in the focused column of the active tape.
     pub fn get_focused_column_windows(&self) -> Vec<u64> {
         self.active_tape().get_focused_column_windows()
     }
 
-    pub fn update_animations(&mut self) -> Result<()> {
+    /// Update animations on all tapes.
+    pub fn update_animations(&mut self) {
         for tape in self.tapes.values_mut() {
-            tape.update_animations()?;
+            tape.update_animations();
         }
-        Ok(())
     }
 
+    /// Calculate layout rectangles for all visible windows across all tapes.
     pub fn calculate_workspace_layouts(&self) -> HashMap<u64, Rectangle> {
         // Collect layouts from ALL tapes (outputs)
         // Note: For now, we assume a single viewport for backwards compatibility or just return relative coords.
@@ -600,17 +723,24 @@ impl ScrollableWorkspaces {
 
                 if !column.windows.is_empty() {
                     let gap = tape.config.gaps as i32;
-                    let window_height = (column_bounds.height as i32
-                        - (gap * (column.windows.len() as i32 + 1)))
-                        / column.windows.len() as i32;
+                    let total_gap_space = gap * (column.windows.len() as i32 + 1);
+                    let available = (column_bounds.height as i32).saturating_sub(total_gap_space);
+                    let window_count = column.windows.len() as i32;
+                    let window_height = if window_count > 0 && available > 0 {
+                        available / window_count
+                    } else {
+                        1 // minimum 1-pixel window so it's at least visible
+                    };
 
                     for (i, &window_id) in column.windows.iter().enumerate() {
                         let y = gap + i as i32 * (window_height + gap);
+                        let width = column_bounds.width.saturating_sub(2 * gap as u32).max(1);
+                        let height = (window_height as u32).max(1);
                         let window_rect = Rectangle {
                             x: column_bounds.x + gap,
                             y,
-                            width: column_bounds.width - 2 * gap as u32,
-                            height: window_height as u32,
+                            width,
+                            height,
                         };
                         layouts.insert(window_id, window_rect);
                     }
@@ -640,21 +770,31 @@ impl ScrollableWorkspaces {
     }
 
     // --- State Getters (Backwards Compatibility) ---
+
+    /// Get the focused column index on the active tape.
     pub fn focused_column_index(&self) -> i32 {
         self.active_tape().focused_column
     }
+
+    /// Get the current scroll position on the active tape.
     pub fn current_position(&self) -> f64 {
         self.active_tape().current_position
     }
+
+    /// Get the total number of columns across all tapes.
     pub fn active_column_count(&self) -> usize {
         self.active_tape().columns.len()
     }
+
+    /// Check if the active tape is currently scrolling or has momentum.
     pub fn is_scrolling(&self) -> bool {
         matches!(
             self.active_tape().scroll_state,
             ScrollState::Scrolling { .. } | ScrollState::Momentum { .. }
         )
     }
+
+    /// Get the scroll progress (0.0 to 1.0) of the active tape.
     pub fn scroll_progress(&self) -> f64 {
         match self.active_tape().scroll_state {
             ScrollState::Scrolling {
@@ -669,10 +809,10 @@ impl ScrollableWorkspaces {
         }
     }
 
-    pub fn shutdown(&mut self) -> Result<()> {
+    /// Shut down all tapes and clear state.
+    pub fn shutdown(&mut self) {
         info!("🔽 Shutting down scrollable workspaces...");
         self.tapes.clear();
-        Ok(())
     }
 }
 

@@ -109,7 +109,7 @@ impl BuildInfo {
     #[must_use]
     pub fn version_string(&self) -> String {
         match self.git_commit {
-            Some(commit) => format!("{} ({})", self.version, &commit[..8]),
+            Some(commit) => format!("{} ({})", self.version, commit.get(..8).unwrap_or(commit)),
             None => self.version.to_string(),
         }
     }

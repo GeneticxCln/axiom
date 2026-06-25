@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 
 use axiom::compositor::AxiomCompositor;
 use axiom::config::AxiomConfig;
@@ -42,7 +42,7 @@ use tokio::sync::RwLock as AsyncRwLock;
 #[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// Path to configuration file
-    #[arg(short, long, default_value = "~/.config/axiom/axiom.toml")]
+    #[arg(short, long, default_value = "$HOME/.config/axiom/axiom.toml")]
     config: String,
 
     /// Enable debug logging
@@ -95,8 +95,19 @@ async fn main() -> Result<()> {
     info!("🚀 Starting Axiom - Hybrid Wayland Compositor");
     info!("📄 Version: {}", env!("CARGO_PKG_VERSION"));
 
+    // Expand $HOME in the config path before loading.
+    // The CLI default uses $HOME; AxiomConfig::load handles ~,
+    // but we expand $HOME here so the literal default works on all
+    // shells that may not export HOME.
+    let config_path = if cli.config.contains("$HOME") {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        cli.config.replace("$HOME", &home)
+    } else {
+        cli.config.clone()
+    };
+
     // Load configuration
-    let config = match AxiomConfig::load(&cli.config) {
+    let config = match AxiomConfig::load(&config_path) {
         Ok(config) => {
             info!("✅ Configuration loaded from: {}", cli.config);
             config
@@ -119,20 +130,16 @@ async fn main() -> Result<()> {
     info!("🏗️  Initializing Axiom compositor...");
 
     // Create shared managers
-    // use parking_lot::RwLock; // Use top level
-    // use tokio::sync::RwLock as AsyncRwLock; // Use top level
-    // use std::sync::Arc; // Use top level
-
     let workspace_manager = std::sync::Arc::new(parking_lot::RwLock::new(
-        ScrollableWorkspaces::new(&config.workspace)?,
+        ScrollableWorkspaces::new(&config.workspace),
     ));
-    let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)?));
+    let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)));
     let effects_engine = Arc::new(RwLock::new(EffectsEngine::new(&config.effects)?));
     let decoration_manager = Arc::new(RwLock::new(DecorationManager::new(&config.window)));
     let input_manager = Arc::new(RwLock::new(InputManager::new(
         &config.input,
         &config.bindings,
-    )?));
+    )));
 
     // XWayland
     let xwayland_manager = if config.xwayland.enabled {
@@ -148,14 +155,10 @@ async fn main() -> Result<()> {
     let ipc_server = AxiomIPCServer::new();
 
     // Renderer
-    let renderer = match AxiomRenderer::new_headless().await {
-        Ok(r) => Arc::new(RwLock::new(r)),
-        Err(e) => {
-            warn!("⚠️ Failed to initialize headless renderer: {}", e);
-            // This is problematic if new() expects it.
-            anyhow::bail!("Failed to initialize renderer");
-        }
-    };
+    let renderer = AxiomRenderer::new_headless()
+        .await
+        .map(|r| Arc::new(RwLock::new(r)))
+        .map_err(|e| anyhow::anyhow!("Failed to initialize headless renderer: {}", e))?;
 
     let mut compositor = AxiomCompositor::new(
         config.clone(),
@@ -205,7 +208,7 @@ mod tests {
     #[test]
     fn test_cli_parsing() {
         // Test basic CLI parsing
-        let cli = Cli::try_parse_from(&["axiom"]).expect("CLI parse should succeed");
+        let cli = Cli::try_parse_from(["axiom"]).expect("CLI parse should succeed");
         assert!(!cli.debug);
         assert!(!cli.windowed);
         assert!(!cli.no_effects);
@@ -213,7 +216,8 @@ mod tests {
 
     #[test]
     fn test_cli_flags() {
-        let cli = Cli::try_parse_from(&["axiom", "--debug", "--windowed", "--no-effects"]).expect("CLI parse should succeed");
+        let cli = Cli::try_parse_from(["axiom", "--debug", "--windowed", "--no-effects"])
+            .expect("CLI parse should succeed");
         assert!(cli.debug);
         assert!(cli.windowed);
         assert!(cli.no_effects);

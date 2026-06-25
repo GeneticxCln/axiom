@@ -50,7 +50,7 @@ smithay = { version = "0.7.0", default-features = false, features = [
     "wayland_frontend",
     "xwayland"
 ] }
-smithay-client-toolkit = "0.20"
+# smithay-client-toolkit (removed v0.7.6 audit: unused — compositor is server-side only; no client-toolkit API is referenced)
 
 # Graphics and input
 # glium   (removed v0.7.5 audit: unused — Smithay 0.7's GlesRenderer covers GL)
@@ -63,7 +63,7 @@ smithay-client-toolkit = "0.20"
 # ctrlc   (removed v0.7.5 audit: unused — graceful shutdown handled by tokio::signal)
 # tracing + tracing-subscriber (removed v0.7.5 audit: unused — log/env_logger covers observability)
 cgmath = "0.18"
-xkbcommon = "0.7"  # Smithay 0.7 backend uses xkbcommon for keyboard handling
+xkbcommon = "0.8"  # Smithay 0.7 backend uses xkbcommon for keyboard handling
 libc = "0.2"
 x11rb = "0.13"
 gl = "0.14"  # OpenGL bindings for GLES 2.0 rendering pipeline (raw gl::* in backend)
@@ -73,10 +73,10 @@ wgpu = "0.19"  # GPU compute and rendering (independent of Smithay's GLES render
 
 # IPC for Lazy UI integration
 serde_json = "1.0"
-interprocess = "1.2"  # For Unix socket communication
+# interprocess (removed v0.7.6 audit: unused — IPC uses tokio::net::UnixListener directly)
 
 # Utilities
-rand = "0.8"  # For input simulation in Phase 3
+# rand (removed v0.7.6 audit: unused — Phase 3 input simulation was removed)
 bytemuck = { version = "1.14", features = ["derive"] }  # For GPU buffer data
 parking_lot = "0.12"  # For RwLock synchronization
 

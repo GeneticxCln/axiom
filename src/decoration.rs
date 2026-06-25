@@ -1,6 +1,5 @@
 //! Server-side decoration system for Axiom compositor
 #![allow(clippy::approx_constant)]
-#![allow(missing_docs)]
 //!
 //! This module handles drawing window decorations (titlebars, borders, buttons)
 //! when clients request server-side decorations (SSD).
@@ -12,6 +11,11 @@ use std::collections::HashMap;
 use crate::config::WindowConfig;
 use crate::effects::WindowEffectState;
 use crate::window::Rectangle;
+
+/// Default window width (pixels) used as a placeholder for button-position
+/// calculations when the real window width isn't available.
+/// TODO: thread real window width through from the backend / compositor.
+const PLACEHOLDER_WINDOW_WIDTH: i32 = 800;
 
 /// Decoration mode for windows
 #[allow(clippy::approx_constant)]
@@ -25,8 +29,8 @@ pub enum DecorationMode {
     None,
 }
 
-/// Window decoration and theming
-/// Window decoration state and preferences
+/// Per-window decoration state (mode, focus, title, titlebar buttons) plus
+/// the user's preferred decoration mode.
 #[derive(Debug, Clone)]
 pub struct WindowDecoration {
     /// Current decoration mode for this window
@@ -162,7 +166,7 @@ impl Default for DecorationTheme {
             text_color_focused: [1.0, 1.0, 1.0, 1.0],     // White
             text_color_unfocused: [0.7, 0.7, 0.7, 1.0],   // Light gray
             border_color_focused: [0.482, 0.235, 0.929, 1.0], // Purple (#7C3AED)
-            border_color_unfocused: [0.216, 0.255, 81.0/255.0, 1.0], // Gray (#374151)
+            border_color_unfocused: [0.216, 0.255, 81.0 / 255.0, 1.0], // Gray (#374151)
 
             button_size: 24,
             button_normal: [0.2, 0.2, 0.2, 1.0],
@@ -182,14 +186,15 @@ impl DecorationManager {
         info!("🎨 Initializing server-side decoration manager...");
 
         // Create theme from window config
-        let theme = DecorationTheme {
-            border_width_focused: config.border_width,
-            border_color_focused: Self::parse_color(&config.active_border_color)
-                .unwrap_or([0.482, 0.235, 0.929, 1.0]), // Default purple
-            border_color_unfocused: Self::parse_color(&config.inactive_border_color)
-                .unwrap_or([0.216, 0.255, 81.0/255.0, 1.0]), // Default gray
-            ..DecorationTheme::default()
-        };
+        let theme =
+            DecorationTheme {
+                border_width_focused: config.border_width,
+                border_color_focused: Self::parse_color(&config.active_border_color)
+                    .unwrap_or([0.482, 0.235, 0.929, 1.0]), // Default purple
+                border_color_unfocused: Self::parse_color(&config.inactive_border_color)
+                    .unwrap_or([0.216, 0.255, 81.0 / 255.0, 1.0]), // Default gray
+                ..DecorationTheme::default()
+            };
 
         info!("✅ Decoration manager initialized with theme:");
         info!("  📏 Titlebar height: {}px", theme.titlebar_height);
@@ -306,32 +311,14 @@ impl DecorationManager {
                 let button_size = self.theme.button_size;
                 let titlebar_height = self.theme.titlebar_height;
                 let button_y = (titlebar_height - button_size) / 2;
-                let window_width = 800; // Placeholder
+                let ww = PLACEHOLDER_WINDOW_WIDTH;
                 let button_margin = 8;
-
-                // Close button (rightmost)
-                decoration.buttons.close.bounds = Rectangle {
-                    x: (window_width - button_size - button_margin) as i32,
-                    y: button_y as i32,
-                    width: button_size,
-                    height: button_size,
-                };
-
-                // Maximize button
-                decoration.buttons.maximize.bounds = Rectangle {
-                    x: (window_width - (button_size + button_margin) * 2) as i32,
-                    y: button_y as i32,
-                    width: button_size,
-                    height: button_size,
-                };
-
-                // Minimize button
-                decoration.buttons.minimize.bounds = Rectangle {
-                    x: (window_width - (button_size + button_margin) * 3) as i32,
-                    y: button_y as i32,
-                    width: button_size,
-                    height: button_size,
-                };
+                decoration.buttons.close.bounds =
+                    Self::button_rect(ww, button_size, button_y, button_margin, 0);
+                decoration.buttons.maximize.bounds =
+                    Self::button_rect(ww, button_size, button_y, button_margin, 1);
+                decoration.buttons.minimize.bounds =
+                    Self::button_rect(ww, button_size, button_y, button_margin, 2);
             }
         }
     }
@@ -428,15 +415,13 @@ impl DecorationManager {
                 return Some(DecorationAction::ToggleMaximize);
             }
 
-            // Check if click is on titlebar (for dragging)
-            let titlebar_rect = Rectangle {
-                x: 0,
-                y: 0,
-                width: 1000, // Will be updated with real window width
-                height: decoration.titlebar_height,
-            };
-
-            if titlebar_rect.contains_point(x, y) {
+            // Check if click is on titlebar (for dragging).
+            // The titlebar spans the full width from x=0 to the
+            // window's right edge. Since we don't have the window
+            // width at this level, accept any x >= 0 as long as
+            // y is within the titlebar height and x is not on a
+            // button (buttons are already checked above).
+            if y >= 0 && y < decoration.titlebar_height as i32 && x >= 0 {
                 return Some(DecorationAction::StartMove);
             }
         }
@@ -474,35 +459,14 @@ impl DecorationManager {
         let button_size = self.theme.button_size;
         let titlebar_height = self.theme.titlebar_height;
         let button_y = (titlebar_height - button_size) / 2;
-
-        // Position buttons from right to left: Close, Maximize, Minimize
-        // Note: In a real implementation, window width would be provided
-        let window_width = 800; // Placeholder
+        let ww = PLACEHOLDER_WINDOW_WIDTH;
         let button_margin = 8;
-
-        // Close button (rightmost)
-        decoration.buttons.close.bounds = Rectangle {
-            x: (window_width - button_size - button_margin) as i32,
-            y: button_y as i32,
-            width: button_size,
-            height: button_size,
-        };
-
-        // Maximize button
-        decoration.buttons.maximize.bounds = Rectangle {
-            x: (window_width - (button_size + button_margin) * 2) as i32,
-            y: button_y as i32,
-            width: button_size,
-            height: button_size,
-        };
-
-        // Minimize button
-        decoration.buttons.minimize.bounds = Rectangle {
-            x: (window_width - (button_size + button_margin) * 3) as i32,
-            y: button_y as i32,
-            width: button_size,
-            height: button_size,
-        };
+        decoration.buttons.close.bounds =
+            Self::button_rect(ww, button_size, button_y, button_margin, 0);
+        decoration.buttons.maximize.bounds =
+            Self::button_rect(ww, button_size, button_y, button_margin, 1);
+        decoration.buttons.minimize.bounds =
+            Self::button_rect(ww, button_size, button_y, button_margin, 2);
     }
 
     /// Get the current theme
@@ -514,43 +478,36 @@ impl DecorationManager {
     pub fn update_theme(&mut self, theme: DecorationTheme) {
         self.theme = theme;
         info!("🎨 Updated decoration theme");
+        let button_size = self.theme.button_size;
+        let titlebar_height = self.theme.titlebar_height;
+        let button_y = (titlebar_height - button_size) / 2;
+        let ww = PLACEHOLDER_WINDOW_WIDTH;
+        let button_margin = 8;
 
         // Update all window button positions
         let window_ids: Vec<u64> = self.decorations.keys().copied().collect();
         for window_id in window_ids {
             if let Some(decoration) = self.decorations.get_mut(&window_id) {
                 if decoration.mode == DecorationMode::ServerSide {
-                    let button_size = self.theme.button_size;
-                    let titlebar_height = self.theme.titlebar_height;
-                    let button_y = (titlebar_height - button_size) / 2;
-                    let window_width = 800; // Placeholder
-                    let button_margin = 8;
-
-                    // Close button (rightmost)
-                    decoration.buttons.close.bounds = Rectangle {
-                        x: (window_width - button_size - button_margin) as i32,
-                        y: button_y as i32,
-                        width: button_size,
-                        height: button_size,
-                    };
-
-                    // Maximize button
-                    decoration.buttons.maximize.bounds = Rectangle {
-                        x: (window_width - (button_size + button_margin) * 2) as i32,
-                        y: button_y as i32,
-                        width: button_size,
-                        height: button_size,
-                    };
-
-                    // Minimize button
-                    decoration.buttons.minimize.bounds = Rectangle {
-                        x: (window_width - (button_size + button_margin) * 3) as i32,
-                        y: button_y as i32,
-                        width: button_size,
-                        height: button_size,
-                    };
+                    decoration.buttons.close.bounds =
+                        Self::button_rect(ww, button_size, button_y, button_margin, 0);
+                    decoration.buttons.maximize.bounds =
+                        Self::button_rect(ww, button_size, button_y, button_margin, 1);
+                    decoration.buttons.minimize.bounds =
+                        Self::button_rect(ww, button_size, button_y, button_margin, 2);
                 }
             }
+        }
+    }
+
+    /// Helper: compute button rectangle at position `idx` (0 = close, 1 =
+    /// maximize, 2 = minimize) from the right edge.
+    fn button_rect(window_w: i32, size: u32, y: u32, margin: i32, idx: usize) -> Rectangle {
+        Rectangle {
+            x: window_w - (size as i32 + margin) * (idx as i32 + 1),
+            y: y as i32,
+            width: size,
+            height: size,
         }
     }
 
@@ -754,7 +711,7 @@ mod tests {
     #[test]
     fn test_parse_color_rejects_invalid() {
         assert!(DecorationManager::parse_color("FFAA33").is_none()); // no '#'
-        assert!(DecorationManager::parse_color("#FFF").is_none());   // wrong length
+        assert!(DecorationManager::parse_color("#FFF").is_none()); // wrong length
         assert!(DecorationManager::parse_color("#ZZZZZZ").is_none()); // not hex
         assert!(DecorationManager::parse_color("").is_none());
     }
@@ -764,7 +721,10 @@ mod tests {
         let mut mgr = DecorationManager::new(&WindowConfig::default());
         // prefers_server_side=false => ClientSide => no titlebar
         mgr.add_window(1, "CSD".into(), false);
-        assert_eq!(mgr.get_decoration(1).unwrap().mode, DecorationMode::ClientSide);
+        assert_eq!(
+            mgr.get_decoration(1).unwrap().mode,
+            DecorationMode::ClientSide
+        );
         assert_eq!(mgr.get_decoration(1).unwrap().titlebar_height, 0);
     }
 
@@ -809,11 +769,16 @@ mod tests {
 
     #[test]
     fn test_contains_point() {
-        let r = Rectangle { x: 10, y: 20, width: 30, height: 40 };
+        let r = Rectangle {
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+        };
         assert!(r.contains_point(10, 20));
         assert!(r.contains_point(39, 59));
         assert!(!r.contains_point(40, 20)); // right edge exclusive
         assert!(!r.contains_point(10, 60)); // bottom edge exclusive
-        assert!(!r.contains_point(9, 20));  // left edge exclusive
+        assert!(!r.contains_point(9, 20)); // left edge exclusive
     }
 }

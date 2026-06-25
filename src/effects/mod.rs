@@ -1,8 +1,14 @@
-//! Phase 4: Visual Effects Engine (Hyprland-inspired)
+//! Visual Effects Engine (Hyprland-inspired)
 //!
 //! This module handles all visual effects: animations, blur, shadows,
 //! rounded corners, and other eye candy that makes Axiom beautiful.
-#![allow(missing_docs)]
+//!
+//! ## Components
+//! - [`EffectsEngine`]: Central coordinator for all visual effects
+//! - Window-level effects: scale, opacity, blur, shadows, corner radius
+//! - GPU-accelerated rendering via WGPU shaders
+//! - Spring-physics animation system
+//! - Adaptive quality scaling for performance
 
 use crate::config::EffectsConfig;
 use crate::effects::animations::AnimationStats;
@@ -148,8 +154,6 @@ pub struct EffectsEngine {
     /// GPU context (when available)
     gpu_device: Option<Arc<Device>>,
     gpu_queue: Option<Arc<Queue>>,
-
-
 }
 
 impl Default for WindowEffectState {
@@ -191,6 +195,11 @@ impl Default for BlurParams {
 }
 
 impl EffectsEngine {
+    /// Create a new [`EffectsEngine`] from the provided [`EffectsConfig`].
+    ///
+    /// Initializes all effect subsystems (blur, shadow, animations) but
+    /// does **not** initialize GPU resources — call [`EffectsEngine::initialize_gpu`] separately
+    /// when a WGPU device and queue are available.
     pub fn new(config: &EffectsConfig) -> Result<Self> {
         info!("🎨 Phase 4: Initializing Visual Effects Engine...");
 
@@ -255,7 +264,6 @@ impl EffectsEngine {
             adaptive_quality: true,
             gpu_device: None,
             gpu_queue: None,
-
         })
     }
 
@@ -283,34 +291,53 @@ impl EffectsEngine {
             for update in &controller_updates {
                 if let Some(effect_state) = self.window_effects.get_mut(&update.window_id) {
                     match (&update.property, &update.value) {
-                        (animations::AnimationProperty::Transform, animations::AnimationValue::Transform { scale, opacity, .. }) => {
+                        (
+                            animations::AnimationProperty::Transform,
+                            animations::AnimationValue::Transform { scale, opacity, .. },
+                        ) => {
                             effect_state.scale = scale.x.max(scale.y);
                             effect_state.opacity = *opacity;
                         }
-                        (animations::AnimationProperty::Position, animations::AnimationValue::Position(pos)) => {
+                        (
+                            animations::AnimationProperty::Position,
+                            animations::AnimationValue::Position(pos),
+                        ) => {
                             effect_state.position_offset = (pos.x, pos.y);
                         }
-                        (animations::AnimationProperty::Opacity, animations::AnimationValue::Float(v)) => {
+                        (
+                            animations::AnimationProperty::Opacity,
+                            animations::AnimationValue::Float(v),
+                        ) => {
                             effect_state.opacity = v.clamp(0.0, 1.0);
                         }
-                        (animations::AnimationProperty::Scale, animations::AnimationValue::Float(v)) => {
+                        (
+                            animations::AnimationProperty::Scale,
+                            animations::AnimationValue::Float(v),
+                        ) => {
                             effect_state.scale = v.max(0.0);
                         }
-                        (animations::AnimationProperty::Rotation, animations::AnimationValue::Float(_v)) => {
+                        (
+                            animations::AnimationProperty::Rotation,
+                            animations::AnimationValue::Float(_v),
+                        ) => {
                             // Rotation not yet stored on WindowEffectState — no-op for now
                         }
-                        (animations::AnimationProperty::Size, animations::AnimationValue::Vector2(_size)) => {
+                        (
+                            animations::AnimationProperty::Size,
+                            animations::AnimationValue::Vector2(_size),
+                        ) => {
                             // Size not yet stored on WindowEffectState — no-op for now
                         }
-                        (animations::AnimationProperty::SpringProperty(name), animations::AnimationValue::Float(v)) => {
-                            match name.as_str() {
-                                "opacity" => effect_state.opacity = v.clamp(0.0, 1.0),
-                                "scale" => effect_state.scale = v.max(0.0),
-                                "blur" => effect_state.blur_radius = v.max(0.0),
-                                "corner_radius" => effect_state.corner_radius = v.max(0.0),
-                                _ => {}
-                            }
-                        }
+                        (
+                            animations::AnimationProperty::SpringProperty(name),
+                            animations::AnimationValue::Float(v),
+                        ) => match name.as_str() {
+                            "opacity" => effect_state.opacity = v.clamp(0.0, 1.0),
+                            "scale" => effect_state.scale = v.max(0.0),
+                            "blur" => effect_state.blur_radius = v.max(0.0),
+                            "corner_radius" => effect_state.corner_radius = v.max(0.0),
+                            _ => {}
+                        },
                         _ => {}
                     }
                 }
@@ -440,12 +467,8 @@ impl EffectsEngine {
             target_pos: to,
         };
 
-        self.animation_controller.start_animation(
-            window_id,
-            animation,
-            Duration::ZERO,
-            Some(1),
-        );
+        self.animation_controller
+            .start_animation(window_id, animation, Duration::ZERO, Some(1));
 
         debug!(
             "🎬 Started window move animation for window {} from {:?} to {:?}",
@@ -494,7 +517,7 @@ impl EffectsEngine {
         }
     }
 
-    /// Apply easing curve to animation progress
+    /// Apply easing curve to animation progress (used in tests and internally)
     #[allow(dead_code)]
     fn apply_easing_curve(&self, t: f32, curve: &EasingCurve) -> f32 {
         let t = t.clamp(0.0, 1.0);
@@ -564,9 +587,8 @@ impl EffectsEngine {
     /// Remove windows whose animations have fully faded out (opacity ≤ 0 and scale ≤ 0).
     /// All animations now route through AnimationController exclusively.
     fn cleanup_finished_animations(&mut self) {
-        self.window_effects.retain(|_, effect_state| {
-            effect_state.opacity > 0.0 || effect_state.scale > 0.0
-        });
+        self.window_effects
+            .retain(|_, effect_state| effect_state.opacity > 0.0 || effect_state.scale > 0.0);
     }
 
     /// Get current effects quality (for performance monitoring)
@@ -592,14 +614,16 @@ impl EffectsEngine {
         )
     }
 
-    pub fn shutdown(&mut self) -> Result<()> {
+    pub fn shutdown(&mut self) {
         info!("🎨 Shutting down Visual Effects Engine...");
         self.window_effects.clear();
         info!("✅ Effects Engine shutdown complete");
-        Ok(())
     }
 
-    /// Toggle effects on/off
+    /// Toggle the global effects enabled state.
+    ///
+    /// When disabled, all animations, blur, and shadow rendering are
+    /// skipped in [`EffectsEngine::update`].
     pub fn toggle_effects(&mut self) {
         self.config.enabled = !self.config.enabled;
     }
@@ -657,8 +681,7 @@ impl EffectsEngine {
                 let base_ms = self.config.animations.duration as f32;
                 let multiplier = 1.0 / s;
                 let new_duration_ms = (base_ms * multiplier).max(1.0) as u64;
-                self.default_animation_duration =
-                    Duration::from_millis(new_duration_ms);
+                self.default_animation_duration = Duration::from_millis(new_duration_ms);
                 debug!(
                     "✨ Animation speed set to {:.2}x (duration {} -> {}ms)",
                     s, base_ms as u64, new_duration_ms
@@ -725,7 +748,8 @@ impl EffectsEngine {
         self.shader_manager = Some(shader_manager.clone());
 
         // Initialize blur renderer
-        if self.blur_params.enabled {            // Convert our BlurParams to blur module's BlurParams
+        if self.blur_params.enabled {
+            // Convert our BlurParams to blur module's BlurParams
             let blur_params = blur::BlurParams {
                 blur_type: blur::BlurType::Gaussian {
                     radius: self.blur_params.radius,
@@ -887,9 +911,11 @@ mod tests {
             for t in [0.0, 0.25, 0.5, 0.75, 1.0].iter() {
                 let result = engine.apply_easing_curve(*t, curve);
                 assert!(
-                    result >= -0.1 && result <= 1.1,
+                    (-0.1..=1.1).contains(&result),
                     "Easing curve {:?} at t={}: result={} out of expected range",
-                    curve, t, result
+                    curve,
+                    t,
+                    result
                 );
             }
         }
@@ -900,7 +926,7 @@ mod tests {
         let config = EffectsConfig::default();
         let mut engine = EffectsEngine::new(&config).expect("Failed to create EffectsEngine");
         engine.animate_window_open(1);
-        engine.shutdown().expect("Shutdown should succeed");
+        engine.shutdown();
     }
 
     #[test]
@@ -912,7 +938,10 @@ mod tests {
 
         // Disable effects via the IPC mutator.
         engine.apply_live_effects_control(Some(false), None, None);
-        assert!(!engine.config.enabled, "effects.enabled should be toggled off");
+        assert!(
+            !engine.config.enabled,
+            "effects.enabled should be toggled off"
+        );
 
         // Set blur radius within the 0..=32 px range.
         engine.apply_live_effects_control(None, Some(14.5), None);
@@ -952,11 +981,23 @@ mod tests {
 
         // Reject non-finite, non-positive, over-max.
         engine.apply_live_effects_control(None, None, Some(0.0));
-        assert!((engine.default_animation_duration.as_millis() as i128 - original_duration_ms as i128).abs() < 1);
+        assert!(
+            (engine.default_animation_duration.as_millis() as i128 - original_duration_ms as i128)
+                .abs()
+                < 1
+        );
         engine.apply_live_effects_control(None, None, Some(f32::NAN));
-        assert!((engine.default_animation_duration.as_millis() as i128 - original_duration_ms as i128).abs() < 1);
+        assert!(
+            (engine.default_animation_duration.as_millis() as i128 - original_duration_ms as i128)
+                .abs()
+                < 1
+        );
         engine.apply_live_effects_control(None, None, Some(11.0));
-        assert!((engine.default_animation_duration.as_millis() as i128 - original_duration_ms as i128).abs() < 1);
+        assert!(
+            (engine.default_animation_duration.as_millis() as i128 - original_duration_ms as i128)
+                .abs()
+                < 1
+        );
     }
 
     #[test]
@@ -970,7 +1011,8 @@ mod tests {
         assert!(
             new_ms < base_ms,
             "speed=2.0 should shorten animation duration ({} -> {})",
-            base_ms, new_ms
+            base_ms,
+            new_ms
         );
         // speed=0.5 should roughly double it (subject to floor).
         engine.apply_live_effects_control(None, None, Some(0.5));
@@ -978,7 +1020,8 @@ mod tests {
         assert!(
             slower_ms > new_ms,
             "speed=0.5 should lengthen animation duration ({} -> {})",
-            new_ms, slower_ms
+            new_ms,
+            slower_ms
         );
     }
 }

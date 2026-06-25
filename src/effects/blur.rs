@@ -82,6 +82,13 @@ struct BlurUniforms {
 }
 
 impl BlurRenderer {
+    /// Create a new [`BlurRenderer`] with the given GPU context, shaders,
+    /// and initial blur parameters.
+    ///
+    /// Compiles horizontal and vertical blur render pipelines and
+    /// allocates a uniform buffer plus a reusable texture sampler.
+    /// The intermediate texture for dual-pass blur is created lazily
+    /// on the first [`apply_blur`] call.
     pub fn new(
         device: Arc<Device>,
         queue: Arc<Queue>,

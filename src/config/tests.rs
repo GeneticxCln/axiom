@@ -263,8 +263,8 @@ fn test_bindings_config_validation() {
     assert!(is_valid_keybinding(&config.scroll_left));
     assert!(is_valid_keybinding(&config.quit));
 }
-
 #[test]
+#[allow(clippy::field_reassign_with_default)]
 fn test_xwayland_config() {
     let mut config = XWaylandConfig::default();
 
@@ -299,6 +299,7 @@ mod property_tests {
 
     proptest! {
         #[test]
+        #[allow(clippy::field_reassign_with_default)]
         fn test_workspace_width_bounds(width in 100u32..10000u32) {
             let mut config = AxiomConfig::default();
             config.workspace.workspace_width = width;
@@ -309,6 +310,7 @@ mod property_tests {
         }
 
         #[test]
+        #[allow(clippy::field_reassign_with_default)]
         fn test_scroll_speed_bounds(speed in 0.1f64..20.0f64) {
             let mut config = AxiomConfig::default();
             config.workspace.scroll_speed = speed;
@@ -323,13 +325,14 @@ mod property_tests {
         }
 
         #[test]
+        #[allow(clippy::field_reassign_with_default)]
         fn test_blur_intensity_bounds(intensity in 0.0f64..2.0f64) {
             let mut config = AxiomConfig::default();
             config.effects.blur.intensity = intensity;
 
             // Validation should handle bounds
             let result = config.validate();
-            if intensity >= 0.0 && intensity <= 1.0 {
+            if (0.0..=1.0).contains(&intensity) {
                 prop_assert!(result.is_ok());
             } else {
                 prop_assert!(result.is_err());

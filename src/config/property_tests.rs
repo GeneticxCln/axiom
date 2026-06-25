@@ -316,7 +316,10 @@ proptest! {
         workspace_override in valid_workspace_config()
     ) {
         let mut partial_config = AxiomConfig::default();
-        partial_config.workspace = workspace_override.clone();
+        #[allow(clippy::field_reassign_with_default)]
+        {
+            partial_config.workspace = workspace_override.clone();
+        }
 
         let base_vsync = base_config.general.vsync;
         let merged = base_config.merge_partial(partial_config);
@@ -331,6 +334,7 @@ proptest! {
 
     /// Test edge cases for numeric values
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn test_numeric_edge_cases(
         tiny_scroll_speed in 0.001f64..0.1f64,
         large_workspace_width in 10000u32..50000u32,
@@ -444,6 +448,5 @@ mod stress_tests {
         }
 
         // If we get here without running out of memory, test passes
-        assert!(true);
     }
 }

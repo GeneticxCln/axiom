@@ -2,8 +2,16 @@
 //!
 //! This module provides communication between the Axiom compositor (Rust) and
 //! Lazy UI optimization system (Python) using Unix sockets and JSON messages.
-
-#![allow(missing_docs)]
+//!
+//! ## Architecture
+//! - [`AxiomIPCServer`]: Server that accepts client connections via Unix socket
+//! - [`AxiomMessage`]: Messages sent from Axiom to Lazy UI
+//! - [`LazyUIMessage`]: Commands sent from Lazy UI to Axiom
+//!
+//! ## Security
+//! - UID-based peer credential verification
+//! - Connection limit via semaphore (default 16)
+//! - Idle timeout for inactive connections (60s)
 
 use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
@@ -11,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::task::JoinHandle;
@@ -45,6 +53,12 @@ const KNOWN_WORKSPACE_ACTIONS: &[&str] = &[
 const MAX_EFFECTS_BLUR_RADIUS_PX: f32 = 32.0;
 /// Maximum accepted animation speed multiplier (1.0 = realtime, >1 faster).
 const MAX_EFFECTS_ANIMATION_SPEED: f32 = 10.0;
+/// Maximum accepted animation duration in milliseconds.
+const MAX_ANIMATION_DURATION_MS: u32 = 10_000;
+/// Maximum accepted scroll speed.
+const MAX_SCROLL_SPEED: f64 = 100.0;
+/// Maximum size of a single line from an IPC client (64 KiB).
+const MAX_IPC_LINE_BYTES: usize = 64 * 1024;
 
 /// Returns true when `action` is in the whitelisted
 /// [`KNOWN_WORKSPACE_ACTIONS`] set. Whitelist is enforced to avoid
@@ -257,35 +271,56 @@ impl AxiomIPCServer {
     /// Start the IPC server
     #[allow(clippy::unused_async)]
     pub async fn start(&mut self) -> Result<()> {
-        // Ensure parent dir exists with correct permissions
+        // Ensure parent dir exists with correct permissions (0700).
+        // Do the mkdir+chmod before anything else so the directory is
+        // never observable with wider permissions.
         if let Some(dir) = self.socket_path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("Failed to create IPC dir: {:?}", dir))?;
-            // Best-effort tighten permissions
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+                if let Err(e) =
+                    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                {
+                    warn!("⚠️ Failed to set 0700 on IPC directory {:?}: {}", dir, e);
+                }
             }
         }
 
-        // Remove existing socket file
-        if self.socket_path.exists() {
-            std::fs::remove_file(&self.socket_path).with_context(|| {
-                format!("Failed to remove existing socket: {:?}", self.socket_path)
-            })?;
-        }
-
-        // Create Unix socket listener
-        let listener = UnixListener::bind(&self.socket_path)
-            .with_context(|| format!("Failed to bind Unix socket: {:?}", self.socket_path))?;
+        // Bind the socket without a TOCTOU check-then-remove race.
+        // If the socket file already exists, UnixListener::bind will fail;
+        // we tolerate that failure and remove+retry once.
+        let listener = match UnixListener::bind(&self.socket_path) {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                let _ = std::fs::remove_file(&self.socket_path);
+                UnixListener::bind(&self.socket_path).with_context(|| {
+                    format!(
+                        "Failed to bind Unix socket after stale removal: {:?}",
+                        self.socket_path
+                    )
+                })?
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("Failed to bind Unix socket: {:?}", self.socket_path)
+                });
+            }
+        };
 
         // Tighten socket permissions (0600)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600));
+            if let Err(e) =
+                std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))
+            {
+                warn!(
+                    "⚠️ Failed to set 0600 on socket {:?}: {}",
+                    self.socket_path, e
+                );
+            }
         }
 
         // Create broadcast channel for outgoing messages
@@ -306,6 +341,8 @@ impl AxiomIPCServer {
         self.connection_semaphore = Some(semaphore.clone());
 
         // Get our own UID for peer credential checks
+        // SAFETY: getuid() is always safe to call — it has no preconditions,
+        // never fails, and does not touch any Rust-managed memory.
         #[cfg(unix)]
         let our_uid = unsafe { libc::getuid() };
         #[cfg(not(unix))]
@@ -399,15 +436,6 @@ impl AxiomIPCServer {
         Ok(())
     }
 
-    /// Accept incoming connections from Lazy UI (kept for compatibility)
-    #[allow(clippy::unused_async)]
-    #[allow(dead_code)]
-    async fn accept_connections(&mut self) -> Result<()> {
-        // Deprecated path: connection acceptance is spawned in start() with a broadcast channel.
-        // Keeping this method to satisfy older call sites; return Ok(()) without doing anything.
-        Ok(())
-    }
-
     /// Handle a single client connection
     async fn handle_client(
         stream: UnixStream,
@@ -416,7 +444,8 @@ impl AxiomIPCServer {
         config_handle: Option<Arc<parking_lot::RwLock<AxiomConfig>>>,
     ) -> Result<()> {
         let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
+        let mut reader = BufReader::new(reader);
+        let mut line_buf = String::new();
         let idle_timeout = Duration::from_secs(CLIENT_IDLE_TIMEOUT_SECS);
 
         // Send startup notification
@@ -432,23 +461,43 @@ impl AxiomIPCServer {
 
         Self::send_message(&mut writer, &startup_msg).await?;
 
-        // Process incoming messages and outgoing broadcasts concurrently
+        // Process incoming messages and outgoing broadcasts concurrently.
+        // Creates a fresh `take()`-limited reader each iteration to bound
+        // memory: any client sending > MAX_IPC_LINE_BYTES without \n is
+        // disconnected after hitting the take limit.
         loop {
+            let mut limited = (&mut reader).take((MAX_IPC_LINE_BYTES + 1) as u64);
+
             tokio::select! {
                 // Idle timeout - disconnect if no activity
                 _ = tokio::time::sleep(idle_timeout) => {
                     info!("⏱️ IPC client idle timeout, disconnecting");
                     break;
                 }
-                line = lines.next_line() => {
-                    let line = match line? {
-                        Some(l) => l,
-                        None => break, // client disconnected
+                res = limited.read_line(&mut line_buf) => {
+                    let n = match res {
+                        Ok(n) => n,
+                        Err(e) => {
+                            warn!("⚠️ IPC read error: {}", e);
+                            break;
+                        }
                     };
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() { continue; }
-                    if trimmed.len() > 64 * 1024 {
-                        warn!("⚠️ IPC message too large ({} bytes) - dropping", trimmed.len());
+
+                    if n == 0 {
+                        break; // client disconnected
+                    }
+
+                    // Line exceeded the maximum allowed size — drop the
+                    // connection to prevent unbounded memory DoS.
+                    if line_buf.len() > MAX_IPC_LINE_BYTES {
+                        warn!("⚠️ IPC message too large ({} bytes, max {}) - disconnecting",
+                            line_buf.len(), MAX_IPC_LINE_BYTES);
+                        break;
+                    }
+
+                    let trimmed = line_buf.trim();
+                    if trimmed.is_empty() {
+                        line_buf.clear();
                         continue;
                     }
 
@@ -472,6 +521,9 @@ impl AxiomIPCServer {
                             warn!("⚠️ Invalid JSON from IPC client: {}", e);
                         }
                     }
+
+                    // Clear the buffer for the next iteration
+                    line_buf.clear();
                 },
                 msg = rx.recv() => {
                     match msg {
@@ -651,14 +703,21 @@ impl AxiomIPCServer {
 
             LazyUIMessage::HealthCheck => {
                 debug!("🏥 Health check request");
-
-                // Send performance metrics as health response
+                // Read real system metrics from /proc and sysfs (same path
+                // as `GetPerformanceReport`). CPU is a single-sample reading
+                // (no delta), so it will be 0 on first call; subsequent
+                // calls within the same connection will report deltas if we
+                // had `&mut self`, but this static handler cannot carry
+                // state. Memory and GPU are real point-in-time readings.
+                let cpu = Self::sample_system_cpu_instant();
+                let mem = Self::sample_system_memory_mb();
+                let gpu = Self::sample_gpu_usage();
                 let metrics = AxiomMessage::PerformanceMetrics {
                     timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-                    cpu_usage: 15.5, // TODO: Get real metrics
-                    memory_usage: 32.1,
-                    gpu_usage: 8.3,
-                    frame_time: 16.67,
+                    cpu_usage: cpu,
+                    memory_usage: mem,
+                    gpu_usage: gpu,
+                    frame_time: 0.0,
                     active_windows: 0,
                     current_workspace: 0,
                 };
@@ -769,19 +828,26 @@ impl AxiomIPCServer {
                             if let Some(val_f64) = value.as_f64() {
                                 match key.as_str() {
                                     "effects.blur.radius" => {
-                                        config.effects.blur.radius = val_f64 as u32;
+                                        config.effects.blur.radius = val_f64
+                                            .clamp(0.0, MAX_EFFECTS_BLUR_RADIUS_PX as f64)
+                                            as u32;
                                         config_changed = true;
                                         debug!("  Set blur radius to {}", val_f64);
                                     }
                                     "effects.animations.duration" => {
-                                        config.effects.animations.duration = val_f64 as u32;
+                                        config.effects.animations.duration = val_f64
+                                            .clamp(1.0, MAX_ANIMATION_DURATION_MS as f64)
+                                            as u32;
                                         config_changed = true;
                                         debug!("  Set animation duration to {}", val_f64);
                                     }
                                     "workspace.scroll_speed" => {
-                                        config.workspace.scroll_speed = val_f64;
-                                        config_changed = true;
-                                        debug!("  Set scroll speed to {}", val_f64);
+                                        if val_f64.is_finite() && val_f64 >= 0.0 {
+                                            config.workspace.scroll_speed =
+                                                val_f64.min(MAX_SCROLL_SPEED);
+                                            config_changed = true;
+                                            debug!("  Set scroll speed to {}", val_f64);
+                                        }
                                     }
                                     _ => {
                                         debug!("  Unknown optimization key: {}", key);
@@ -792,19 +858,27 @@ impl AxiomIPCServer {
                     }
                     LazyUIMessage::SetConfig { key, value } => {
                         info!("⚙️ Setting config: {} = {:?}", key, value);
-                        // Manual mapping (would be better with reflection/serde_merge)
+                        // Manual mapping with bounds enforcement (defense in depth).
+                        // The per-client IPC handler already validates ranges for the
+                        // ACK, but this compositor-side path re-validates to guard
+                        // against future code-paths that bypass the per-client layer.
                         if let Some(val_f64) = value.as_f64() {
                             match key.as_str() {
                                 "effects.blur.radius" => {
-                                    config.effects.blur.radius = val_f64 as u32;
+                                    config.effects.blur.radius = val_f64
+                                        .clamp(0.0, MAX_EFFECTS_BLUR_RADIUS_PX as f64)
+                                        as u32;
                                     config_changed = true;
                                 }
                                 "effects.animations.duration" => {
-                                    config.effects.animations.duration = val_f64 as u32;
+                                    config.effects.animations.duration =
+                                        val_f64.clamp(1.0, MAX_ANIMATION_DURATION_MS as f64) as u32;
                                     config_changed = true;
                                 }
-                                "workspace.scroll_speed" => {
-                                    config.workspace.scroll_speed = val_f64;
+                                "workspace.scroll_speed"
+                                    if val_f64.is_finite() && val_f64 >= 0.0 =>
+                                {
+                                    config.workspace.scroll_speed = val_f64.min(MAX_SCROLL_SPEED);
                                     config_changed = true;
                                 }
                                 _ => {}
@@ -926,7 +1000,7 @@ impl AxiomIPCServer {
         0.0
     }
 
-    /// Sample system CPU usage (%) and memory used (MB) by reading /proc
+    /// Sample system CPU usage (%) and memory used (MB) by reading /proc.
     /// This is a synchronous sampler intended for periodic telemetry; it avoids extra deps.
     fn sample_system_metrics_nonblocking(&mut self) -> (f32, f32) {
         // CPU usage: sample /proc/stat twice and compute deltas
@@ -1093,9 +1167,7 @@ impl AxiomIPCServer {
             "effects.animations.duration" => {
                 Some(serde_json::json!(config.effects.animations.duration))
             }
-            "effects.shadows.opacity" => {
-                Some(serde_json::json!(config.effects.shadows.opacity))
-            }
+            "effects.shadows.opacity" => Some(serde_json::json!(config.effects.shadows.opacity)),
             "general.max_fps" => Some(serde_json::json!(config.general.max_fps)),
             "general.vsync" => Some(serde_json::json!(config.general.vsync)),
             "xwayland.enabled" => Some(serde_json::json!(config.xwayland.enabled)),
@@ -1104,15 +1176,73 @@ impl AxiomIPCServer {
     }
 
     fn default_socket_path() -> PathBuf {
-        // Prefer XDG_RUNTIME_DIR
-        if let Ok(mut dir) = std::env::var("XDG_RUNTIME_DIR") {
-            if dir.is_empty() {
-                dir = "/tmp".to_string();
+        // Prefer XDG_RUNTIME_DIR (user-private, 0700 by convention).
+        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+            if !dir.is_empty() {
+                return PathBuf::from(dir).join("axiom").join("axiom.sock");
             }
-            return PathBuf::from(dir).join("axiom").join("axiom.sock");
         }
-        // Fallback to /tmp
-        PathBuf::from("/tmp").join("axiom-lazy-ui.sock")
+        // Fallback: use a per-process subdirectory under /tmp to prevent
+        // predictable-path symlink attacks. The directory is created in
+        // `start()` which calls mkdir+chmod 0700.
+        let pid = std::process::id();
+        PathBuf::from("/tmp")
+            .join(format!("axiom-{}", pid))
+            .join("axiom-lazy-ui.sock")
+    }
+
+    /// Single-sample CPU usage percentage (no delta — returns 0 on first call
+    /// in a static context; subsequent calls need `&mut self` for delta).
+    fn sample_system_cpu_instant() -> f32 {
+        let contents = match std::fs::read_to_string("/proc/stat") {
+            Ok(c) => c,
+            Err(_) => return 0.0,
+        };
+        // Return the idle ratio so callers can interpret it as CPU usage.
+        // Without prior state this is a single data point, not a delta.
+        if let Some(first) = contents.lines().next() {
+            if first.starts_with("cpu ") {
+                let parts: Vec<&str> = first.split_whitespace().collect();
+                if parts.len() >= 5 {
+                    let idle: f64 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let total: f64 = parts
+                        .iter()
+                        .skip(1)
+                        .filter_map(|s| s.parse::<f64>().ok())
+                        .sum();
+                    if total > 0.0 {
+                        return ((1.0 - idle / total) * 100.0) as f32;
+                    }
+                }
+            }
+        }
+        0.0
+    }
+
+    /// Single-sample system memory usage in MB from /proc/meminfo.
+    fn sample_system_memory_mb() -> f32 {
+        let meminfo = match std::fs::read_to_string("/proc/meminfo") {
+            Ok(m) => m,
+            Err(_) => return 0.0,
+        };
+        let mut total_kb: u64 = 0;
+        let mut available_kb: u64 = 0;
+        for line in meminfo.lines() {
+            if line.starts_with("MemTotal:") {
+                total_kb = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+            } else if line.starts_with("MemAvailable:") {
+                available_kb = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+            }
+        }
+        total_kb.saturating_sub(available_kb) as f32 / 1024.0
     }
 }
 
@@ -1198,7 +1328,10 @@ mod tests {
             Some(MAX_EFFECTS_ANIMATION_SPEED)
         );
         assert_eq!(validate_animation_speed(-0.5), None);
-        assert_eq!(validate_animation_speed(MAX_EFFECTS_ANIMATION_SPEED + 1.0), None);
+        assert_eq!(
+            validate_animation_speed(MAX_EFFECTS_ANIMATION_SPEED + 1.0),
+            None
+        );
         assert_eq!(validate_animation_speed(f32::NAN), None);
     }
 

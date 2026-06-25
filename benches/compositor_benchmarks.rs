@@ -23,7 +23,7 @@ fn bench_workspace_scrolling(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let config = WorkspaceConfig::default();
-                        let mut workspaces = ScrollableWorkspaces::new(&config).unwrap();
+                        let mut workspaces = ScrollableWorkspaces::new(&config);
 
                         // Add windows
                         for i in 1..=window_count {
@@ -34,9 +34,10 @@ fn bench_workspace_scrolling(c: &mut Criterion) {
                     |mut workspaces| {
                         // Benchmark scrolling operations
                         for _ in 0..10 {
-                            black_box(workspaces.scroll_right());
-                            black_box(workspaces.scroll_left());
+                            workspaces.scroll_right();
+                            workspaces.scroll_left();
                         }
+                        black_box(());
                     },
                     BatchSize::SmallInput,
                 );
@@ -59,7 +60,7 @@ fn bench_window_layout(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let config = WorkspaceConfig::default();
-                        let mut workspaces = ScrollableWorkspaces::new(&config).unwrap();
+                        let mut workspaces = ScrollableWorkspaces::new(&config);
 
                         // Add windows
                         for i in 1..=window_count {
@@ -103,7 +104,8 @@ fn bench_effects_engine(c: &mut Criterion) {
             },
             |mut effects| {
                 // Benchmark one update cycle
-                black_box(effects.update().unwrap());
+                black_box(effects.update().ok());
+                black_box(());
             },
             BatchSize::SmallInput,
         );
@@ -123,7 +125,8 @@ fn bench_effects_engine(c: &mut Criterion) {
                 effects
             },
             |mut effects| {
-                black_box(effects.update().unwrap());
+                black_box(effects.update().ok());
+                black_box(());
             },
             BatchSize::SmallInput,
         );
@@ -172,7 +175,7 @@ fn bench_memory_operations(c: &mut Criterion) {
     group.bench_function("window_creation_destruction", |b| {
         b.iter(|| {
             let config = WorkspaceConfig::default();
-            let mut workspaces = ScrollableWorkspaces::new(&config).unwrap();
+            let mut workspaces = ScrollableWorkspaces::new(&config);
 
             // Create many windows
             let mut window_ids = Vec::new();
@@ -203,7 +206,7 @@ fn bench_concurrency(c: &mut Criterion) {
 
         b.iter(|| {
             let config = WorkspaceConfig::default();
-            let workspaces = Arc::new(Mutex::new(ScrollableWorkspaces::new(&config).unwrap()));
+            let workspaces = Arc::new(Mutex::new(ScrollableWorkspaces::new(&config)));
 
             // Simulate concurrent operations
             let handles: Vec<_> = (0..4)
@@ -248,7 +251,7 @@ fn bench_input_processing(c: &mut Criterion) {
 
         let input_config = InputConfig::default();
         let bindings_config = BindingsConfig::default();
-        let mut input_manager = InputManager::new(&input_config, &bindings_config).unwrap();
+        let mut input_manager = InputManager::new(&input_config, &bindings_config);
 
         b.iter(|| {
             let event = InputEvent::Scroll {
@@ -278,7 +281,7 @@ fn bench_frame_timing(c: &mut Criterion) {
                 let workspace_config = WorkspaceConfig::default();
                 let effects_config = EffectsConfig::default();
 
-                let mut workspaces = ScrollableWorkspaces::new(&workspace_config).unwrap();
+                let mut workspaces = ScrollableWorkspaces::new(&workspace_config);
                 let mut effects = EffectsEngine::new(&effects_config).unwrap();
 
                 // Add some windows and animations to simulate real usage
@@ -297,7 +300,7 @@ fn bench_frame_timing(c: &mut Criterion) {
             },
             |(mut workspaces, mut effects)| {
                 // Simulate a full frame update
-                workspaces.update_animations().unwrap();
+                workspaces.update_animations();
                 effects.update().unwrap();
 
                 let layouts = workspaces.calculate_workspace_layouts();

@@ -1,0 +1,44 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# Ignore specific advisories that don't affect this project
+ignore = [
+    "RUSTSEC-2024-0436",  # paste: unmaintained, no dependents in tree
+]
+# Treat advisory database errors as warnings, not hard failures
+db-urls = ["https://github.com/rustsec/advisory-db"]
+version = 2
+
+[licenses]
+# Allow these licenses
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "BSL-1.0",
+    "Unicode-3.0",
+]
+# Deny these licenses
+deny = []
+# Confidence threshold for license detection (0.0 - 1.0)
+confidence-threshold = 0.8
+
+[bans]
+# Multiple versions of the same crate are allowed
+multiple-versions = "warn"
+# Highlight duplicate crates in the dependency tree
+highlight = "all"
+# Allow specific crates to have multiple versions
+skip = []
+
+[sources]
+# Allow crates from these sources
+unknown-git = "warn"
+unknown-registry = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

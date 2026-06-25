@@ -21,8 +21,8 @@ jobs:
           - beta
           - nightly
         features:
-          - default
-          - no-effects
+          - ""  # no features → default
+          - "examples,real-compositor,demo"
     
     steps:
     - uses: actions/checkout@v4
@@ -49,19 +49,19 @@ jobs:
           xvfb
     
     - name: Cache cargo registry
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.cargo/registry
         key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
     
     - name: Cache cargo index
-      uses: actions/cache@v3  
+      uses: actions/cache@v4  
       with:
         path: ~/.cargo/git
         key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
     
     - name: Cache cargo build
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: target
         key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
@@ -85,7 +85,7 @@ jobs:
     - name: Run integration tests
       run: |
         # Test IPC communication with virtual display for graphics operations
-        xvfb-run -a cargo test --test integration_tests --all-features || echo "Integration tests may fail in CI without proper graphics context"
+        xvfb-run -a cargo test --test integration_tests --all-features
         
     - name: Build release binary
       run: cargo build --release --verbose
@@ -187,12 +187,12 @@ jobs:
     needs: test
     strategy:
       matrix:
-        os: [ubuntu-latest, fedora-latest]
+        os: [ubuntu-latest, ubuntu-22.04]
         include:
           - os: ubuntu-latest
             package_type: deb
-          - os: fedora-latest  
-            package_type: rpm
+          - os: ubuntu-22.04
+            package_type: deb-jammy
     
     steps:
     - uses: actions/checkout@v4
@@ -245,7 +245,7 @@ jobs:
       run: cargo install cargo-tarpaulin
     
     - name: Cache cargo registry
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
@@ -262,7 +262,7 @@ jobs:
         ./scripts/coverage.sh unit
         
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v4
       with:
         file: ./target/tarpaulin/unit/cobertura.xml
         flags: unittests
@@ -270,7 +270,7 @@ jobs:
         fail_ci_if_error: false
     
     - name: Archive coverage results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: coverage-report
         path: target/tarpaulin/

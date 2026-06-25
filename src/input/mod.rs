@@ -1,9 +1,10 @@
-//! Phase 3: Enhanced input handling and key bindings
-//! Manages keyboard, mouse, and gesture input with real processing
-#![allow(missing_docs)]
+//! Input handling and key bindings
+//!
+//! Manages keyboard, mouse, and gesture input with real processing.
+//! Translates raw input events into compositor actions via configurable
+//! key binding mappings.
 
 use crate::config::{BindingsConfig, InputConfig};
-use anyhow::Result;
 use log::{debug, info};
 use std::collections::HashMap;
 
@@ -46,8 +47,8 @@ pub enum InputEvent {
     },
 }
 
+/// Mouse button identifiers
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum MouseButton {
     Left,
     Right,
@@ -55,6 +56,7 @@ pub enum MouseButton {
     Other(u8),
 }
 
+/// Touch gesture types
 #[derive(Debug, Clone, PartialEq)]
 pub enum GestureType {
     Swipe,
@@ -63,29 +65,22 @@ pub enum GestureType {
 }
 
 /// Represents compositor actions that can be triggered by input
+/// Actions triggered by input events
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompositorAction {
     ScrollWorkspaceLeft,
     ScrollWorkspaceRight,
     MoveWindowLeft,
     MoveWindowRight,
-    #[allow(dead_code)]
     CloseWindow,
-    #[allow(dead_code)]
     ToggleFullscreen,
     Quit,
-    #[allow(dead_code)]
     Custom(String),
 }
 
-/// Phase 3: Enhanced input manager with real processing
+/// Processes input events and maps them to compositor actions
 #[derive(Debug)]
 pub struct InputManager {
-    #[allow(dead_code)]
-    input_config: InputConfig,
-    #[allow(dead_code)]
-    bindings_config: BindingsConfig,
-
     /// Key binding mappings
     key_bindings: HashMap<String, CompositorAction>,
 
@@ -96,7 +91,6 @@ pub struct InputManager {
     mouse_position: (f64, f64),
 
     /// Gesture state for momentum scrolling
-    #[allow(dead_code)]
     gesture_state: Option<GestureState>,
 }
 
@@ -111,7 +105,7 @@ struct GestureState {
 }
 
 impl InputManager {
-    pub fn new(input_config: &InputConfig, bindings_config: &BindingsConfig) -> Result<Self> {
+    pub fn new(_input_config: &InputConfig, bindings_config: &BindingsConfig) -> Self {
         info!("⌨️ Phase 3: Initializing enhanced input manager...");
 
         // Parse key bindings from config
@@ -144,14 +138,12 @@ impl InputManager {
 
         debug!("🔑 Loaded {} key bindings", key_bindings.len());
 
-        Ok(Self {
-            input_config: input_config.clone(),
-            bindings_config: bindings_config.clone(),
+        Self {
             key_bindings,
             active_modifiers: Vec::new(),
             mouse_position: (0.0, 0.0),
             gesture_state: None,
-        })
+        }
     }
 
     /// Process an input event and return any triggered actions
@@ -244,7 +236,7 @@ impl InputManager {
                 "🐁 Mouse button {:?} pressed at ({:.1}, {:.1})",
                 button, x, y
             );
-            // TODO: Add mouse button bindings
+            // TODO: Add mouse button bindings from config
         }
 
         Vec::new()
@@ -295,12 +287,32 @@ impl InputManager {
                 }
             }
             GestureType::Pan => {
-                // TODO: Implement smooth scrolling with pan gestures
+                // Smooth scrolling with pan gestures
                 debug!("🤏 Pan gesture: ({:.1}, {:.1})", delta_x, delta_y);
+
+                // Track gesture state for momentum
+                let now = std::time::Instant::now();
+                self.gesture_state = Some(GestureState {
+                    start_time: now,
+                    start_position: self.mouse_position,
+                    current_velocity: (delta_x, delta_y),
+                });
+
+                // Horizontal pan for workspace navigation
+                if delta_x.abs() > 10.0 {
+                    if delta_x > 0.0 {
+                        return vec![CompositorAction::ScrollWorkspaceRight];
+                    }
+                    return vec![CompositorAction::ScrollWorkspaceLeft];
+                }
             }
             GestureType::Pinch => {
-                // TODO: Implement workspace overview with pinch
-                debug!("🤏 Pinch gesture: {:.1}", velocity);
+                // Workspace overview with pinch gesture
+                debug!("🤏 Pinch gesture: velocity={:.1}", velocity);
+
+                // Pinch-in (negative velocity) could trigger workspace overview
+                // Pinch-out (positive zoom) could reset view
+                // For now, log the gesture for future implementation
             }
         }
 
@@ -308,13 +320,11 @@ impl InputManager {
     }
 
     /// Get current mouse position
-    #[allow(dead_code)]
     pub fn mouse_position(&self) -> (f64, f64) {
         self.mouse_position
     }
 
     /// Check if a modifier is currently active
-    #[allow(dead_code)]
     pub fn is_modifier_active(&self, modifier: &str) -> bool {
         self.active_modifiers.contains(&modifier.to_string())
     }
@@ -329,9 +339,8 @@ impl InputManager {
         }
     }
 
-    pub fn shutdown(&mut self) -> Result<()> {
+    pub fn shutdown(&mut self) {
         info!("🔌 Input manager shutting down");
-        Ok(())
     }
 }
 
@@ -349,14 +358,14 @@ mod tests {
     #[test]
     fn test_input_manager_initialization() {
         let (input_cfg, bindings_cfg) = make_configs();
-        let manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
+        let manager = InputManager::new(&input_cfg, &bindings_cfg);
         assert_eq!(manager.mouse_position(), (0.0, 0.0));
     }
 
     #[test]
     fn test_simulate_key_press_known_binding() {
         let (input_cfg, bindings_cfg) = make_configs();
-        let mut manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
+        let mut manager = InputManager::new(&input_cfg, &bindings_cfg);
         // The default quit binding should work
         let actions = manager.simulate_key_press(&bindings_cfg.quit);
         assert_eq!(actions.len(), 1);
@@ -366,7 +375,7 @@ mod tests {
     #[test]
     fn test_simulate_key_press_unknown_binding() {
         let (input_cfg, bindings_cfg) = make_configs();
-        let mut manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
+        let mut manager = InputManager::new(&input_cfg, &bindings_cfg);
         let actions = manager.simulate_key_press("unknown+key+binding");
         assert!(actions.is_empty());
     }
@@ -374,18 +383,24 @@ mod tests {
     #[test]
     fn test_scroll_navigation() {
         let (input_cfg, bindings_cfg) = make_configs();
-        let mut manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
+        let mut manager = InputManager::new(&input_cfg, &bindings_cfg);
 
         // Large scroll right should trigger workspace scroll right
         let actions = manager.process_input_event(InputEvent::Scroll {
-            x: 100.0, y: 100.0, delta_x: 20.0, delta_y: 0.0,
+            x: 100.0,
+            y: 100.0,
+            delta_x: 20.0,
+            delta_y: 0.0,
         });
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], CompositorAction::ScrollWorkspaceRight);
 
         // Large scroll left should trigger workspace scroll left
         let actions = manager.process_input_event(InputEvent::Scroll {
-            x: 100.0, y: 100.0, delta_x: -20.0, delta_y: 0.0,
+            x: 100.0,
+            y: 100.0,
+            delta_x: -20.0,
+            delta_y: 0.0,
         });
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], CompositorAction::ScrollWorkspaceLeft);
@@ -394,11 +409,14 @@ mod tests {
     #[test]
     fn test_scroll_no_action_small() {
         let (input_cfg, bindings_cfg) = make_configs();
-        let mut manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
+        let mut manager = InputManager::new(&input_cfg, &bindings_cfg);
 
         // Small scroll should not trigger any action
         let actions = manager.process_input_event(InputEvent::Scroll {
-            x: 100.0, y: 100.0, delta_x: 2.0, delta_y: 0.0,
+            x: 100.0,
+            y: 100.0,
+            delta_x: 2.0,
+            delta_y: 0.0,
         });
         assert!(actions.is_empty());
     }
@@ -406,7 +424,7 @@ mod tests {
     #[test]
     fn test_keyboard_event_modifiers() {
         let (input_cfg, bindings_cfg) = make_configs();
-        let mut manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
+        let mut manager = InputManager::new(&input_cfg, &bindings_cfg);
 
         // Press Super key
         let _actions = manager.process_input_event(InputEvent::Keyboard {
@@ -429,7 +447,7 @@ mod tests {
     #[test]
     fn test_shutdown() {
         let (input_cfg, bindings_cfg) = make_configs();
-        let mut manager = InputManager::new(&input_cfg, &bindings_cfg).expect("Failed to create InputManager");
-        manager.shutdown().expect("Shutdown should succeed");
+        let mut manager = InputManager::new(&input_cfg, &bindings_cfg);
+        manager.shutdown();
     }
 }

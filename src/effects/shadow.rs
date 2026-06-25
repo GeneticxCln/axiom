@@ -86,6 +86,9 @@ pub struct ShadowRenderer {
     last_render_time: std::time::Duration,
 }
 
+/// Must match the WGSL `ShadowUniforms` block in `src/effects/shaders.rs`.
+/// The WGSL shader is authoritative — extra fields here waste GPU uniform
+/// buffer space and risk latent validation errors if field order drifts.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ShadowUniforms {
@@ -94,11 +97,14 @@ struct ShadowUniforms {
     shadow_opacity: f32,
     shadow_color: [f32; 4],
     window_size: [f32; 2],
-    light_position: [f32; 3],
-    shadow_type: u32, // 0: drop, 1: inner, 2: dynamic
 }
 
 impl ShadowRenderer {
+    /// Create a new [`ShadowRenderer`] with the given GPU context, shaders,
+    /// initial shadow parameters, and quality level.
+    ///
+    /// Compiles drop-shadow render pipelines from the [`ShaderManager`]
+    /// and allocates a uniform buffer for per-frame shadow parameters.
     pub fn new(
         device: Arc<Device>,
         queue: Arc<Queue>,
@@ -235,8 +241,6 @@ impl ShadowRenderer {
             shadow_opacity: shadow_params.opacity,
             shadow_color: shadow_params.color,
             window_size: [window_size.x, window_size.y],
-            light_position: [0.0, -200.0, 100.0], // Default light position
-            shadow_type: 0,                       // Drop shadow
         };
 
         self.queue.write_buffer(
@@ -293,7 +297,13 @@ impl ShadowRenderer {
         Ok(())
     }
 
-    /// Render multiple shadows efficiently in a batch
+    /// Render multiple shadows.
+    ///
+    /// **Performance note:** Each shadow currently uses a separate render
+    /// pass and bind group rather than true batching. This avoids bind-group
+    /// lifetime complications and is acceptable for dev compositor window
+    /// counts (< 20 windows). Production workloads should refactor to a
+    /// single pass with instanced drawing or multiple draws in one pass.
     pub fn render_shadow_batch(
         &mut self,
         encoder: &mut CommandEncoder,
@@ -327,8 +337,6 @@ impl ShadowRenderer {
                 shadow_opacity: shadow_params.opacity,
                 shadow_color: shadow_params.color,
                 window_size: [size.x, size.y],
-                light_position: [0.0, -200.0, 100.0],
-                shadow_type: 0,
             };
 
             self.queue.write_buffer(
@@ -424,8 +432,6 @@ impl ShadowRenderer {
             shadow_opacity: shadow_params.opacity * (1.0 / distance_factor.max(0.5)),
             shadow_color: shadow_params.color,
             window_size: [window_size.x, window_size.y],
-            light_position: [light_position.x, light_position.y, light_position.z],
-            shadow_type: 2, // Dynamic shadow
         };
 
         self.queue.write_buffer(

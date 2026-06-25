@@ -7,21 +7,12 @@
 //! - Animation sequencing and composition
 
 use anyhow::Result;
-use cgmath::{Vector2, Vector3, Vector4};
+use cgmath::Vector2;
 use log::{debug, info};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::{AnimationType, EasingCurve};
-
-/// Animation keyframe for property interpolation
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct Keyframe<T> {
-    pub time: f32,           // Time in seconds (0.0 to 1.0 for normalized)
-    pub value: T,            // Value at this keyframe
-    pub easing: EasingCurve, // Easing curve to next keyframe
-}
 
 /// Spring physics parameters for natural animations
 #[derive(Debug, Clone, Copy)]
@@ -43,37 +34,10 @@ impl Default for SpringParams {
     }
 }
 
-/// Animation timeline for complex sequences
-#[derive(Debug, Clone)]
-pub struct AnimationTimeline {
-    #[allow(dead_code)]
-    pub name: String,
-    pub total_duration: Duration,
-    pub repeat_count: Option<u32>, // None = infinite
-    pub start_delay: Duration,
-    #[allow(dead_code)]
-    pub end_delay: Duration,
-    pub keyframes: Vec<TimelineEvent>,
-}
-
-/// Event in an animation timeline
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct TimelineEvent {
-    pub start_time: f32, // 0.0 to 1.0 (percentage of total duration)
-    pub duration: f32,   // Duration as percentage of total
-    pub animation_type: AnimationType,
-    pub target_window: Option<u64>, // None = all windows
-}
-
 /// Advanced animation controller
 pub struct AnimationController {
     /// Active animations by window ID
     active_animations: HashMap<u64, Vec<ActiveAnimation>>,
-
-    /// Animation timelines
-    timelines: HashMap<String, AnimationTimeline>,
-    active_timelines: HashMap<String, TimelineState>,
 
     /// Global animation settings
     global_speed_multiplier: f32,
@@ -90,6 +54,7 @@ pub struct AnimationController {
 /// Active animation instance
 #[derive(Debug, Clone)]
 struct ActiveAnimation {
+    #[allow(dead_code)]
     id: u64,
     animation_type: AnimationType,
     start_time: Instant,
@@ -101,15 +66,6 @@ struct ActiveAnimation {
     speed_multiplier: f32,
 }
 
-/// Timeline state for active timeline
-#[derive(Debug, Clone)]
-struct TimelineState {
-    start_time: Instant,
-    current_repeat: u32,
-    paused: bool,
-    active_events: Vec<(usize, ActiveAnimation)>, // (event_index, animation)
-}
-
 /// Spring physics state
 #[derive(Debug, Clone)]
 struct SpringState {
@@ -117,19 +73,19 @@ struct SpringState {
     target_value: f32,
     velocity: f32,
     params: SpringParams,
-    #[allow(dead_code)]
-    last_update: Instant,
     settled: bool,
 }
 
 impl AnimationController {
+    /// Create a new [`AnimationController`] with default settings.
+    ///
+    /// The controller starts unpaused with a global speed multiplier of 1.0.
+    /// No animations are scheduled initially.
     pub fn new() -> Self {
         info!("🎬 Initializing Advanced Animation Controller...");
 
         Self {
             active_animations: HashMap::new(),
-            timelines: HashMap::new(),
-            active_timelines: HashMap::new(),
             global_speed_multiplier: 1.0,
             paused: false,
             spring_states: HashMap::new(),
@@ -193,7 +149,6 @@ impl AnimationController {
             target_value,
             velocity: 0.0,
             params,
-            last_update: Instant::now(),
             settled: false,
         };
 
@@ -207,31 +162,6 @@ impl AnimationController {
             current_value.unwrap_or(0.0),
             target_value
         );
-    }
-
-    /// Create and start an animation timeline
-    #[allow(dead_code)]
-    pub fn start_timeline(&mut self, timeline: AnimationTimeline) -> Result<()> {
-        let timeline_name = timeline.name.clone();
-
-        let timeline_state = TimelineState {
-            start_time: Instant::now(),
-            current_repeat: 0,
-            paused: false,
-            active_events: Vec::new(),
-        };
-
-        self.timelines.insert(timeline_name.clone(), timeline);
-        self.active_timelines
-            .insert(timeline_name.clone(), timeline_state);
-
-        info!(
-            "🎭 Started animation timeline '{}' with {} events",
-            timeline_name,
-            self.timelines[&timeline_name].keyframes.len()
-        );
-
-        Ok(())
     }
 
     /// Update all animations
@@ -251,9 +181,6 @@ impl AnimationController {
 
         // Update spring animations
         self.update_spring_animations(delta_time, &mut updates)?;
-
-        // Update timelines
-        self.update_timelines(now, &mut updates)?;
 
         // Clean up finished animations
         self.cleanup_finished_animations();
@@ -315,12 +242,6 @@ impl AnimationController {
                     }
 
                     // Animation completely finished
-                    updates.push(AnimationUpdate {
-                        window_id: *window_id,
-                        property: AnimationProperty::Finished(anim.id),
-                        value: AnimationValue::None,
-                    });
-
                     return false;
                 }
 
@@ -351,7 +272,9 @@ impl AnimationController {
         delta_time: Duration,
         updates: &mut Vec<AnimationUpdate>,
     ) -> Result<()> {
-        let dt = delta_time.as_secs_f32();
+        // Clamp delta-time to 50 ms to prevent explosive overshoot after
+        // a GC pause, debug breakpoint, or first-frame spike.
+        let dt = delta_time.as_secs_f32().min(0.05);
 
         for ((window_id, property_name), spring_state) in &mut self.spring_states {
             if spring_state.settled {
@@ -388,116 +311,6 @@ impl AnimationController {
                 window_id: *window_id,
                 property: AnimationProperty::SpringProperty(property_name.clone()),
                 value: AnimationValue::Float(spring_state.current_value),
-            });
-        }
-
-        Ok(())
-    }
-
-    /// Update timeline-based animations
-    fn update_timelines(
-        &mut self,
-        now: Instant,
-        _updates: &mut Vec<AnimationUpdate>,
-    ) -> Result<()> {
-        let timeline_names: Vec<String> = self.active_timelines.keys().cloned().collect();
-
-        for timeline_name in timeline_names {
-            let timeline = match self.timelines.get(&timeline_name) {
-                Some(tl) => tl.clone(),
-                None => continue,
-            };
-
-            let timeline_state = match self.active_timelines.get_mut(&timeline_name) {
-                Some(ts) => ts,
-                None => continue,
-            };
-
-            if timeline_state.paused {
-                continue;
-            }
-
-            let total_elapsed = now.duration_since(timeline_state.start_time);
-
-            // Check if timeline should start (handle delay)
-            if total_elapsed < timeline.start_delay {
-                continue;
-            }
-
-            let elapsed_in_timeline = total_elapsed.saturating_sub(timeline.start_delay);
-            let progress =
-                elapsed_in_timeline.as_secs_f64() / timeline.total_duration.as_secs_f64();
-
-            if progress >= 1.0 {
-                // Timeline finished
-                if let Some(repeat_count) = timeline.repeat_count {
-                    if timeline_state.current_repeat + 1 < repeat_count {
-                        // Start next repetition
-                        timeline_state.current_repeat += 1;
-                        timeline_state.start_time = now;
-                        timeline_state.active_events.clear();
-                        continue;
-                    }
-                } else {
-                    // Infinite repeat
-                    timeline_state.start_time = now;
-                    timeline_state.active_events.clear();
-                    continue;
-                }
-
-                // Timeline completely finished
-                self.active_timelines.remove(&timeline_name);
-                info!("🎭 Timeline '{}' finished", timeline_name);
-                continue;
-            }
-
-            // Check for new events to start
-            for (event_index, event) in timeline.keyframes.iter().enumerate() {
-                let event_start_progress = event.start_time;
-                let event_end_progress = event.start_time + event.duration;
-
-                if progress >= event_start_progress as f64 && progress < event_end_progress as f64 {
-                    // Event should be active
-                    let already_active = timeline_state
-                        .active_events
-                        .iter()
-                        .any(|(idx, _)| *idx == event_index);
-
-                    if !already_active {
-                        // Start this event
-                        let _window_id = event.target_window.unwrap_or(0); // 0 = global
-                                                                           // For now, just track that the event started
-                                                                           // In a full implementation, we'd manage these animations properly
-
-                        // This is a bit of a hack - we'd need to track this better
-                        // For now, just create a dummy ActiveAnimation
-                        let dummy_id = 0; // In full implementation, generate proper ID
-                        let active_animation = ActiveAnimation {
-                            id: dummy_id,
-                            animation_type: event.animation_type.clone(),
-                            start_time: now,
-                            duration: Duration::from_secs_f64(
-                                (event.duration as f64) * timeline.total_duration.as_secs_f64(),
-                            ),
-                            delay: Duration::ZERO,
-                            repeat_count: Some(1),
-                            current_repeat: 0,
-                            paused: false,
-                            speed_multiplier: 1.0,
-                        };
-
-                        timeline_state
-                            .active_events
-                            .push((event_index, active_animation));
-                    }
-                }
-            }
-
-            // Remove finished events
-            timeline_state.active_events.retain(|(event_index, _)| {
-                let event = &timeline.keyframes[*event_index];
-                let event_end_progress = event.start_time + event.duration;
-                progress < event_end_progress as f64
             });
         }
 
@@ -541,7 +354,6 @@ impl AnimationController {
                     AnimationValue::Transform {
                         scale: Vector2::new(current_scale, current_scale),
                         opacity: current_opacity,
-                        rotation: 0.0,
                     },
                 ))
             }
@@ -559,7 +371,6 @@ impl AnimationController {
                     AnimationValue::Transform {
                         scale: Vector2::new(current_scale, current_scale),
                         opacity: current_opacity,
-                        rotation: 0.0,
                     },
                 ))
             }
@@ -582,9 +393,14 @@ impl AnimationController {
         }
     }
 
-    /// Apply easing curve statically
+    /// Apply easing curve statically.
+    ///
+    /// Implements the full set of advertised curves — EaseIn, EaseOut,
+    /// EaseInOut, BounceOut, ElasticOut, BackOut, and Linear. Previously
+    /// BounceOut/ElasticOut/BackOut silently fell through to linear.
     fn apply_easing_curve_static(progress: f32, curve: &EasingCurve) -> f32 {
         let t = progress.clamp(0.0, 1.0);
+        const PI: f32 = std::f32::consts::PI;
 
         match curve {
             EasingCurve::EaseIn => t * t,
@@ -596,7 +412,38 @@ impl AnimationController {
                     -1.0 + (4.0 - 2.0 * t) * t
                 }
             }
-            _ => t, // Simplified for now
+            EasingCurve::BounceOut => {
+                const N1: f32 = 7.5625;
+                const D1: f32 = 2.75;
+                if t < 1.0 / D1 {
+                    N1 * t * t
+                } else if t < 2.0 / D1 {
+                    let t2 = t - 1.5 / D1;
+                    N1 * t2 * t2 + 0.75
+                } else if t < 2.5 / D1 {
+                    let t2 = t - 2.25 / D1;
+                    N1 * t2 * t2 + 0.9375
+                } else {
+                    let t2 = t - 2.625 / D1;
+                    N1 * t2 * t2 + 0.984_375
+                }
+            }
+            EasingCurve::ElasticOut => {
+                if t == 0.0 {
+                    return 0.0;
+                }
+                if t == 1.0 {
+                    return 1.0;
+                }
+                let c4 = (2.0 * PI) / 3.0;
+                (2.0_f32).powf(-10.0 * t) * ((t - 1.0) * c4).sin() + 1.0
+            }
+            EasingCurve::BackOut => {
+                const C1: f32 = 1.70158;
+                const C3: f32 = C1 + 1.0;
+                1.0 + C3 * (t - 1.0).powi(3) + C1 * (t - 1.0).powi(2)
+            }
+            EasingCurve::Linear => t,
         }
     }
 
@@ -633,44 +480,10 @@ impl AnimationController {
         }
     }
 
-    /// Get human-readable animation name
-    #[allow(dead_code)]
-    fn get_animation_name(&self, animation: &AnimationType) -> &'static str {
-        match animation {
-            AnimationType::WindowOpen { .. } => "Window Open",
-            AnimationType::WindowClose { .. } => "Window Close",
-            AnimationType::WindowMove { .. } => "Window Move",
-            AnimationType::WindowResize { .. } => "Window Resize",
-            AnimationType::WorkspaceTransition { .. } => "Workspace Transition",
-        }
-    }
-
-    /// Pause/unpause all animations
-    #[allow(dead_code)]
-    pub fn set_paused(&mut self, paused: bool) {
-        self.paused = paused;
-        if paused {
-            info!("⏸️ Animation system paused");
-        } else {
-            info!("▶️ Animation system resumed");
-        }
-    }
-
-    /// Set global speed multiplier
-    #[allow(dead_code)]
-    pub fn set_global_speed(&mut self, speed: f32) {
-        self.global_speed_multiplier = speed.max(0.1);
-        info!(
-            "⚡ Animation speed set to {:.1}x",
-            self.global_speed_multiplier
-        );
-    }
-
     /// Get animation statistics
     pub fn get_animation_stats(&self) -> AnimationStats {
         AnimationStats {
             active_animations: self.animation_count,
-            active_timelines: self.active_timelines.len(),
             spring_animations: self.spring_states.len(),
             global_speed: self.global_speed_multiplier,
             paused: self.paused,
@@ -700,8 +513,6 @@ pub enum AnimationProperty {
     #[allow(dead_code)]
     Scale,
     SpringProperty(String),
-    #[allow(dead_code)]
-    Finished(u64), // Animation ID that finished
 }
 
 /// Value for animated property
@@ -710,17 +521,12 @@ pub enum AnimationValue {
     Float(f32),
     #[allow(dead_code)]
     Vector2(Vector2<f32>),
-    #[allow(dead_code)]
-    Vector3(Vector3<f32>),
-    #[allow(dead_code)]
-    Vector4(Vector4<f32>),
     Position(Vector2<f32>),
     Transform {
         scale: Vector2<f32>,
         opacity: f32,
-        #[allow(dead_code)]
-        rotation: f32,
     },
+    #[allow(dead_code)]
     None,
 }
 
@@ -728,7 +534,6 @@ pub enum AnimationValue {
 #[derive(Debug, Clone)]
 pub struct AnimationStats {
     pub active_animations: usize,
-    pub active_timelines: usize,
     pub spring_animations: usize,
     pub global_speed: f32,
     pub paused: bool,

@@ -37,6 +37,10 @@ pub struct ShaderManager {
 }
 
 impl ShaderManager {
+    /// Create a new [`ShaderManager`] backed by the given WGPU device.
+    ///
+    /// Shaders are compiled lazily — call [`compile_all_shaders`] to
+    /// pre-compile the full effects shader suite before rendering.
     pub fn new(device: Arc<wgpu::Device>) -> Self {
         info!("🎨 Initializing GPU Shader Manager...");
         Self {
@@ -199,7 +203,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
 /// Horizontal blur pass shader
 const BLUR_HORIZONTAL_SHADER: &str = r"
-// Horizontal Gaussian blur pass
+// Horizontal Gaussian blur pass — fullscreen triangle vertex + 9-tap fragment
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coords: vec2<f32>,
@@ -220,6 +224,16 @@ var input_texture: texture_2d<f32>;
 
 @group(0) @binding(2)
 var input_sampler: sampler;
+
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
+    var out: VertexOutput;
+    let x = select(-1.0, 3.0, idx == 1u);
+    let y = select(-1.0, 3.0, idx == 2u);
+    out.clip_position = vec4<f32>(x, y, 0.0, 1.0);
+    out.tex_coords = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
 
 // Gaussian weights for 9-tap blur
 let gaussian_weights = array<f32, 9>(
@@ -248,9 +262,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 ";
 
-/// Vertical blur pass shader (similar to horizontal but different direction)
+/// Vertical blur pass shader (same vertex shader as horizontal, fullscreen triangle)
 const BLUR_VERTICAL_SHADER: &str = r"
-// Vertical Gaussian blur pass
+// Vertical Gaussian blur pass — fullscreen triangle vertex + 9-tap fragment
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coords: vec2<f32>,
@@ -271,6 +285,16 @@ var input_texture: texture_2d<f32>;
 
 @group(0) @binding(2)
 var input_sampler: sampler;
+
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
+    var out: VertexOutput;
+    let x = select(-1.0, 3.0, idx == 1u);
+    let y = select(-1.0, 3.0, idx == 2u);
+    out.clip_position = vec4<f32>(x, y, 0.0, 1.0);
+    out.tex_coords = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
 
 // Gaussian weights for 9-tap blur
 let gaussian_weights = array<f32, 9>(
@@ -301,7 +325,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
 /// Drop shadow shader
 const DROP_SHADOW_SHADER: &str = r"
-// Drop shadow rendering shader
+// Drop shadow rendering shader — fullscreen quad vertex + distance-field fragment
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coords: vec2<f32>,
@@ -318,6 +342,18 @@ struct ShadowUniforms {
 
 @group(0) @binding(0)
 var<uniform> shadow: ShadowUniforms;
+
+@vertex
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
+    var out: VertexOutput;
+    // 6 vertices covering the screen as two triangles
+    let x = select(-1.0, 1.0, idx == 1u || idx == 4u || idx == 5u);
+    let y = select(1.0, -1.0, idx == 2u || idx == 3u || idx == 5u);
+    out.clip_position = vec4<f32>(x, y, 0.0, 1.0);
+    out.tex_coords = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    out.world_position = out.tex_coords * shadow.window_size - shadow.window_size * 0.5;
+    return out;
+}
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {

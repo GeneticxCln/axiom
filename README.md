@@ -8,7 +8,7 @@
 [![Rust Version](https://img.shields.io/badge/rust-1.70%2B-orange)](#)
 [![License](https://img.shields.io/badge/license-GPLv3-blue)](#)
 [![AI Optimized](https://img.shields.io/badge/AI-optimized-purple)](#)
-[![Phase](https://img.shields.io/badge/phase-4%20complete-brightgreen)](#)
+[![Phase](https://img.shields.io/badge/phase-7%20production%20polish-blueviolet)](#)
 
 **Where productivity meets beauty.**
 
@@ -69,7 +69,9 @@ axiom/
 
 ## 🚀 Development Status
 
-**Current Status**: 🚀 **Phase 6 - Real Compositor**
+**Current Status**: 🚀 **Phase 7 (Production Polish)**
+
+The Smithay-based real compositor integration (Phase 6) is complete; we're now stabilizing for distribution.
 
 For detailed status, roadmap, and progress, please see [MASTER_DEVELOPMENT_PLAN.md](MASTER_DEVELOPMENT_PLAN.md).
 

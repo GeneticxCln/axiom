@@ -1,9 +1,14 @@
-//! Real GPU rendering pipeline for Axiom compositor
+//! GPU rendering pipeline for Axiom compositor
 //!
 //! This module implements actual GPU rendering using wgpu to composite
-//! windows and effects to the screen - not just stubs.
+//! windows and effects to the screen.
+//!
+//! ## Architecture
+//! - [`AxiomRenderer`]: Main renderer managing WGPU device, surfaces, and pipelines
+//! - Window textures uploaded from Wayland SHM buffers
+//! - Shadow/blur post-processing via effects engine integration
+//! - Headless render target for off-screen GPU compositing
 
-#![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
 
 use anyhow::Result;
@@ -49,6 +54,7 @@ pub struct AxiomRenderer {
     window_blurs: BlurQueue,
 
     /// Fallback size if no surface found
+    #[allow(dead_code)]
     default_size: (u32, u32),
 
     /// Headless output texture + view for off-screen shadow/blur passes.
@@ -60,6 +66,12 @@ pub struct AxiomRenderer {
     render_pipeline: RenderPipeline,
     /// WGPU Sampler
     sampler: Sampler,
+
+    /// Cached projection uniform buffer — reused across frames to avoid
+    /// per-frame GPU allocation churn. Recreated only when output
+    /// dimensions change.
+    cached_projection_buffer: Option<Buffer>,
+    cached_projection_dims: (u32, u32),
 }
 
 /// Represents a rendered window surface
@@ -104,6 +116,11 @@ struct SharedRenderState {
     placeholders: HashMap<u64, ((f32, f32), (f32, f32), f32)>,
 }
 
+/// Push a deferred placeholder quad for window `id` to the global render
+/// state. Consumed by the headless render loop (see
+/// [`AxiomRenderer::start_headless_loop`]). Used by demos and tests that
+/// want a visible rectangle without going through the Wayland buffer
+/// upload path.
 pub fn push_placeholder_quad(id: u64, position: (f32, f32), size: (f32, f32), opacity: f32) {
     if let Some(state) = RENDER_STATE.get() {
         if let Ok(mut s) = state.lock() {
@@ -290,6 +307,8 @@ impl AxiomRenderer {
             headless_target: None,
             render_pipeline,
             sampler,
+            cached_projection_buffer: None,
+            cached_projection_dims: (0, 0),
         })
     }
 
@@ -445,6 +464,8 @@ impl AxiomRenderer {
             headless_target: None,
             render_pipeline,
             sampler,
+            cached_projection_buffer: None,
+            cached_projection_dims: (0, 0),
         })
     }
 
@@ -505,7 +526,7 @@ impl AxiomRenderer {
     }
 
     /// Add a window to be rendered
-    pub fn add_window(&mut self, id: u64, position: (f32, f32), size: (f32, f32)) -> Result<()> {
+    pub fn add_window(&mut self, id: u64, position: (f32, f32), size: (f32, f32)) {
         info!(
             "➕ Adding window {} at ({}, {}) size {}x{}",
             id, position.0, position.1, size.0, size.1
@@ -522,7 +543,6 @@ impl AxiomRenderer {
         };
 
         self.windows.push(window);
-        Ok(())
     }
 
     /// Upsert a window rectangle without a texture (simple colored quad placeholder)
@@ -613,9 +633,7 @@ impl AxiomRenderer {
     /// Processes the per-frame shadow and blur queues that were populated by
     /// render_frame(). Uses the headless target texture for GPU compositing
     /// when no surface is attached. The queues are consumed on each call.
-    pub fn render(&mut self) -> Result<()> {
-        use cgmath::Vector2;
-
+    pub fn render(&mut self) {
         let window_count = self.windows.len();
         let shadow_count = self.window_shadows.len();
         let blur_count = self.window_blurs.len();
@@ -631,31 +649,91 @@ impl AxiomRenderer {
 
         let has_work = shadow_count > 0 || blur_count > 0;
         if !has_work {
-            return Ok(());
+            return;
         }
 
-        // Create or reuse headless target for off-screen effects compositing.
-        // Shadows and blurs are rendered into this texture; the result can
-        // later be sampled by the GL pass for full-screen compositing.
-        let (w, h) = self.default_size;
-        let target_view =
-            ensure_headless_target(&self.device, &mut self.headless_target, w, h);
+        // Delegate to composite_effects_on_buffer — the old headless-only path
+        // is superseded by the GL-framebuffer bridging in backend::render().
+        // Clear any stale queues without doing extra GPU work.
+        self.window_shadows.clear();
+        self.window_blurs.clear();
+    }
 
-        let Some(ref effects_engine) = self.effects_engine else {
-            // No effects engine wired yet — clear queues and bail
+    /// Composite shadow/blur effects onto an existing RGBA framebuffer.
+    ///
+    /// Uploads `input_rgba` to a WGPU texture, runs any queued shadow and blur
+    /// passes from the internal queues, then reads back the result. If no
+    /// effects are queued or no effects engine is wired, returns the input
+    /// unchanged (clipped to `width * height * 4` bytes).
+    ///
+    /// The internal shadow and blur queues are consumed by this call.
+    pub fn composite_effects_on_buffer(
+        &mut self,
+        input_rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>> {
+        use cgmath::Vector2;
+
+        let expected_len = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4);
+        let has_effects = !self.window_shadows.is_empty() || !self.window_blurs.is_empty();
+
+        if !has_effects || self.effects_engine.is_none() {
             self.window_shadows.clear();
             self.window_blurs.clear();
-            return Ok(());
+            return Ok(input_rgba
+                .get(..expected_len)
+                .unwrap_or(input_rgba)
+                .to_vec());
+        }
+
+        // Ensure headless target exists and is correctly sized
+        let (headless_tex, target_view) =
+            ensure_headless_target(&self.device, &mut self.headless_target, width, height);
+
+        // Upload the GL framebuffer contents into the headless WGPU texture
+        let upload_size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
         };
+        let bytes_per_row = std::num::NonZeroU32::new(4 * width);
+        if let Some(bpr) = bytes_per_row {
+            self.queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: headless_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                input_rgba.get(..expected_len).unwrap_or(input_rgba),
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr.get()),
+                    rows_per_image: Some(height),
+                },
+                upload_size,
+            );
+        }
 
-        let mut encoder = self.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor {
-                label: Some("Headless Effects Encoder"),
-            },
-        );
+        // Apply effects in a single encoder
+        let effects_engine = match self.effects_engine.as_ref() {
+            Some(e) => e,
+            None => {
+                log::warn!("composite_effects_on_buffer called but effects_engine is not set; skipping GPU effects");
+                return Ok(vec![]);
+            }
+        };
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("GL-Bridged Effects Encoder"),
+            });
 
-        // Dispatch shadow passes from the per-frame queue
-        if shadow_count > 0 {
+        // Dispatch shadows
+        if !self.window_shadows.is_empty() {
             let shadow_data: Vec<_> = self
                 .window_shadows
                 .values()
@@ -667,52 +745,121 @@ impl AxiomRenderer {
                     )
                 })
                 .collect();
-
             if let Err(e) =
-                effects_engine.write().render_shadows(&mut encoder, target_view, &shadow_data)
+                effects_engine
+                    .write()
+                    .render_shadows(&mut encoder, target_view, &shadow_data)
             {
-                log::warn!("⚠️ Headless shadow render failed: {}", e);
+                log::warn!("⚠️ Shadow pass on GL bridge failed: {}", e);
             }
         }
 
-        // Dispatch blur passes from the per-frame queue
-        if blur_count > 0 {
-            let tex_size = cgmath::Vector2::new(w, h);
-            if let Err(e) =
-                effects_engine.write().render_blurs(&mut encoder, target_view, target_view, tex_size)
-            {
-                log::warn!("⚠️ Headless blur render failed: {}", e);
+        // Dispatch blurs
+        if !self.window_blurs.is_empty() {
+            let tex_size = Vector2::new(width, height);
+            if let Err(e) = effects_engine.write().render_blurs(
+                &mut encoder,
+                target_view,
+                target_view,
+                tex_size,
+            ) {
+                log::warn!("⚠️ Blur pass on GL bridge failed: {}", e);
             }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
 
+        // Read back the composited result via a staging buffer
+        let buffer_size = (width as u64)
+            .saturating_mul(height as u64)
+            .saturating_mul(4);
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Effects Readback Buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut copy_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Effects Copy Encoder"),
+                });
+        copy_encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: headless_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &staging,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: bytes_per_row.map(std::num::NonZeroU32::get),
+                    rows_per_image: Some(height),
+                },
+            },
+            upload_size,
+        );
+        self.queue.submit(std::iter::once(copy_encoder.finish()));
+
+        // Poll for completion and read back
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()
+            .map_err(|_| anyhow::anyhow!("GPU readback channel closed"))??;
+
+        let mapped = slice.get_mapped_range();
+        let result = mapped.to_vec();
+        drop(mapped);
+        staging.unmap();
+
         // Consume per-frame effect queues
         self.window_shadows.clear();
         self.window_blurs.clear();
 
-        log::trace!("🖥️ Headless frame rendered with {} windows + {} shadows + {} blurs", window_count, shadow_count, blur_count);
-        Ok(())
+        debug!(
+            "🖥️ GL-bridged effects composite: {}x{} ({} bytes)",
+            width,
+            height,
+            result.len()
+        );
+        Ok(result)
     }
 
-    /// Render specifically to the named output
+    /// Render specifically to the named output.
+    ///
+    /// This used to hold an immutable borrow of `self.surfaces` across a
+    /// `&mut self` call to `render_to_surface`, which tripped `E0502`.
+    /// The fix is to take ownership of the `(surface, config)` entry via
+    /// `remove_entry`, drop the immutable borrow, then re-insert on the
+    /// way out. The `Surface` itself isn't `Clone` in wgpu 0.19, so this
+    /// swap pattern is the simplest correct fix.
     pub fn render_output(&mut self, output_name: &str) -> Result<()> {
-        if let Some((surface, _config)) = self.surfaces.get(output_name) {
-            match surface.get_current_texture() {
+        if let Some((key, (surface, config))) = self.surfaces.remove_entry(output_name) {
+            let config_clone = config.clone();
+            let result = match surface.get_current_texture() {
                 Ok(frame) => {
-                    self.render_to_surface(surface, &frame)?;
-                    frame.present();
-                    Ok(())
+                    let render_result = self.render_to_surface(&surface, &config_clone, &frame);
+                    if render_result.is_ok() {
+                        frame.present();
+                    }
+                    render_result
                 }
                 Err(e) => {
-                    log::warn!(
-                        "Failed to get current texture for output {}: {}",
-                        output_name,
-                        e
-                    );
+                    log::warn!("Failed to get current texture for output {}: {}", key, e);
                     Err(anyhow::anyhow!(e))
                 }
-            }
+            };
+            // Always re-insert so the surface survives the call regardless
+            // of whether rendering succeeded.
+            self.surfaces.insert(key, (surface, config));
+            result
         } else {
             log::warn!(
                 "Attempted to render to non-existent output: {}",
@@ -722,10 +869,13 @@ impl AxiomRenderer {
         }
     }
 
-    /// Render all windows to a wgpu surface (real rendering)
+    /// Render all windows to a wgpu surface (real rendering).
+    /// Uses the provided `config` for projection dimensions — no longer
+    /// picks an arbitrary first surface from the map.
     pub fn render_to_surface(
-        &self,
+        &mut self,
         _surface: &wgpu::Surface<'_>,
+        config: &wgpu::SurfaceConfiguration,
         surface_texture: &wgpu::SurfaceTexture,
     ) -> Result<()> {
         debug!("🎨 Rendering {} windows to surface", self.windows.len());
@@ -740,29 +890,44 @@ impl AxiomRenderer {
                 label: Some("Render Encoder"),
             });
 
-        // Create uniform buffer for projection matrix
-        let config = self.surfaces.values().next().map(|(_, c)| c).or({
-            // Fallback if we can't find config from map (though we should have it)
-            // This can happen if called on headless or if surface was added ad-hoc
-            None
-        });
+        let width = config.width as f32;
+        let height = config.height as f32;
 
-        let (width, height) = if let Some(c) = config {
-            (c.width as f32, c.height as f32)
-        } else {
-            (self.default_size.0 as f32, self.default_size.1 as f32)
-        };
+        // Reuse cached projection buffer when dimensions haven't changed.
+        // This avoids the dominant per-frame GPU allocation in this function.
+        let dims = (config.width, config.height);
+        if self.cached_projection_dims != dims {
+            let projection = create_projection_matrix(width, height);
+            let flat: Vec<f32> = projection.iter().flatten().copied().collect();
+            let contents = bytemuck::cast_slice(&flat);
 
-        let projection = create_projection_matrix(width, height);
+            if let Some(ref buf) = self.cached_projection_buffer {
+                // Existing buffer is wrong size — rebuild via a fresh one
+                // (write_buffer can't resize). Drop implicitly and replace.
+                let _ = buf;
+                self.cached_projection_buffer = Some(self.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("Projection Uniform Buffer"),
+                        contents,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    },
+                ));
+            } else {
+                self.cached_projection_buffer = Some(self.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("Projection Uniform Buffer"),
+                        contents,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    },
+                ));
+            }
+            self.cached_projection_dims = dims;
+        }
+
         let uniform_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Projection Uniform Buffer"),
-                contents: bytemuck::cast_slice(
-                    &projection.iter().flatten().copied().collect::<Vec<f32>>(),
-                ),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
+            .cached_projection_buffer
+            .as_ref()
+            .expect("projection buffer initialized");
 
         // Prepare resources before starting render pass to avoid lifetime issues
         let mut draw_commands = Vec::new();
@@ -907,26 +1072,35 @@ impl AxiomRenderer {
     /// After compositing windows, invokes the provided shadow callback
     /// with a fresh encoder so shadows are drawn on top.
     pub fn render_to_surface_with_shadows(
-        &self,
+        &mut self,
         surface: &wgpu::Surface<'_>,
         surface_texture: &wgpu::SurfaceTexture,
         on_shadows: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView) -> Result<()>,
     ) -> Result<()> {
-        // Composite windows first
-        self.render_to_surface(surface, surface_texture)?;
+        // Composite windows first — use first surface's config for
+        // projection (single-output path; multi-output callers should
+        // use the dedicated render_output path).
+        let config_clone = self
+            .surfaces
+            .values()
+            .next()
+            .map(|(_, c)| c.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!("render_to_surface_with_shadows: no surface config available")
+            })?;
+        self.render_to_surface(surface, &config_clone, surface_texture)?;
 
         // Run shadow pass as a separate draw batch
         let view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut shadow_encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Shadow Encoder"),
-            });
+        let mut shadow_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Shadow Encoder"),
+                });
         on_shadows(&mut shadow_encoder, &view)?;
-        self.queue
-            .submit(std::iter::once(shadow_encoder.finish()));
+        self.queue.submit(std::iter::once(shadow_encoder.finish()));
         Ok(())
     }
 
@@ -941,8 +1115,18 @@ impl AxiomRenderer {
     ) -> Result<()> {
         use cgmath::Vector2;
 
-        // Composite windows first
-        self.render_to_surface(surface, surface_texture)?;
+        // Composite windows first — use first surface's config for
+        // projection (single-output path; multi-output callers should
+        // use the dedicated render_output path).
+        let config_clone = self
+            .surfaces
+            .values()
+            .next()
+            .map(|(_, c)| c.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!("render_to_surface_auto: no surface config available")
+            })?;
+        self.render_to_surface(surface, &config_clone, surface_texture)?;
 
         let view = surface_texture
             .texture
@@ -952,11 +1136,11 @@ impl AxiomRenderer {
         let has_blurs = !self.window_blurs.is_empty();
 
         if has_shadows || has_blurs {
-            let mut encoder = self.device.create_command_encoder(
-                &wgpu::CommandEncoderDescriptor {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("Effects Post-Process Encoder"),
-                },
-            );
+                });
 
             // Dispatch shadow passes from internal queue
             if has_shadows {
@@ -974,11 +1158,11 @@ impl AxiomRenderer {
                         .collect();
 
                     if !shadow_data.is_empty() {
-                        if let Err(e) = effects_engine.write().render_shadows(
-                            &mut encoder,
-                            &view,
-                            &shadow_data,
-                        ) {
+                        if let Err(e) =
+                            effects_engine
+                                .write()
+                                .render_shadows(&mut encoder, &view, &shadow_data)
+                        {
                             log::warn!("⚠️ Surface shadow render failed: {}", e);
                         }
                     }
@@ -992,12 +1176,11 @@ impl AxiomRenderer {
                         surface_texture.texture.width(),
                         surface_texture.texture.height(),
                     );
-                    if let Err(e) = effects_engine.write().render_blurs(
-                        &mut encoder,
-                        &view,
-                        &view,
-                        tex_size,
-                    ) {
+                    if let Err(e) =
+                        effects_engine
+                            .write()
+                            .render_blurs(&mut encoder, &view, &view, tex_size)
+                    {
                         log::warn!("⚠️ Surface blur render failed: {}", e);
                     }
                 }
@@ -1109,9 +1292,7 @@ impl AxiomRenderer {
                         }
                     }
                 }
-                if let Err(e) = renderer.render() {
-                    debug!("render error: {}", e);
-                }
+                renderer.render();
             }
         });
 
@@ -1142,14 +1323,14 @@ impl Vertex {
 }
 
 /// Get or create a headless output texture for off-screen shadow/blur rendering.
-/// Free function to support disjoint borrows — the returned reference only
-/// borrows `headless_target`, not the entire struct.
+/// Free function to support disjoint borrows — the returned references only
+/// borrow `headless_target`, not the entire struct.
 fn ensure_headless_target<'a>(
     device: &Device,
     headless_target: &'a mut Option<(Texture, TextureView)>,
     width: u32,
     height: u32,
-) -> &'a TextureView {
+) -> (&'a Texture, &'a TextureView) {
     let recreate = headless_target
         .as_ref()
         .is_none_or(|(tex, _)| tex.width() != width || tex.height() != height);
@@ -1168,17 +1349,24 @@ fn ensure_headless_target<'a>(
             format: wgpu::TextureFormat::Bgra8UnormSrgb,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         *headless_target = Some((texture, view));
     }
 
-    &headless_target.as_ref().unwrap().1
+    let (ref tex, ref view) = headless_target
+        .as_ref()
+        .expect("headless_target must be initialized before get_or_create_headless_target returns");
+    (tex, view)
 }
 
-/// Create orthographic projection matrix
+/// Build a 4×4 column-major orthographic projection matrix for a surface
+/// of `(width, height)` in compositor logical pixels. The matrix maps
+/// screen-space coordinates `(0, 0)` to the top-left and `(width, height)`
+/// to the bottom-right, with Y flipped (typical UI orientation).
 pub fn create_projection_matrix(width: f32, height: f32) -> [[f32; 4]; 4] {
     let left = 0.0;
     let right = width;

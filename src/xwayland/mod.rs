@@ -1,6 +1,7 @@
 //! XWayland integration manager
-#![allow(missing_docs)]
+//!
 //! Provides seamless integration of X11 applications in Wayland
+//! via the XWayland compatibility layer.
 
 use crate::config::XWaylandConfig;
 use anyhow::Result;
@@ -129,7 +130,11 @@ impl XWaylandManager {
         Ok(())
     }
 
-    /// Start the `XWayland` server
+    /// Start the `XWayland` subprocess (rootless, terminate-on-last-client).
+    ///
+    /// Idempotent: returns `Ok(())` if a server is already running. Picks
+    /// the configured display number first, then scans `:0..:32` for a
+    /// free slot. Sets the `DISPLAY` env var on success.
     pub async fn start_server(&mut self) -> Result<()> {
         if self.xwayland_process.is_some() {
             info!("⚠️ XWayland server already running");
@@ -228,7 +233,8 @@ impl XWaylandManager {
         false
     }
 
-    /// Stop the `XWayland` server
+    /// Stop the `XWayland` subprocess if running, and reset the manager
+    /// state to `Stopped`. Always clears the `DISPLAY` env var.
     pub async fn stop_server(&mut self) -> Result<()> {
         if let Some(mut process) = self.xwayland_process.take() {
             info!("🛑 Stopping XWayland server");
