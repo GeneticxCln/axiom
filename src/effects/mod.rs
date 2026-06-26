@@ -317,18 +317,6 @@ impl EffectsEngine {
                             effect_state.scale = v.max(0.0);
                         }
                         (
-                            animations::AnimationProperty::Rotation,
-                            animations::AnimationValue::Float(_v),
-                        ) => {
-                            // Rotation not yet stored on WindowEffectState — no-op for now
-                        }
-                        (
-                            animations::AnimationProperty::Size,
-                            animations::AnimationValue::Vector2(_size),
-                        ) => {
-                            // Size not yet stored on WindowEffectState — no-op for now
-                        }
-                        (
                             animations::AnimationProperty::SpringProperty(name),
                             animations::AnimationValue::Float(v),
                         ) => match name.as_str() {
@@ -491,20 +479,6 @@ impl EffectsEngine {
         // but we can add visual enhancements here
     }
 
-    /// Apply blur effect to a window
-    pub fn apply_blur_effect(&self, window_id: u64, _surface_data: &mut [u8]) {
-        if !self.blur_params.enabled || !self.config.enabled {
-            return;
-        }
-
-        // In a real implementation, this would apply GPU-based blur
-        // For now, we simulate the effect
-        debug!(
-            "🌊 Applying blur effect to window {} (radius: {:.1})",
-            window_id, self.blur_params.radius
-        );
-    }
-
     /// Get current visual state for a window
     pub fn get_window_effects(&self, window_id: u64) -> Option<&WindowEffectState> {
         self.window_effects.get(&window_id)
@@ -518,7 +492,7 @@ impl EffectsEngine {
     }
 
     /// Apply easing curve to animation progress (used in tests and internally)
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn apply_easing_curve(&self, t: f32, curve: &EasingCurve) -> f32 {
         let t = t.clamp(0.0, 1.0);
 

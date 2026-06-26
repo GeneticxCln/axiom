@@ -20,7 +20,6 @@ use log::{debug, error, info};
 
 use axiom::compositor::AxiomCompositor;
 use axiom::config::AxiomConfig;
-use axiom::decoration::DecorationManager;
 use axiom::effects::EffectsEngine;
 use axiom::input::InputManager;
 use axiom::ipc::AxiomIPCServer;
@@ -135,7 +134,6 @@ async fn main() -> Result<()> {
     ));
     let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)));
     let effects_engine = Arc::new(RwLock::new(EffectsEngine::new(&config.effects)?));
-    let decoration_manager = Arc::new(RwLock::new(DecorationManager::new(&config.window)));
     let input_manager = Arc::new(RwLock::new(InputManager::new(
         &config.input,
         &config.bindings,
@@ -166,7 +164,6 @@ async fn main() -> Result<()> {
         workspace_manager.clone(),
         effects_engine.clone(),
         window_manager.clone(),
-        decoration_manager.clone(),
         input_manager.clone(),
         xwayland_manager.clone(),
         ipc_server,

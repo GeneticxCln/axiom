@@ -61,10 +61,6 @@ pub enum XwmEvent {
 
 pub struct AxiomXwm {
     conn: Rc<RustConnection>,
-    #[allow(dead_code)]
-    screen_num: usize,
-    #[allow(dead_code)]
-    root: Window,
     windows: HashMap<Window, X11WindowData>,
     pub atoms: Atoms,
     selection_window: Window,
@@ -125,8 +121,6 @@ impl AxiomXwm {
 
         Ok(Self {
             conn,
-            screen_num,
-            root,
             windows: HashMap::new(),
             atoms,
             selection_window,

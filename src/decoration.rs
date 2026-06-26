@@ -13,9 +13,9 @@ use crate::effects::WindowEffectState;
 use crate::window::Rectangle;
 
 /// Default window width (pixels) used as a placeholder for button-position
-/// calculations when the real window width isn't available.
-/// TODO: thread real window width through from the backend / compositor.
-const PLACEHOLDER_WINDOW_WIDTH: i32 = 800;
+/// calculations when the real window width isn't available at add_window time.
+/// Updated to the real width via [`DecorationManager::set_window_width`].
+const DEFAULT_WINDOW_WIDTH: i32 = 800;
 
 /// Decoration mode for windows
 #[allow(clippy::approx_constant)]
@@ -50,6 +50,10 @@ pub struct WindowDecoration {
 
     /// Button states
     pub buttons: TitlebarButtons,
+
+    /// Real window width in pixels (updated via [`DecorationManager::set_window_width`]).
+    /// Used to position titlebar buttons relative to the right edge.
+    window_width: i32,
 }
 
 /// Titlebar button states
@@ -124,10 +128,6 @@ pub struct DecorationTheme {
 /// Server-side decoration manager
 #[derive(Debug)]
 pub struct DecorationManager {
-    /// Configuration (wired for future use; kept for config-change propagation)
-    #[allow(dead_code)]
-    config: WindowConfig,
-
     /// Theme settings
     theme: DecorationTheme,
 
@@ -202,7 +202,6 @@ impl DecorationManager {
         info!("  🎨 Corner radius: {:.1}px", theme.corner_radius);
 
         Self {
-            config: config.clone(),
             theme,
             decorations: HashMap::new(),
             default_mode: DecorationMode::ServerSide,
@@ -223,15 +222,25 @@ impl DecorationManager {
         Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0])
     }
 
-    /// Register a window for decoration management
-    pub fn add_window(&mut self, window_id: u64, title: String, prefers_server_side: bool) {
+    /// Register a window for decoration management.
+    ///
+    /// `initial_width` is the window's current width in pixels. Pass `None`
+    /// to use the default; call [`set_window_width`] later with the real
+    /// value once it is known.
+    pub fn add_window(
+        &mut self,
+        window_id: u64,
+        title: String,
+        prefers_server_side: bool,
+        initial_width: Option<i32>,
+    ) {
         let mode = if prefers_server_side {
             self.default_mode
         } else {
             DecorationMode::ClientSide
         };
 
-        let decoration = WindowDecoration {
+        let mut decoration = WindowDecoration {
             mode,
             prefers_server_side,
             titlebar_height: if mode == DecorationMode::ServerSide {
@@ -242,10 +251,10 @@ impl DecorationManager {
             title,
             focused: false,
             buttons: TitlebarButtons::default(),
+            window_width: initial_width.unwrap_or(DEFAULT_WINDOW_WIDTH),
         };
 
         // Update button positions
-        let mut decoration = decoration;
         self.update_button_positions(window_id, &mut decoration);
 
         self.decorations.insert(window_id, decoration);
@@ -260,6 +269,35 @@ impl DecorationManager {
     pub fn remove_window(&mut self, window_id: u64) {
         if self.decorations.remove(&window_id).is_some() {
             debug!("🗑️ Removed decoration for window {}", window_id);
+        }
+    }
+
+    /// Update the stored window width and recompute button positions.
+    ///
+    /// Call this when the window is resized or when the real width first
+    /// becomes available (e.g. from the Wayland surface configure event).
+    pub fn set_window_width(&mut self, window_id: u64, width: i32) {
+        if let Some(decoration) = self.decorations.get_mut(&window_id) {
+            if decoration.window_width == width {
+                return;
+            }
+            decoration.window_width = width;
+
+            if decoration.mode == DecorationMode::ServerSide {
+                let button_size = self.theme.button_size;
+                let titlebar_height = self.theme.titlebar_height;
+                let button_y = (titlebar_height - button_size) / 2;
+                let ww = width;
+                let button_margin = 8;
+                decoration.buttons.close.bounds =
+                    Self::button_rect(ww, button_size, button_y, button_margin, 0);
+                decoration.buttons.maximize.bounds =
+                    Self::button_rect(ww, button_size, button_y, button_margin, 1);
+                decoration.buttons.minimize.bounds =
+                    Self::button_rect(ww, button_size, button_y, button_margin, 2);
+            }
+
+            debug!("📏 Updated window {} width to {}px", window_id, width);
         }
     }
 
@@ -311,7 +349,7 @@ impl DecorationManager {
                 let button_size = self.theme.button_size;
                 let titlebar_height = self.theme.titlebar_height;
                 let button_y = (titlebar_height - button_size) / 2;
-                let ww = PLACEHOLDER_WINDOW_WIDTH;
+                let ww = decoration.window_width;
                 let button_margin = 8;
                 decoration.buttons.close.bounds =
                     Self::button_rect(ww, button_size, button_y, button_margin, 0);
@@ -459,7 +497,7 @@ impl DecorationManager {
         let button_size = self.theme.button_size;
         let titlebar_height = self.theme.titlebar_height;
         let button_y = (titlebar_height - button_size) / 2;
-        let ww = PLACEHOLDER_WINDOW_WIDTH;
+        let ww = decoration.window_width;
         let button_margin = 8;
         decoration.buttons.close.bounds =
             Self::button_rect(ww, button_size, button_y, button_margin, 0);
@@ -481,14 +519,14 @@ impl DecorationManager {
         let button_size = self.theme.button_size;
         let titlebar_height = self.theme.titlebar_height;
         let button_y = (titlebar_height - button_size) / 2;
-        let ww = PLACEHOLDER_WINDOW_WIDTH;
         let button_margin = 8;
 
-        // Update all window button positions
+        // Update all window button positions using each window's stored width
         let window_ids: Vec<u64> = self.decorations.keys().copied().collect();
         for window_id in window_ids {
             if let Some(decoration) = self.decorations.get_mut(&window_id) {
                 if decoration.mode == DecorationMode::ServerSide {
+                    let ww = decoration.window_width;
                     decoration.buttons.close.bounds =
                         Self::button_rect(ww, button_size, button_y, button_margin, 0);
                     decoration.buttons.maximize.bounds =
@@ -666,7 +704,7 @@ mod tests {
     #[test]
     fn test_add_and_remove_window() {
         let mut mgr = DecorationManager::new(&WindowConfig::default());
-        mgr.add_window(1, "Test".into(), true);
+        mgr.add_window(1, "Test".into(), true, Some(800));
         assert!(mgr.get_decoration(1).is_some());
         assert_eq!(mgr.get_decoration(1).unwrap().title, "Test");
 
@@ -677,7 +715,7 @@ mod tests {
     #[test]
     fn test_set_window_focus_flips() {
         let mut mgr = DecorationManager::new(&WindowConfig::default());
-        mgr.add_window(7, "X".into(), true);
+        mgr.add_window(7, "X".into(), true, None);
         assert!(!mgr.get_decoration(7).unwrap().focused);
         mgr.set_window_focus(7, true);
         assert!(mgr.get_decoration(7).unwrap().focused);
@@ -694,7 +732,7 @@ mod tests {
     #[test]
     fn test_set_window_title_updates() {
         let mut mgr = DecorationManager::new(&WindowConfig::default());
-        mgr.add_window(1, "Old".into(), true);
+        mgr.add_window(1, "Old".into(), true, None);
         mgr.set_window_title(1, "New".into());
         assert_eq!(mgr.get_decoration(1).unwrap().title, "New");
     }
@@ -720,7 +758,7 @@ mod tests {
     fn test_client_side_decoration_skips_titlebar() {
         let mut mgr = DecorationManager::new(&WindowConfig::default());
         // prefers_server_side=false => ClientSide => no titlebar
-        mgr.add_window(1, "CSD".into(), false);
+        mgr.add_window(1, "CSD".into(), false, None);
         assert_eq!(
             mgr.get_decoration(1).unwrap().mode,
             DecorationMode::ClientSide
@@ -731,7 +769,7 @@ mod tests {
     #[test]
     fn test_button_press_in_titlebar_returns_start_move() {
         let mut mgr = DecorationManager::new(&WindowConfig::default());
-        mgr.add_window(1, "T".into(), true);
+        mgr.add_window(1, "T".into(), true, Some(1000));
         // titlebar_rect has width 1000 in helper code for now;
         // a click at (10, 5) is well inside the titlebar (height default = 32)
         let action = mgr.handle_button_press(1, 10, 5);
@@ -741,7 +779,7 @@ mod tests {
     #[test]
     fn test_button_press_outside_returns_none() {
         let mut mgr = DecorationManager::new(&WindowConfig::default());
-        mgr.add_window(1, "T".into(), true);
+        mgr.add_window(1, "T".into(), true, None);
         // y=500 is well below the 32-pixel titlebar
         let action = mgr.handle_button_press(1, 10, 500);
         assert!(action.is_none());
@@ -750,7 +788,7 @@ mod tests {
     #[test]
     fn test_button_press_then_release_clears_pressed() {
         let mut mgr = DecorationManager::new(&WindowConfig::default());
-        mgr.add_window(1, "T".into(), true);
+        mgr.add_window(1, "T".into(), true, Some(800));
         // Baseline: nothing is pressed.
         assert!(!mgr.get_decoration(1).unwrap().buttons.close.pressed);
         // The titlebar rect in handle_button_press is hardcoded width=1000,

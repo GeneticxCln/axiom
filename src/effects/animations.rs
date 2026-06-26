@@ -504,13 +504,9 @@ pub struct AnimationUpdate {
 pub enum AnimationProperty {
     Transform,
     Position,
-    #[allow(dead_code)]
-    Size,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // matched in effects/mod.rs but never constructed in current codebase
     Opacity,
-    #[allow(dead_code)]
-    Rotation,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // matched in effects/mod.rs but never constructed in current codebase
     Scale,
     SpringProperty(String),
 }
@@ -519,15 +515,11 @@ pub enum AnimationProperty {
 #[derive(Debug, Clone)]
 pub enum AnimationValue {
     Float(f32),
-    #[allow(dead_code)]
-    Vector2(Vector2<f32>),
     Position(Vector2<f32>),
     Transform {
         scale: Vector2<f32>,
         opacity: f32,
     },
-    #[allow(dead_code)]
-    None,
 }
 
 /// Animation system statistics

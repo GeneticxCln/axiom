@@ -12,7 +12,6 @@ use std::time::Duration;
 use axiom::{
     compositor::AxiomCompositor,
     config::AxiomConfig,
-    decoration::DecorationManager,
     effects::EffectsEngine,
     input::InputManager,
     ipc::{AxiomIPCServer, AxiomMessage, LazyUIMessage},
@@ -416,13 +415,11 @@ async fn make_test_compositor(
     Arc<RwLock<ScrollableWorkspaces>>,
     Arc<RwLock<WindowManager>>,
     Arc<RwLock<EffectsEngine>>,
-    Arc<RwLock<DecorationManager>>,
     Arc<RwLock<InputManager>>,
 )> {
     let workspace_manager = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)));
     let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)));
     let effects_engine = Arc::new(RwLock::new(EffectsEngine::new(&config.effects)?));
-    let decoration_manager = Arc::new(RwLock::new(DecorationManager::new(&config.window)));
     let input_manager = Arc::new(RwLock::new(InputManager::new(
         &config.input,
         &config.bindings,
@@ -433,7 +430,6 @@ async fn make_test_compositor(
         workspace_manager.clone(),
         effects_engine.clone(),
         window_manager.clone(),
-        decoration_manager.clone(),
         input_manager.clone(),
     )
     .await?;
@@ -443,7 +439,6 @@ async fn make_test_compositor(
         workspace_manager,
         window_manager,
         effects_engine,
-        decoration_manager,
         input_manager,
     ))
 }

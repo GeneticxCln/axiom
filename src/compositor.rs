@@ -13,7 +13,6 @@ use tokio::signal;
 
 use crate::backend::AxiomSmithayBackendReal;
 use crate::config::AxiomConfig;
-use crate::decoration::DecorationManager;
 use crate::effects::EffectsEngine;
 use crate::input::InputManager;
 use crate::ipc::{AxiomIPCServer, LazyUIMessage};
@@ -35,8 +34,6 @@ pub struct AxiomCompositor {
     workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
     effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
     window_manager: Arc<parking_lot::RwLock<WindowManager>>,
-    #[allow(dead_code)]
-    decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
     input_manager: Arc<parking_lot::RwLock<InputManager>>,
     xwayland_manager: Option<Arc<AsyncRwLock<XWaylandManager>>>,
     ipc_server: AxiomIPCServer,
@@ -78,7 +75,6 @@ impl AxiomCompositor {
         workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
         effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
         window_manager: Arc<parking_lot::RwLock<WindowManager>>,
-        decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
         input_manager: Arc<parking_lot::RwLock<InputManager>>,
         xwayland_manager: Option<Arc<AsyncRwLock<XWaylandManager>>>,
         mut ipc_server: AxiomIPCServer,
@@ -140,7 +136,6 @@ impl AxiomCompositor {
             workspace_manager,
             effects_engine,
             window_manager,
-            decoration_manager,
             input_manager,
             xwayland_manager,
             ipc_server,
@@ -696,6 +691,7 @@ impl AxiomCompositor {
     }
 
     /// Check whether the compositor is still running.
+    /// Used by integration tests to verify shutdown behavior.
     #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.running
@@ -744,7 +740,6 @@ impl AxiomCompositor {
         workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
         effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
         window_manager: Arc<parking_lot::RwLock<WindowManager>>,
-        decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
         input_manager: Arc<parking_lot::RwLock<InputManager>>,
     ) -> Result<Self> {
         // Attempt GPU renderer initialization; degrade gracefully if unavailable.
@@ -780,7 +775,6 @@ impl AxiomCompositor {
             workspace_manager,
             effects_engine,
             window_manager,
-            decoration_manager,
             input_manager,
             xwayland_manager: None,
             ipc_server,
@@ -810,7 +804,6 @@ mod tests {
         let effects_engine = Arc::new(RwLock::new(
             EffectsEngine::new(&config.effects).expect("effects init"),
         ));
-        let decoration_manager = Arc::new(RwLock::new(DecorationManager::new(&config.window)));
         let input_manager = Arc::new(RwLock::new(InputManager::new(
             &config.input,
             &config.bindings,
@@ -821,7 +814,6 @@ mod tests {
             workspace_manager,
             effects_engine,
             window_manager,
-            decoration_manager,
             input_manager,
         )
         .await

@@ -29,15 +29,12 @@ clap = { version = "4.4", features = ["derive"] }
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 anyhow = "1.0"
-thiserror = "1.0"  # Error derive macros (config, types)
 log = "0.4"
 env_logger = "0.10"
 
 # Core Wayland compositor dependencies
 wayland-server = "0.31"
 wayland-protocols = { version = "0.32", features = ["server", "staging", "unstable"] }
-wayland-backend = "0.3"
-wayland-scanner = "0.31"
 
 # Smithay compositor framework with full features
 smithay = { version = "0.7.0", default-features = false, features = [
@@ -95,11 +92,7 @@ path = "src/lib.rs"
 # Features
 [features]
 default = []
-demo = []
-real-compositor = []
-wgpu-present = []
 examples = []
-experimental-smithay = []
 
 # Development dependencies for testing
 [dev-dependencies]

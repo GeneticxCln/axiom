@@ -53,10 +53,6 @@ pub struct AxiomRenderer {
     /// Populated by render_frame() each tick, consumed by surface rendering passes.
     window_blurs: BlurQueue,
 
-    /// Fallback size if no surface found
-    #[allow(dead_code)]
-    default_size: (u32, u32),
-
     /// Headless output texture + view for off-screen shadow/blur passes.
     /// Created lazily and resized when dimensions change. Used by render()
     /// for GPU effects compositing when no surface is attached.
@@ -91,6 +87,17 @@ pub struct RenderedWindow {
     pub dirty: bool,
     /// Window opacity
     pub opacity: f32,
+
+    /// Cached uniform buffer — reused across frames to avoid per-frame GPU
+    /// allocation. Recreated only when opacity changes.
+    cached_uniform_buffer: Option<Buffer>,
+    cached_opacity: f32,
+
+    /// Cached vertex buffer — reused across frames. Recreated only when
+    /// position or size changes.
+    cached_vertex_buffer: Option<Buffer>,
+    cached_position: (f32, f32),
+    cached_size: (f32, f32),
 }
 
 /// Vertex data for rendering quads
@@ -303,7 +310,6 @@ impl AxiomRenderer {
             windows: Vec::new(),
             window_shadows: HashMap::with_capacity(64),
             window_blurs: HashMap::with_capacity(64),
-            default_size: (width, height),
             headless_target: None,
             render_pipeline,
             sampler,
@@ -460,7 +466,6 @@ impl AxiomRenderer {
             windows: Vec::new(),
             window_shadows: HashMap::with_capacity(64),
             window_blurs: HashMap::with_capacity(64),
-            default_size: (1920, 1080),
             headless_target: None,
             render_pipeline,
             sampler,
@@ -540,6 +545,11 @@ impl AxiomRenderer {
             texture_view: None,
             dirty: true,
             opacity: 1.0,
+            cached_uniform_buffer: None,
+            cached_opacity: f32::NAN,
+            cached_vertex_buffer: None,
+            cached_position: (f32::NAN, f32::NAN),
+            cached_size: (f32::NAN, f32::NAN),
         };
 
         self.windows.push(window);
@@ -567,6 +577,11 @@ impl AxiomRenderer {
                 texture_view: None,
                 dirty: true,
                 opacity,
+                cached_uniform_buffer: None,
+                cached_opacity: f32::NAN,
+                cached_vertex_buffer: None,
+                cached_position: (f32::NAN, f32::NAN),
+                cached_size: (f32::NAN, f32::NAN),
             };
             self.windows.push(window);
         }
@@ -932,22 +947,34 @@ impl AxiomRenderer {
         // Prepare resources before starting render pass to avoid lifetime issues
         let mut draw_commands = Vec::new();
 
-        for window in &self.windows {
+        for window in &mut self.windows {
             if let Some(texture_view) = &window.texture_view {
-                // Create window uniform buffer
-                let window_uniforms = WindowUniforms {
-                    opacity: window.opacity,
-                    padding: [0.0; 3],
-                };
-                let window_uniform_buffer =
-                    self.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some(&format!("Window {} Uniforms", window.id)),
-                            contents: bytemuck::cast_slice(&[window_uniforms]),
-                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                        });
+                // Recreate uniform buffer only when opacity changes
+                if (window.cached_opacity - window.opacity).abs() > f32::EPSILON
+                    || window.cached_uniform_buffer.is_none()
+                {
+                    let window_uniforms = WindowUniforms {
+                        opacity: window.opacity,
+                        padding: [0.0; 3],
+                    };
+                    window.cached_uniform_buffer =
+                        Some(self.device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some(&format!("Window {} Uniforms", window.id)),
+                                contents: bytemuck::cast_slice(&[window_uniforms]),
+                                usage: wgpu::BufferUsages::UNIFORM
+                                    | wgpu::BufferUsages::COPY_DST,
+                            },
+                        ));
+                    window.cached_opacity = window.opacity;
+                }
 
-                // Create bind group for this window
+                let window_uniform_buffer = window
+                    .cached_uniform_buffer
+                    .as_ref()
+                    .expect("uniform buffer initialized");
+
+                // Create bind group for this window (cheap; references cached buffers)
                 let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     layout: &self.render_pipeline.get_bind_group_layout(0),
                     entries: &[
@@ -971,46 +998,62 @@ impl AxiomRenderer {
                     label: Some(&format!("Window {} Bind Group", window.id)),
                 });
 
-                // Create vertex buffer for this window
-                let x = window.position.0;
-                let y = window.position.1;
-                let w = window.size.0;
-                let h = window.size.1;
+                // Recreate vertex buffer only when position or size changes
+                let pos_changed = (window.cached_position.0 - window.position.0).abs()
+                    > f32::EPSILON
+                    || (window.cached_position.1 - window.position.1).abs() > f32::EPSILON;
+                let size_changed = (window.cached_size.0 - window.size.0).abs() > f32::EPSILON
+                    || (window.cached_size.1 - window.size.1).abs() > f32::EPSILON;
 
-                let vertices = [
-                    Vertex {
-                        position: [x, y, 0.0],
-                        tex_coords: [0.0, 0.0],
-                    },
-                    Vertex {
-                        position: [x, y + h, 0.0],
-                        tex_coords: [0.0, 1.0],
-                    },
-                    Vertex {
-                        position: [x + w, y + h, 0.0],
-                        tex_coords: [1.0, 1.0],
-                    },
-                    Vertex {
-                        position: [x, y, 0.0],
-                        tex_coords: [0.0, 0.0],
-                    },
-                    Vertex {
-                        position: [x + w, y + h, 0.0],
-                        tex_coords: [1.0, 1.0],
-                    },
-                    Vertex {
-                        position: [x + w, y, 0.0],
-                        tex_coords: [1.0, 0.0],
-                    },
-                ];
+                if pos_changed || size_changed || window.cached_vertex_buffer.is_none() {
+                    let x = window.position.0;
+                    let y = window.position.1;
+                    let w = window.size.0;
+                    let h = window.size.1;
 
-                let vertex_buffer =
-                    self.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some(&format!("Window {} Vertex Buffer", window.id)),
-                            contents: bytemuck::cast_slice(&vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        });
+                    let vertices = [
+                        Vertex {
+                            position: [x, y, 0.0],
+                            tex_coords: [0.0, 0.0],
+                        },
+                        Vertex {
+                            position: [x, y + h, 0.0],
+                            tex_coords: [0.0, 1.0],
+                        },
+                        Vertex {
+                            position: [x + w, y + h, 0.0],
+                            tex_coords: [1.0, 1.0],
+                        },
+                        Vertex {
+                            position: [x, y, 0.0],
+                            tex_coords: [0.0, 0.0],
+                        },
+                        Vertex {
+                            position: [x + w, y + h, 0.0],
+                            tex_coords: [1.0, 1.0],
+                        },
+                        Vertex {
+                            position: [x + w, y, 0.0],
+                            tex_coords: [1.0, 0.0],
+                        },
+                    ];
+
+                    window.cached_vertex_buffer =
+                        Some(self.device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some(&format!("Window {} Vertex Buffer", window.id)),
+                                contents: bytemuck::cast_slice(&vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            },
+                        ));
+                    window.cached_position = window.position;
+                    window.cached_size = window.size;
+                }
+
+                let vertex_buffer = window
+                    .cached_vertex_buffer
+                    .as_ref()
+                    .expect("vertex buffer initialized");
 
                 draw_commands.push((window.id, bind_group, vertex_buffer));
             }
@@ -1240,19 +1283,6 @@ impl AxiomRenderer {
         self.window_blurs.clear();
     }
 
-    /// Get the current blur queue for surface rendering.
-    #[allow(dead_code)]
-    pub fn blur_queue(&self) -> &BlurQueue {
-        &self.window_blurs
-    }
-
-    /// Get the current shadow queue for surface rendering.
-    /// Consumed by the backend when calling render_to_surface_with_shadows.
-    #[allow(dead_code)]
-    pub fn shadow_queue(&self) -> &ShadowQueue {
-        &self.window_shadows
-    }
-
     /// Get number of rendered windows
     pub fn window_count(&self) -> usize {
         self.windows.len()
@@ -1410,6 +1440,11 @@ mod tests {
             texture_view: None,
             dirty: true,
             opacity: 1.0,
+            cached_uniform_buffer: None,
+            cached_opacity: f32::NAN,
+            cached_vertex_buffer: None,
+            cached_position: (f32::NAN, f32::NAN),
+            cached_size: (f32::NAN, f32::NAN),
         };
 
         assert_eq!(window.id, 1);

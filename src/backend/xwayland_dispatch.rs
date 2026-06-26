@@ -13,28 +13,13 @@
 //! read in isolation from the Wayland protocol-state machine.
 
 use anyhow::Result;
-use log::{debug, warn};
+use log::warn;
 
 // Re-export the parent module's State struct so signatures below can spell
 // `&State` / `&mut State` without the full `crate::backend::State` path.
 use super::State;
 
 use super::xwm::{AxiomXwm, XwmEvent};
-
-/// Populate the clipboard cache with bytes from an external source (e.g.
-/// Lazy UI IPC, compositor-managed text). When X11 apps request clipboard
-/// contents, this data is served back to them. Also claims X11 clipboard
-/// ownership so X11 apps come to us for selection data.
-#[allow(dead_code)]
-pub(super) fn set_clipboard_data(state: &mut State, data: Vec<u8>) {
-    debug!("📋 Clipboard cache populated ({} bytes)", data.len());
-    state.clipboard_cache = Some(data);
-    if let Some(xwm) = state.xwm.as_ref() {
-        if let Err(e) = xwm.own_selection() {
-            warn!("⚠️ Failed to claim X11 clipboard: {}", e);
-        }
-    }
-}
 
 /// Poll X11 events coming from the XWayland manager and dispatch them
 /// to the compositor. Currently:

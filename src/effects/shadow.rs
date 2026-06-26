@@ -297,19 +297,20 @@ impl ShadowRenderer {
         Ok(())
     }
 
-    /// Render multiple shadows.
+    /// Render multiple shadows in a single render pass.
     ///
-    /// **Performance note:** Each shadow currently uses a separate render
-    /// pass and bind group rather than true batching. This avoids bind-group
-    /// lifetime complications and is acceptable for dev compositor window
-    /// counts (< 20 windows). Production workloads should refactor to a
-    /// single pass with instanced drawing or multiple draws in one pass.
+    /// All shadows share one render pass and pipeline; each shadow gets
+    /// its own small uniform buffer so the GPU sees correct per-draw data.
+    /// This avoids the overhead of creating and submitting N separate
+    /// render passes while keeping bind-group correctness simple.
     pub fn render_shadow_batch(
         &mut self,
         encoder: &mut CommandEncoder,
         output_texture: &TextureView,
         shadow_data: &[(Vector2<f32>, Vector2<f32>, ShadowParams)], // (position, size, params)
     ) -> Result<()> {
+        use wgpu::util::DeviceExt;
+
         let start_time = std::time::Instant::now();
 
         let shadow_pipeline = self
@@ -317,13 +318,16 @@ impl ShadowRenderer {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Drop shadow pipeline not initialized"))?;
 
-        // Process each shadow individually to avoid bind group lifetime issues
+        // Pre-build uniform buffers and bind groups for all enabled shadows
+        // so they live long enough for the render pass.
+        let mut bind_groups = Vec::with_capacity(shadow_data.len());
+        let mut draw_count = 0u32;
+
         for (_position, size, shadow_params) in shadow_data {
             if !shadow_params.enabled {
                 continue;
             }
 
-            // Update uniforms for this shadow
             let blur_radius = match self.current_quality {
                 ShadowQuality::Low => shadow_params.blur_radius * 0.5,
                 ShadowQuality::Medium => shadow_params.blur_radius,
@@ -339,41 +343,48 @@ impl ShadowRenderer {
                 window_size: [size.x, size.y],
             };
 
-            self.queue.write_buffer(
-                &self.shadow_params_buffer,
-                0,
-                bytemuck::cast_slice(&[uniforms]),
+            // Each shadow gets its own uniform buffer so bind groups
+            // don't alias a shared buffer that gets overwritten.
+            let uniform_buffer = self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("Shadow Uniform Buffer"),
+                    contents: bytemuck::cast_slice(&[uniforms]),
+                    usage: BufferUsages::UNIFORM,
+                },
             );
 
-            // Create bind group for this shadow
-            let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
-                label: Some("Batch Shadow Bind Group"),
+            bind_groups.push(self.device.create_bind_group(&BindGroupDescriptor {
+                label: Some("Shadow Bind Group"),
                 layout: &shadow_pipeline.get_bind_group_layout(0),
                 entries: &[BindGroupEntry {
                     binding: 0,
-                    resource: self.shadow_params_buffer.as_entire_binding(),
+                    resource: uniform_buffer.as_entire_binding(),
                 }],
+            }));
+            draw_count += 1;
+        }
+
+        // Single render pass for all shadows in this batch
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Shadow Batch Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: output_texture,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
             });
 
-            // Individual render pass for each shadow
-            {
-                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Shadow Batch Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: output_texture,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
+            render_pass.set_pipeline(shadow_pipeline);
 
-                render_pass.set_pipeline(shadow_pipeline);
-                render_pass.set_bind_group(0, &bind_group, &[]);
+            for bind_group in &bind_groups {
+                render_pass.set_bind_group(0, bind_group, &[]);
                 render_pass.draw(0..6, 0..1);
             }
         }
@@ -382,7 +393,7 @@ impl ShadowRenderer {
 
         debug!(
             "🌟 Rendered {} shadows in batch, time={:.2}ms",
-            shadow_data.len(),
+            draw_count,
             self.last_render_time.as_secs_f64() * 1000.0
         );
 
