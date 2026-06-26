@@ -1029,11 +1029,35 @@ impl AxiomRenderer {
                 let w = window.size.0;
                 let h = window.size.1;
 
-                if pos_changed || size_changed || window.cached_vertex_buffer.is_none() {
-                    let x = window.position.0;
-                    let y = window.position.1;
-                    let w = window.size.0;
-                    let h = window.size.1;
+                // Two triangles forming a textured quad in screen-space.
+                // Vertex order matches the 6 vertices the shader expects
+                // (see `render_to_surface` which issues `draw(0..6, …)`).
+                let vertices = [
+                    Vertex {
+                        position: [x, y, 0.0],
+                        tex_coords: [0.0, 0.0],
+                    },
+                    Vertex {
+                        position: [x + w, y, 0.0],
+                        tex_coords: [1.0, 0.0],
+                    },
+                    Vertex {
+                        position: [x, y + h, 0.0],
+                        tex_coords: [0.0, 1.0],
+                    },
+                    Vertex {
+                        position: [x + w, y, 0.0],
+                        tex_coords: [1.0, 0.0],
+                    },
+                    Vertex {
+                        position: [x + w, y + h, 0.0],
+                        tex_coords: [1.0, 1.0],
+                    },
+                    Vertex {
+                        position: [x, y + h, 0.0],
+                        tex_coords: [0.0, 1.0],
+                    },
+                ];
 
                 window.cached_vertex_buffer =
                     Some(self.device.create_buffer_init(
