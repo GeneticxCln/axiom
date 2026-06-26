@@ -190,6 +190,11 @@ prop_compose! {
             move_window_right,
             close_window,
             toggle_fullscreen,
+            toggle_floating: "Super+Shift+Space".to_string(),
+            // Pin `toggle_minimize` to the default hotkey so the
+            // TOML round-trip assertion matches `BindingsConfig::default()`
+            // for both serialization and deserialization directions.
+            toggle_minimize: "Super+grave".to_string(),
             launch_terminal: "Super+Enter".to_string(),
             launch_launcher: "Super+Space".to_string(),
             toggle_effects: "Super+e".to_string(),
@@ -233,6 +238,22 @@ prop_compose! {
     }
 }
 
+// Strategy for generating valid feature-flag configurations. Both
+// fields are independent bools with a default of `false`, so we
+// exercise the enabled branch at half probability; the round-trip
+// assertions below cover both directions.
+prop_compose! {
+    fn valid_features_config()(
+        enable_minimize in any::<bool>(),
+        enable_xdg_decoration_protocol in any::<bool>(),
+    ) -> FeaturesConfig {
+        FeaturesConfig {
+            enable_minimize,
+            enable_xdg_decoration_protocol,
+        }
+    }
+}
+
 // Strategy for generating valid general configurations
 prop_compose! {
     fn valid_general_config()(
@@ -267,7 +288,34 @@ prop_compose! {
             bindings,
             xwayland,
             general,
+            // BackendConfig has no validation knobs of its own (it
+            // round-trips through `BackendKind::from_config_str`); the
+            // default `kind = "winit"` is sufficient for round-trip
+            // assertions. Add a strategy here if validate() grows.
+            backend: BackendConfig::default(),
+            // FeaturesConfig round-trips as a pair of bools. Use the
+            // default (`enable_minimize=false`,
+            // `enable_xdg_decoration_protocol=false`) for baseline
+            // serialization tests; add an explicit override strategy
+            // here if a future invariant gate gets layered onto either
+            // field.
+            features: FeaturesConfig::default(),
         }
+    }
+}
+
+// Strategy for generating valid backend configurations, kept isolated
+// so future validation extensions (e.g. accepting only certain kinds)
+// can swap it in without touching the rest of the test suite.
+prop_compose! {
+    fn valid_backend_config()(
+        kind in prop_oneof![
+            Just("winit".to_string()),
+            Just("drm".to_string()),
+            Just("noop".to_string()),
+        ],
+    ) -> BackendConfig {
+        BackendConfig { kind }
     }
 }
 

@@ -20,7 +20,6 @@ use log::{debug, error, info};
 
 use axiom::compositor::AxiomCompositor;
 use axiom::config::AxiomConfig;
-use axiom::decoration::DecorationManager;
 use axiom::effects::EffectsEngine;
 use axiom::input::InputManager;
 use axiom::ipc::AxiomIPCServer;
@@ -64,6 +63,13 @@ struct Cli {
     /// Run visual effects demo (Phase 4)
     #[arg(long)]
     effects_demo: bool,
+
+    /// Backend selection — `winit` (default, nested-session),
+    /// `drm` (real KMS/udev/libinput session compositor),
+    /// or `noop` (tests / headless). Persisted into
+    /// `config.backend.kind` so downstream subsystems see one source of truth.
+    #[arg(long, value_name = "KIND", default_value = "winit")]
+    backend: String,
 }
 
 #[tokio::main]
@@ -126,16 +132,26 @@ async fn main() -> Result<()> {
         info!("🚫 Visual effects disabled via CLI flag");
     }
 
+    // Backend selection: the CLI override always wins over any TOML
+    // value, so the post-override `config.backend.kind` is what reaches
+    // the backend constructor. We only log when the resolved kind
+    // differs from the dev default so a TOML file that already had
+    // `kind = "drm"` is not misattributed to the CLI.
+    config.backend.kind = cli.backend.clone();
+    if config.backend.kind != "winit" {
+        info!("🖥️  Backend: {}", config.backend.kind);
+    }
+
     // Initialize and run compositor
     info!("🏗️  Initializing Axiom compositor...");
 
     // Create shared managers
+    #[allow(clippy::arc_with_non_send_sync)]
     let workspace_manager = std::sync::Arc::new(parking_lot::RwLock::new(
         ScrollableWorkspaces::new(&config.workspace),
     ));
     let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)));
     let effects_engine = Arc::new(RwLock::new(EffectsEngine::new(&config.effects)?));
-    let decoration_manager = Arc::new(RwLock::new(DecorationManager::new(&config.window)));
     let input_manager = Arc::new(RwLock::new(InputManager::new(
         &config.input,
         &config.bindings,
@@ -166,7 +182,6 @@ async fn main() -> Result<()> {
         workspace_manager.clone(),
         effects_engine.clone(),
         window_manager.clone(),
-        decoration_manager.clone(),
         input_manager.clone(),
         xwayland_manager.clone(),
         ipc_server,

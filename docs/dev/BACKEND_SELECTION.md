@@ -20,14 +20,30 @@ The canonical backend based on Smithay 0.7. It supports real Wayland clients, in
 ### 2. Winit Backend (Windowed Mode)
 Runs the compositor nested inside another Wayland/X11 session using `winit`. Useful for rapid iteration without switching TTYs.
 
--   **Flag**: `--windowed`
+-   **Flag**: `--windowed` (or `--backend=winit`)
 -   **Usage**: `cargo run -- --windowed`
 
-### 3. Headless Test Backend
+### 3. DRM / KMS Session-Compositor (Skeleton)
+The production path that drives the GPU directly via DRM/KMS, libinput, and udev hotplug. **Currently scaffolding only** — the architecture and feature gates are wired in ([`src/backend/drm.rs`](../../src/backend/drm.rs), [`BackendKind::Drm`](../../src/backend/drm.rs)), but real `LibSeatSession` probing + the calloop thread are deferred to a follow-up PR (see the module docs for the full list).
+
+-   **Flag**: `--backend=drm`
+-   **Status**: Logs a "DRM backend compiled in; runtime probe is a TODO" line on start-up and the Rust-side tick is a no-op (with a visible warning). The compositor process binds the Wayland socket but no GL/KMS framing occurs until the calloop integration lands.
+
+### 4. Headless Test Backend
 A test-only backend that skips Wayland socket bind and display creation, so the CI can construct a compositor (`AxiomCompositor::new_for_test` + `AxiomSmithayBackendReal::new_for_test`) without real system resources. Used by the 79 unit tests in `cargo test --lib`.
 
-### 4. Legacy / Experimental
+### 5. Legacy / Experimental
 The codebase no longer ships experimental backends in `src/experimental/`. Old Smithay 0.3 scaffolding was migrated to `src/backend/` under the `experimental-smithay` feature flag (currently a no-op marker; the real Smithay 0.7 path is always-on).
+
+## CLI Flag: `--backend`
+
+| Value     | Effect                                                     |
+|-----------|------------------------------------------------------------|
+| `winit`   | Winit nested-session windowed mode (default, dev-friendly).|
+| `drm`     | Stub DRM/KMS session-compositor (architecture wired; calloop follow-up required).|
+| `noop`    | Headless no-op backend (used by `cargo test --lib`).       |
+
+Aliases accepted via TOML (`backend.kind`) and CLI: `windowed`/`dev` → winit, `kms`/`session`/`tty` → drm, `test`/`headless` → noop. Unknown values fall back to `winit` with a warning so a typo never bricks the compositor.
 
 ## Feature Flags (`Cargo.toml`)
 
@@ -38,8 +54,21 @@ The codebase no longer ships experimental backends in `src/experimental/`. Old S
 | `wgpu-present`      | Marker flag; future use for `--wgpu` integration of `AxiomRenderer`.                |
 | `demo`              | Enables internal demo modes (`--demo`, `--effects-demo`).                            |
 | `examples`          | Builds the `metrics_client` example.                                                 |
+| `backend_session`   | Stub feature (mirrors smithay's `backend_session`) — see source comment.             |
+| `backend_udev`      | Stub feature (mirrors smithay's `backend_udev`).                                     |
+| `backend_drm`       | Stub feature (mirrors smithay's `backend_drm`).                                      |
+| `backend_libinput`  | Stub feature (mirrors smithay's `backend_libinput`).                                 |
 | `experimental-smithay` | Marker flag; kept for ABI compatibility with the legacy `src/experimental/` path. |
 
 ## Picking a Backend at Runtime
 
-There is no runtime selector; build the binary with `cargo build` (production) and run it with `--windowed` if you want the winit nested-session mode. For CI, no special flag is needed — `cargo test --lib` exercises every subsystem through the headless path.
+The CLI flag `--backend=<winit|drm|noop>` overrides any TOML value at the `config.backend.kind` slot. The resulting kind is then derived in `AxiomSmithayBackendReal::new` via [`BackendKind::from_config_str`](../../src/backend/drm.rs), and `initialize()` dispatches to either `initialize_winit()` (preserving the original semantics) or `initialize_drm()` (currently a stub). For CI, no special flag is needed — `cargo test --lib` exercises every subsystem through the `Noop` path.
+
+## Minimized Feature Surface (Scope Decision)
+
+Two features are deliberately *minimized* to keep the implementation surface focused and avoid digging deeper into Wayland protocol integration this milestone. Both are gated behind kill-switches in `[features]` (see [`FeaturesConfig`](../../src/config/mod.rs)) that **default to `false`**:
+
+1. **Minimize / iconify** — Wayland has no standard minimize protocol. Supporting it well would require a compositor-internal iconified-window list and synthetic-surface round-tripping. With `[features].enable_minimize = false` (the default), `DecorationManager` will not draw a minimize button on the titlebar and `handle_button_press` will never return `DecorationAction::Minimize`.
+2. **`xdg-decoration-v1` (SSD/CSD negotiation)** — `wayland-protocols["server","staging","unstable"]` is enabled in `Cargo.toml`, but `XdgDecorationHandler` is intentionally not registered in [`src/backend/mod.rs`](../../src/backend/mod.rs) (see the 🚧 comment next to where `CompositorState::new` is set up). We unilaterally render internal SSDs via `DecorationManager`. The forward-looking kill-switch is `[features].enable_xdg_decoration_protocol = false`; flipping it to `true` is a no-op until a follow-up PR wires the handler.
+
+Both flags default to `false` so out-of-the-box Axiom ships with the simplified behavior; users who want either feature can opt in by setting the matching flag to `true` and supplying the corresponding implementation.

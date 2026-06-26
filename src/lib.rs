@@ -75,8 +75,6 @@ pub mod window;
 pub mod workspace;
 pub mod xwayland;
 
-// Experimental features module
-// pub mod experimental;
 pub mod backend;
 pub mod demo_phase4_effects;
 pub mod demo_workspace;

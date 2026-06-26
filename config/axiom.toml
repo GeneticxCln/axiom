@@ -43,6 +43,7 @@ focus_follows_mouse = false
 border_width = 2
 active_border_color = "#7C3AED"
 inactive_border_color = "#374151"
+gap = 10
 
 [input]
 keyboard_repeat_delay = 600
@@ -58,6 +59,11 @@ move_window_left = "Super+Shift+Left"
 move_window_right = "Super+Shift+Right"
 close_window = "Super+q"
 toggle_fullscreen = "Super+f"
+toggle_floating = "Super+Shift+Space"
+# Toggle the focused window's minimized state. No-op while
+# `[features].enable_minimize = false` below; once flipped to
+# `true` it routes through the titlebar minimize button as well.
+toggle_minimize = "Super+grave"
 launch_terminal = "Super+Enter"
 launch_launcher = "Super+Space"
 toggle_effects = "Super+e"
@@ -70,3 +76,18 @@ enabled = true
 debug = false
 max_fps = 60
 vsync = true
+
+# Feature kill-switches for features deliberately *minimized* to keep the
+# implementation surface focused. Both default to `false` so out-of-the-box
+# Axiom does NOT:
+#   1. draw / click-handle a minimize titlebar button (Wayland has no
+#      standard minimize protocol; supporting it well requires deeper
+#      synthetic-surface plumbing deferred to a follow-up PR).
+#   2. expose `zxdg_decoration_manager_v1` for client SSD/CSD negotiation
+#      (we unilaterally render internal SSDs via DecorationManager; the
+#      proper protocol handler is deferred to a follow-up PR).
+# Flip either to `true` to opt back in (the matching implementation must
+# already exist or the flag is currently a no-op).
+[features]
+enable_minimize = false
+enable_xdg_decoration_protocol = false

@@ -10,6 +10,7 @@
 //! - 6.4: GL scissor-based window placeholder rendering at correct workspace positions
 
 use crate::config::AxiomConfig;
+use crate::decoration::DecorationManager;
 use crate::effects::EffectsEngine;
 use crate::input::InputManager;
 use crate::renderer::AxiomRenderer;
@@ -32,6 +33,7 @@ use smithay::{
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
     delegate_compositor, delegate_data_device, delegate_seat, delegate_shm, delegate_xdg_shell,
+    delegate_xdg_decoration, delegate_layer_shell, delegate_foreign_toplevel_list,
     input::{
         keyboard::{FilterResult, XkbConfig},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
@@ -55,8 +57,11 @@ use smithay::{
         },
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+            decoration::{XdgDecorationState, XdgDecorationHandler},
         },
+        shell::wlr_layer::{WlrLayerShellHandler, WlrLayerShellState},
         shm::{with_buffer_contents, ShmHandler, ShmState},
+        foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListState},
     },
 };
 
@@ -151,14 +156,27 @@ pub struct State {
     pub window_map: HashMap<u64, u32>,
     pub next_window_id: u64,
 
+    /// Maps X11 window IDs to Axiom window IDs for XWayland clients.
+    pub x11_window_map: HashMap<u32, u64>,
+
     // Outputs
     pub outputs: Vec<Output>,
 
     // XWayland (optional)
     pub xwm: Option<AxiomXwm>,
 
+    /// Server-side decoration manager for titlebar/button rendering.
+    /// Shared with [`AxiomCompositor`](crate::compositor::AxiomCompositor).
+    pub decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
+
     // Keep ToplevelSurface handles alive (they get destroyed when dropped)
     pub toplevels: HashMap<u32, ToplevelSurface>,
+
+    /// Foreign-toplevel protocol handles keyed by Axiom surface id.
+    pub foreign_toplevel_handles: HashMap<u32, ForeignToplevelHandle>,
+
+    /// Foreign-toplevel-list protocol state.
+    pub foreign_toplevel_list_state: ForeignToplevelListState,
 
     // Running state
     pub running: bool,
@@ -239,10 +257,56 @@ impl State {
         self.surfaces.insert(surface_id, surface_data);
         self.window_map.insert(window_id, surface_id);
 
+        // Register with DecorationManager using real window geometry.
+        self.decoration_manager.write().add_window(
+            window_id,
+            String::from("Wayland Client"),
+            /* prefers_server_side */ true,
+            640,
+        );
+
+        window_id
+    }
+
+    /// Create a new Axiom window for an X11 client (via XWayland).
+    pub fn create_window_from_x11(&mut self, x11_window_id: u32, title: String) -> u64 {
+        info!(
+            "Creating window from X11 window {} (title: \"{}\")",
+            x11_window_id, title
+        );
+
+        let window_id = self.window_manager.write().add_window(title.clone());
+        self.workspace_manager.write().add_window(window_id);
+        self.effects_engine.write().animate_window_open(window_id);
+
+        self.decoration_manager.write().add_window(
+            window_id,
+            title.clone(),
+            /* prefers_server_side */ true,
+            640,
+        );
+
+        self.x11_window_map.insert(x11_window_id, window_id);
+
+        // Mint a ForeignToplevelHandle for external taskbars
+        let ftl_handle = self
+            .foreign_toplevel_list_state
+            .new_toplevel::<State>(title, String::from("xwayland"));
+        let synthetic_surface_id = x11_window_id | 0x8000_0000;
+        self.foreign_toplevel_handles
+            .insert(synthetic_surface_id, ftl_handle);
+
         window_id
     }
 
     pub fn destroy_window(&mut self, surface_id: u32) {
+        // Drop the FTL handle BEFORE toplevels.remove so external
+        // taskbars see the closed event before any Axiom-internal collapse.
+        if let Some(handle) = self.foreign_toplevel_handles.remove(&surface_id) {
+            handle.send_closed();
+            self.foreign_toplevel_list_state.remove_toplevel(&handle);
+        }
+
         // Release the toplevel handle to prevent memory leaks
         self.toplevels.remove(&surface_id);
 
@@ -253,12 +317,13 @@ impl State {
         if let Some(data) = self.surfaces.remove(&surface_id) {
             if let Some(window_id) = data.window_id {
                 info!(
-                    "🗑️ Destroying window {} (was: \"{}\")",
+                    "Destroying window {} (was: \"{}\")",
                     window_id, data.title
                 );
                 self.window_map.remove(&window_id);
                 self.window_manager.write().remove_window(window_id);
                 self.workspace_manager.write().remove_window(window_id);
+                self.decoration_manager.write().remove_window(window_id);
             }
         }
     }
@@ -662,7 +727,11 @@ delegate_shm!(State);
 delegate_seat!(State);
 delegate_xdg_shell!(State);
 delegate_data_device!(State);
+delegate_foreign_toplevel_list!(State);
+delegate_xdg_decoration!(State);
+smithay::delegate_layer_shell!(State);
 smithay::delegate_output!(State);
+smithay::delegate_layer_shell!(State);
 
 // ============================================================================
 // Backend Struct
@@ -697,6 +766,7 @@ impl AxiomSmithayBackendReal {
         effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
         input_manager: Arc<parking_lot::RwLock<InputManager>>,
         renderer: Option<Arc<parking_lot::RwLock<AxiomRenderer>>>,
+        decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
     ) -> Result<Self> {
         // Use a dummy display (bound to "null" — never dispatched)
         let display = Display::new()?;
@@ -706,6 +776,9 @@ impl AxiomSmithayBackendReal {
         let shm_state = ShmState::new::<State>(&dh, vec![]);
         let xdg_shell_state = XdgShellState::new::<State>(&dh);
         let data_device_state = DataDeviceState::new::<State>(&dh);
+        let foreign_toplevel_list_state = ForeignToplevelListState::new::<State>(&dh);
+        let decoration_state = XdgDecorationState::new::<State>(&dh);
+        let layer_shell_state = WlrLayerShellState::new::<State>(&dh);
 
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(&dh, "axiom-test");
@@ -716,6 +789,8 @@ impl AxiomSmithayBackendReal {
             shm_state,
             seat_state,
             data_device_state,
+            decoration_state,
+            layer_shell_state,
             seat,
             config,
             window_manager,
@@ -726,9 +801,13 @@ impl AxiomSmithayBackendReal {
             surfaces: HashMap::new(),
             window_map: HashMap::new(),
             next_window_id: 1,
+            x11_window_map: HashMap::new(),
             outputs: Vec::new(),
             xwm: None,
+            decoration_manager: decoration_manager.clone(),
             toplevels: HashMap::new(),
+            foreign_toplevel_handles: HashMap::new(),
+            foreign_toplevel_list_state,
             running: true,
             needs_redraw: true,
             window_width: 1920,
@@ -767,8 +846,9 @@ impl AxiomSmithayBackendReal {
         effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
         input_manager: Arc<parking_lot::RwLock<InputManager>>,
         renderer: Arc<parking_lot::RwLock<AxiomRenderer>>,
+        decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
     ) -> Result<Self> {
-        info!("🚀 Initializing Smithay 0.7 Backend...");
+        info!("Initializing Smithay 0.7 Backend...");
 
         let display: Display<State> = Display::new()?;
         let dh = display.handle();
@@ -777,6 +857,9 @@ impl AxiomSmithayBackendReal {
         let shm_state = ShmState::new::<State>(&dh, vec![]);
         let xdg_shell_state = XdgShellState::new::<State>(&dh);
         let data_device_state = DataDeviceState::new::<State>(&dh);
+        let foreign_toplevel_list_state = ForeignToplevelListState::new::<State>(&dh);
+        let decoration_state = XdgDecorationState::new::<State>(&dh);
+        let layer_shell_state = WlrLayerShellState::new::<State>(&dh);
 
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(&dh, "axiom");
@@ -803,6 +886,8 @@ impl AxiomSmithayBackendReal {
             shm_state,
             seat_state,
             data_device_state,
+            decoration_state,
+            layer_shell_state,
             seat,
             config,
             window_manager,
@@ -813,9 +898,13 @@ impl AxiomSmithayBackendReal {
             surfaces: HashMap::new(),
             window_map: HashMap::new(),
             next_window_id: 1,
+            x11_window_map: HashMap::new(),
             outputs: vec![output],
             xwm: None,
+            decoration_manager: decoration_manager.clone(),
             toplevels: HashMap::new(),
+            foreign_toplevel_handles: HashMap::new(),
+            foreign_toplevel_list_state,
             running: true,
             needs_redraw: true,
             window_width: 1920,
@@ -1379,6 +1468,7 @@ impl AxiomSmithayBackendReal {
                             h,
                             screen_w: ww,
                             screen_h: wh,
+                            alpha: 1.0,
                         },
                     );
                 } else {
@@ -1449,6 +1539,7 @@ impl AxiomSmithayBackendReal {
                             h: popup_h,
                             screen_w: ww,
                             screen_h: wh,
+                            alpha: 1.0,
                         },
                     );
                 } else {

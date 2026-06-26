@@ -27,6 +27,11 @@ pub(super) struct TexQuadParams {
     pub h: i32,
     pub screen_w: u32,
     pub screen_h: u32,
+    /// Texture alpha multiplier passed to the shader's `u_alpha`
+    /// uniform. Together with `GL_BLEND` enabled on this draw call
+    /// (set by [`draw_textured_quad`]), this controls window open/close
+    /// fade. Plain `1.0` for opaque windows.
+    pub alpha: f32,
 }
 
 /// Check for OpenGL errors and log any found.
@@ -127,8 +132,14 @@ pub(super) fn ensure_shader_program(
             precision mediump float;
             varying vec2 v_texcoord;
             uniform sampler2D u_texture;
+            // Per-quad alpha multiplier — driven by `TexQuadParams::alpha`.
+            // GL_BLEND must be enabled by the caller (with `SRC_ALPHA,
+            // ONE_MINUS_SRC_ALPHA`) or reduced alpha values overwrite the
+            // framebuffer instead of revealing the background through.
+            uniform float u_alpha;
             void main() {
-                gl_FragColor = texture2D(u_texture, v_texcoord);
+                vec4 tc = texture2D(u_texture, v_texcoord);
+                gl_FragColor = vec4(tc.rgb, tc.a * u_alpha);
             }
         "#;
 
@@ -232,6 +243,11 @@ pub(super) fn upload_gl_texture(
 /// Draw a textured quad in pixel coordinates using the cached shader
 /// program. Pixel coords are converted to NDC inside the helper.
 ///
+/// Enables `GL_BLEND` (with `SRC_ALPHA, ONE_MINUS_SRC_ALPHA`) so the
+/// shader's `u_alpha` uniform can fade windows during open/close
+/// animations. `BLEND` is disabled on exit so subsequent draws (e.g.
+/// clear scissor placeholders) keep opaque blending.
+///
 /// # Safety
 /// Caller must ensure a GL context is current and `tex_id` is a valid GL
 /// texture handle (e.g. from [`upload_gl_texture`]).
@@ -262,11 +278,25 @@ pub(super) fn draw_textured_quad(
     // SAFETY: GL context is current. UseProgram / BindTexture /
     // VertexAttribPointer all reference `vertices` (stack-allocated,
     // outlives the draw call) and `tex_id` (validated by caller).
-    // Attrib arrays are disabled before exit.
+    // Attrib arrays are disabled before exit; GL_BLEND state is reset
+    // to disabled so the next draw (scissor placeholder, etc.) does
+    // not unexpectedly composite.
     unsafe {
+        gl::Enable(gl::BLEND);
+        gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
         gl::UseProgram(prog);
         gl::ActiveTexture(gl::TEXTURE0);
         gl::BindTexture(gl::TEXTURE_2D, tex_id);
+
+        // Drive the new `u_alpha` uniform. Located against the linked
+        // program; if for any reason the linker stripped it (driver
+        // bug, stale cache), GetUniformLocation returns -1 and we
+        // silently fall through — the fragment shader's default then
+        // renders fully opaque, matching the pre-PR behaviour.
+        let alpha_loc = gl::GetUniformLocation(prog, c"u_alpha".as_ptr());
+        if alpha_loc >= 0 {
+            gl::Uniform1f(alpha_loc as gl::types::GLint, params.alpha);
+        }
 
         let pos_loc = gl::GetAttribLocation(prog, c"a_position".as_ptr());
         let tex_loc = gl::GetAttribLocation(prog, c"a_texcoord".as_ptr());
@@ -307,6 +337,7 @@ pub(super) fn draw_textured_quad(
 
         gl::BindTexture(gl::TEXTURE_2D, 0);
         gl::UseProgram(0);
+        gl::Disable(gl::BLEND);
     }
 }
 

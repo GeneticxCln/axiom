@@ -46,9 +46,98 @@ pub struct AxiomConfig {
     #[serde(default)]
     pub xwayland: XWaylandConfig,
 
+    /// Backend selection (winit / drm / noop). Default is `winit` for
+    /// development; production users override via `--backend=drm`.
+    /// Stored as `String` here so the config schema is self-contained
+    /// and parses without pulling in the backend module.
+    #[serde(default)]
+    pub backend: BackendConfig,
+
+    /// Feature kill-switches for features we deliberately *minimize* to
+    /// keep the implementation surface focused. Both are `false` by
+    /// default so out-of-the-box Axiom does NOT:
+    /// 1. Draw / handle a minimize button on the titlebar (there is no
+    ///    Wayland minimize protocol per se — this would require building
+    ///    a compositor-internal iconified-window list + a round-trip
+    ///    with a synthetic Wayland surface to notify clients, which is
+    ///    deeper protocol work than the current milestone aims for).
+    /// 2. Register the `zxdg_decoration_manager_v1` global for clients
+    ///    to negotiate SSD↔CSD preference with us. We unilaterally
+    ///    render the internal SSD via `DecorationManager` today; the
+    ///    proper XdgDecorationHandler is deferred to a follow-up.
+    ///
+    /// Users can opt back into either independently by setting the
+    /// matching flag to `true` (and then supplying the corresponding
+    /// implementation when wiring time comes).
+    #[serde(default)]
+    pub features: FeaturesConfig,
+
     /// General compositor settings
     #[serde(default)]
     pub general: GeneralConfig,
+}
+
+/// Feature kill-switches. Both flags default to `false` — see the
+/// [`AxiomConfig::features`] field for the rationale. The fields are
+/// `pub` so anyone reading the config directly can see the public
+/// surface; the helpers below just exist for `#[serde(default = ...)]`
+/// to point at so TOML deserialization works without a `[features]`
+/// header at all.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeaturesConfig {
+    /// Enable the titlebar's minimize button + `DecorationAction::Minimize`
+    /// event handling. Disabled by default.
+    #[serde(default = "FeaturesConfig::default_enable_minimize")]
+    pub enable_minimize: bool,
+
+    /// Enable the `xdg-decoration-unstable-v1` Wayland protocol global so
+    /// clients can negotiate SSD/CSD with the compositor. Disabled by
+    /// default (the handler is not implemented yet; the flag is a
+    /// forward-looking no-op until implementation lands).
+    #[serde(default = "FeaturesConfig::default_enable_xdg_decoration_protocol")]
+    pub enable_xdg_decoration_protocol: bool,
+}
+
+impl Default for FeaturesConfig {
+    fn default() -> Self {
+        Self {
+            enable_minimize: Self::default_enable_minimize(),
+            enable_xdg_decoration_protocol: Self::default_enable_xdg_decoration_protocol(),
+        }
+    }
+}
+
+impl FeaturesConfig {
+    /// Serde default accessor so `[features]` can be omitted entirely.
+    /// Kept as a static method to match the existing accessors on the
+    /// other config substructs (see [`WorkspaceConfig::default_momentum_friction`]).
+    fn default_enable_minimize() -> bool {
+        false
+    }
+    fn default_enable_xdg_decoration_protocol() -> bool {
+        false
+    }
+}
+
+/// Backend selection section of [`AxiomConfig`].
+///
+/// The `kind` field accepts `"winit"`, `"drm"`, or `"noop"` (plus
+/// `from_config_str` aliases like `"kms"`, `"tty"`, `"windowed"`, etc.).
+/// Unknown values fall back to `winit` and emit a warning so a typo
+/// never bricks startup. See [`BackendKind`](crate::backend::BackendKind)
+/// for the parsed enum used by the rest of the compositor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BackendConfig {
+    /// Backend kind name. See [`BackendConfig::default`] for valid values.
+    pub kind: String,
+}
+
+impl Default for BackendConfig {
+    fn default() -> Self {
+        Self {
+            kind: "winit".to_string(),
+        }
+    }
 }
 
 /// Scrollable workspace configuration (niri-inspired)
@@ -185,7 +274,9 @@ pub struct WindowConfig {
     /// Inactive border color  
     pub inactive_border_color: String,
 
-    /// Gap between windows (pixels)
+    /// Gap between windows (pixels).
+    /// Deprecated: use `workspace.gaps` instead. This field is accepted
+    /// for backward compatibility but does not affect layout.
     pub gap: u32,
 
     /// Default layout algorithm ("horizontal", "vertical")
@@ -232,6 +323,15 @@ pub struct BindingsConfig {
     /// Toggle fullscreen for focused window
     pub toggle_fullscreen: String,
 
+    /// Toggle floating state for focused window
+    pub toggle_floating: String,
+
+    /// Toggle the focused window's minimized state. Disabled in
+    /// practice when `[features].enable_minimize = false`, but the
+    /// binding itself is always loaded so the input layer does not
+    /// have to know about feature flags.
+    pub toggle_minimize: String,
+
     /// Launch terminal
     pub launch_terminal: String,
 
@@ -262,7 +362,7 @@ pub struct GeneralConfig {
     /// Enable debug logging
     pub debug: bool,
 
-    /// Max FPS limit (0 = unlimited)
+    /// Max FPS limit (0 = unlimited, default: 60)
     pub max_fps: u32,
 
     /// Enable VSync
@@ -377,6 +477,11 @@ impl Default for BindingsConfig {
             move_window_right: "Super+Shift+Right".to_string(),
             close_window: "Super+q".to_string(),
             toggle_fullscreen: "Super+f".to_string(),
+            toggle_floating: "Super+Shift+Space".to_string(),
+            // `grave` (`) is a common minimize hotkey (Hyprland default).
+            // The action is a no-op when `[features].enable_minimize = false`,
+            // so a user who sets the flag off won't be confused.
+            toggle_minimize: "Super+grave".to_string(),
             launch_terminal: "Super+Enter".to_string(),
             launch_launcher: "Super+Space".to_string(),
             toggle_effects: "Super+e".to_string(),
@@ -398,7 +503,7 @@ impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
             debug: false,
-            max_fps: 0,
+            max_fps: 60,
             vsync: true,
         }
     }

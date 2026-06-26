@@ -14,12 +14,12 @@
 use anyhow::Result;
 use log::{debug, info};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 // Type aliases for renderer effect queues reduce type complexity.
 type ShadowQueue = HashMap<u64, ((f32, f32), (f32, f32), crate::effects::ShadowParams)>;
 type BlurQueue = HashMap<u64, ((f32, f32), (f32, f32), crate::effects::BlurParams)>;
-use std::time::Duration;
 use wgpu::util::DeviceExt;
 #[allow(clippy::wildcard_imports)]
 use wgpu::*;
@@ -43,7 +43,7 @@ pub struct AxiomRenderer {
     surfaces: HashMap<String, (wgpu::Surface<'static>, wgpu::SurfaceConfiguration)>,
 
     /// Rendered windows (global list, layout determines where they go)
-    windows: Vec<RenderedWindow>,
+    pub windows: Vec<RenderedWindow>,
 
     /// Per-frame shadow queue: window_id -> (position, size, shadow_params)
     /// Populated by render_frame() each tick, consumed by surface rendering passes.
@@ -52,10 +52,6 @@ pub struct AxiomRenderer {
     /// Per-frame blur queue: window_id -> (position, size, blur_params)
     /// Populated by render_frame() each tick, consumed by surface rendering passes.
     window_blurs: BlurQueue,
-
-    /// Fallback size if no surface found
-    #[allow(dead_code)]
-    default_size: (u32, u32),
 
     /// Headless output texture + view for off-screen shadow/blur passes.
     /// Created lazily and resized when dimensions change. Used by render()
@@ -72,6 +68,21 @@ pub struct AxiomRenderer {
     /// dimensions change.
     cached_projection_buffer: Option<Buffer>,
     cached_projection_dims: (u32, u32),
+
+    /// Per-frame effect queue sizes tracked atomically so the backend can
+    /// observe "is work pending?" with relaxed loads without taking the
+    /// renderer's RwLock. Each `queue_*`/`clear_*` mutation mirrors into
+    /// the corresponding counter. Drained (set to 0) on `clear_*` and on
+    /// any successful composite in `composite_effects_on_buffer`.
+    pending_shadows: AtomicUsize,
+    pending_blurs: AtomicUsize,
+
+    /// Border width in pixels for window decoration
+    border_width: f32,
+    /// Cached border width used in the last per-window uniform buffer writes.
+    /// Compared with `self.border_width` to detect when all window uniform
+    /// buffers need invalidation (border width is baked into each uniform).
+    cached_border_width: f32,
 }
 
 /// Represents a rendered window surface
@@ -91,6 +102,21 @@ pub struct RenderedWindow {
     pub dirty: bool,
     /// Window opacity
     pub opacity: f32,
+
+    /// Cached uniform buffer — reused across frames to avoid per-frame GPU
+    /// allocation. Recreated when opacity, size, or border width changes.
+    pub cached_uniform_buffer: Option<Buffer>,
+    pub cached_opacity: f32,
+    /// Cached (width, height) used in the last uniform buffer write.
+    /// Compared with current `self.size` to detect resize-driven
+    /// invalidation independent of opacity changes.
+    pub cached_uniform_size: (f32, f32),
+
+    /// Cached vertex buffer — reused across frames. Recreated only when
+    /// position or size changes.
+    pub cached_vertex_buffer: Option<Buffer>,
+    pub cached_position: (f32, f32),
+    pub cached_size: (f32, f32),
 }
 
 /// Vertex data for rendering quads
@@ -105,28 +131,9 @@ struct Vertex {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct WindowUniforms {
     opacity: f32,
-    padding: [f32; 3], // Alignment
-}
-
-static RENDER_STATE: OnceLock<Arc<Mutex<SharedRenderState>>> = OnceLock::new();
-
-#[derive(Default)]
-struct SharedRenderState {
-    #[allow(clippy::type_complexity)]
-    placeholders: HashMap<u64, ((f32, f32), (f32, f32), f32)>,
-}
-
-/// Push a deferred placeholder quad for window `id` to the global render
-/// state. Consumed by the headless render loop (see
-/// [`AxiomRenderer::start_headless_loop`]). Used by demos and tests that
-/// want a visible rectangle without going through the Wayland buffer
-/// upload path.
-pub fn push_placeholder_quad(id: u64, position: (f32, f32), size: (f32, f32), opacity: f32) {
-    if let Some(state) = RENDER_STATE.get() {
-        if let Ok(mut s) = state.lock() {
-            s.placeholders.insert(id, (position, size, opacity));
-        }
-    }
+    border_width: f32,
+    window_width: f32,
+    window_height: f32,
 }
 
 impl AxiomRenderer {
@@ -303,12 +310,15 @@ impl AxiomRenderer {
             windows: Vec::new(),
             window_shadows: HashMap::with_capacity(64),
             window_blurs: HashMap::with_capacity(64),
-            default_size: (width, height),
             headless_target: None,
             render_pipeline,
             sampler,
             cached_projection_buffer: None,
             cached_projection_dims: (0, 0),
+            border_width: 2.0,
+            cached_border_width: 2.0,
+            pending_shadows: AtomicUsize::new(0),
+            pending_blurs: AtomicUsize::new(0),
         })
     }
 
@@ -460,12 +470,15 @@ impl AxiomRenderer {
             windows: Vec::new(),
             window_shadows: HashMap::with_capacity(64),
             window_blurs: HashMap::with_capacity(64),
-            default_size: (1920, 1080),
             headless_target: None,
             render_pipeline,
             sampler,
             cached_projection_buffer: None,
             cached_projection_dims: (0, 0),
+            border_width: 2.0,
+            cached_border_width: 2.0,
+            pending_shadows: AtomicUsize::new(0),
+            pending_blurs: AtomicUsize::new(0),
         })
     }
 
@@ -540,6 +553,12 @@ impl AxiomRenderer {
             texture_view: None,
             dirty: true,
             opacity: 1.0,
+            cached_uniform_buffer: None,
+            cached_opacity: f32::NAN,
+            cached_uniform_size: (f32::NAN, f32::NAN),
+            cached_vertex_buffer: None,
+            cached_position: (f32::NAN, f32::NAN),
+            cached_size: (f32::NAN, f32::NAN),
         };
 
         self.windows.push(window);
@@ -567,6 +586,12 @@ impl AxiomRenderer {
                 texture_view: None,
                 dirty: true,
                 opacity,
+                cached_uniform_buffer: None,
+                cached_opacity: f32::NAN,
+                cached_uniform_size: (f32::NAN, f32::NAN),
+                cached_vertex_buffer: None,
+                cached_position: (f32::NAN, f32::NAN),
+                cached_size: (f32::NAN, f32::NAN),
             };
             self.windows.push(window);
         }
@@ -657,6 +682,59 @@ impl AxiomRenderer {
         // Clear any stale queues without doing extra GPU work.
         self.window_shadows.clear();
         self.window_blurs.clear();
+        self.pending_shadows.store(0, Ordering::Relaxed);
+        self.pending_blurs.store(0, Ordering::Relaxed);
+    }
+
+    /// Non-locking observation of whether any post-processing effect has
+    /// been queued for the current frame. Used by the backend to decide
+    /// whether to perform the (expensive) GL→WGPU ping-pong or submit the
+    /// GL framebuffer directly.
+    ///
+    /// Returns `false` when there is nothing to do. The atomic loads are
+    /// ordered Relaxed because callers only need eventual consistency —
+    /// at worst, a freshly-queued effect will be observed on the next
+    /// render, and a stale count simply gates one extra round-trip.
+    pub fn has_pending_post_process(&self) -> bool {
+        self.pending_shadows.load(Ordering::Relaxed) > 0
+            || self.pending_blurs.load(Ordering::Relaxed) > 0
+    }
+
+    /// Run the GPU effects composite, but only when there is work to do.
+    ///
+    /// This is the only entry point that performs the GL->WGPU->GL round
+    /// trip. When `has_pending_post_process()` is `false` (or no
+    /// `effects_engine` is wired), the per-frame queues are drained and
+    /// `Ok(None)` is returned -- the caller should submit the GL
+    /// framebuffer unchanged. When work IS queued and the effects engine
+    /// is available, the full round-trip runs and a processed RGBA buffer
+    /// is returned for the caller to upload back into GL.
+    ///
+    /// Internally delegates to the (now-deprecated) round-trip helper for
+    /// the warm path; the `#[allow(deprecated)]` keeps that single call
+    /// quiet without polluting the public recommendation channel.
+    #[allow(deprecated)]
+    pub fn drain_post_process(
+        &mut self,
+        width: u32,
+        height: u32,
+        gl_pixels: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>> {
+        let has_effects =
+            !self.window_shadows.is_empty() || !self.window_blurs.is_empty();
+        if !has_effects || self.effects_engine.is_none() {
+            // Drop the readback bytes immediately — they would be
+            // discarded downstream (replaced by the original GL
+            // framebuffer) and not paying for them in the cold path is
+            // the entire point of this optimisation.
+            self.window_shadows.clear();
+            self.window_blurs.clear();
+            self.pending_shadows.store(0, Ordering::Relaxed);
+            self.pending_blurs.store(0, Ordering::Relaxed);
+            return Ok(None);
+        }
+        let processed = self.composite_effects_on_buffer(&gl_pixels, width, height)?;
+        Ok(Some(processed))
     }
 
     /// Composite shadow/blur effects onto an existing RGBA framebuffer.
@@ -666,7 +744,19 @@ impl AxiomRenderer {
     /// effects are queued or no effects engine is wired, returns the input
     /// unchanged (clipped to `width * height * 4` bytes).
     ///
+    /// ***Prefer [`drain_post_process`] from backend code:*** this method
+    /// forces a full GL→WGPU→GL ping-pong even when nothing is queued. The
+    /// drain entry point skips both the CPU readback allocation *and* the
+    /// upload/composite when [`has_pending_post_process`] is `false`.
+    ///
     /// The internal shadow and blur queues are consumed by this call.
+    ///
+    /// [`drain_post_process`]: AxiomRenderer::drain_post_process
+    /// [`has_pending_post_process`]: AxiomRenderer::has_pending_post_process
+    #[deprecated(
+        since = "0.1.0",
+        note = "use drain_post_process instead -- it skips the GL->CPU readback allocation when no shadows/blurs are queued"
+    )]
     pub fn composite_effects_on_buffer(
         &mut self,
         input_rgba: &[u8],
@@ -683,6 +773,8 @@ impl AxiomRenderer {
         if !has_effects || self.effects_engine.is_none() {
             self.window_shadows.clear();
             self.window_blurs.clear();
+            self.pending_shadows.store(0, Ordering::Relaxed);
+            self.pending_blurs.store(0, Ordering::Relaxed);
             return Ok(input_rgba
                 .get(..expected_len)
                 .unwrap_or(input_rgba)
@@ -691,7 +783,7 @@ impl AxiomRenderer {
 
         // Ensure headless target exists and is correctly sized
         let (headless_tex, target_view) =
-            ensure_headless_target(&self.device, &mut self.headless_target, width, height);
+            ensure_headless_target(&self.device, &mut self.headless_target, width, height)?;
 
         // Upload the GL framebuffer contents into the headless WGPU texture
         let upload_size = wgpu::Extent3d {
@@ -822,6 +914,8 @@ impl AxiomRenderer {
         // Consume per-frame effect queues
         self.window_shadows.clear();
         self.window_blurs.clear();
+        self.pending_shadows.store(0, Ordering::Relaxed);
+        self.pending_blurs.store(0, Ordering::Relaxed);
 
         debug!(
             "🖥️ GL-bridged effects composite: {}x{} ({} bytes)",
@@ -869,109 +963,67 @@ impl AxiomRenderer {
         }
     }
 
-    /// Render all windows to a wgpu surface (real rendering).
-    /// Uses the provided `config` for projection dimensions — no longer
-    /// picks an arbitrary first surface from the map.
-    pub fn render_to_surface(
-        &mut self,
-        _surface: &wgpu::Surface<'_>,
-        config: &wgpu::SurfaceConfiguration,
-        surface_texture: &wgpu::SurfaceTexture,
-    ) -> Result<()> {
-        debug!("🎨 Rendering {} windows to surface", self.windows.len());
+    /// Recreate per-window uniform and vertex buffers when their
+    /// source data (opacity, size, border width, position) has changed.
+    ///
+    /// This method is extracted from [`render_to_surface`] so it can be
+    /// exercised in integration tests without requiring a real
+    /// `wgpu::Surface`. After calling it, each `RenderedWindow` that has a
+    /// texture will have `cached_uniform_buffer` and
+    /// `cached_vertex_buffer` populated with up-to-date GPU buffers.
+    ///
+    /// Idempotent — windows whose state hasn't changed are left untouched
+    /// and the return value only reflects windows that actually needed
+    /// recreation this pass.
+    pub fn prepare_window_resources(&mut self) {
+        self.cached_border_width = self.border_width;
 
-        let view = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
-
-        let width = config.width as f32;
-        let height = config.height as f32;
-
-        // Reuse cached projection buffer when dimensions haven't changed.
-        // This avoids the dominant per-frame GPU allocation in this function.
-        let dims = (config.width, config.height);
-        if self.cached_projection_dims != dims {
-            let projection = create_projection_matrix(width, height);
-            let flat: Vec<f32> = projection.iter().flatten().copied().collect();
-            let contents = bytemuck::cast_slice(&flat);
-
-            if let Some(ref buf) = self.cached_projection_buffer {
-                // Existing buffer is wrong size — rebuild via a fresh one
-                // (write_buffer can't resize). Drop implicitly and replace.
-                let _ = buf;
-                self.cached_projection_buffer = Some(self.device.create_buffer_init(
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("Projection Uniform Buffer"),
-                        contents,
-                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    },
-                ));
-            } else {
-                self.cached_projection_buffer = Some(self.device.create_buffer_init(
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("Projection Uniform Buffer"),
-                        contents,
-                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    },
-                ));
+        for window in &mut self.windows {
+            if window.texture_view.is_none() {
+                continue;
             }
-            self.cached_projection_dims = dims;
-        }
 
-        let uniform_buffer = self
-            .cached_projection_buffer
-            .as_ref()
-            .expect("projection buffer initialized");
+            // Uniform buffer invalidation: opacity, size, or border width
+            let opacity_changed =
+                (window.cached_opacity - window.opacity).abs() > f32::EPSILON;
+            let size_changed = (window.cached_uniform_size.0 - window.size.0).abs()
+                > f32::EPSILON
+                || (window.cached_uniform_size.1 - window.size.1).abs() > f32::EPSILON;
+            let border_changed =
+                (self.cached_border_width - self.border_width).abs() > f32::EPSILON;
 
-        // Prepare resources before starting render pass to avoid lifetime issues
-        let mut draw_commands = Vec::new();
-
-        for window in &self.windows {
-            if let Some(texture_view) = &window.texture_view {
-                // Create window uniform buffer
+            if opacity_changed
+                || size_changed
+                || border_changed
+                || window.cached_uniform_buffer.is_none()
+            {
                 let window_uniforms = WindowUniforms {
                     opacity: window.opacity,
-                    padding: [0.0; 3],
+                    border_width: self.border_width,
+                    window_width: window.size.0,
+                    window_height: window.size.1,
                 };
-                let window_uniform_buffer =
-                    self.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                window.cached_uniform_buffer =
+                    Some(self.device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
                             label: Some(&format!("Window {} Uniforms", window.id)),
                             contents: bytemuck::cast_slice(&[window_uniforms]),
-                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                        });
+                            usage: wgpu::BufferUsages::UNIFORM
+                                | wgpu::BufferUsages::COPY_DST,
+                        },
+                    ));
+                window.cached_opacity = window.opacity;
+                window.cached_uniform_size = window.size;
+            }
 
-                // Create bind group for this window
-                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    layout: &self.render_pipeline.get_bind_group_layout(0),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: uniform_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(texture_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: window_uniform_buffer.as_entire_binding(),
-                        },
-                    ],
-                    label: Some(&format!("Window {} Bind Group", window.id)),
-                });
+            // Vertex buffer invalidation: position or size
+            let pos_changed = (window.cached_position.0 - window.position.0).abs()
+                > f32::EPSILON
+                || (window.cached_position.1 - window.position.1).abs() > f32::EPSILON;
+            let size_changed = (window.cached_size.0 - window.size.0).abs() > f32::EPSILON
+                || (window.cached_size.1 - window.size.1).abs() > f32::EPSILON;
 
-                // Create vertex buffer for this window
+            if pos_changed || size_changed || window.cached_vertex_buffer.is_none() {
                 let x = window.position.0;
                 let y = window.position.1;
                 let w = window.size.0;
@@ -1004,13 +1056,114 @@ impl AxiomRenderer {
                     },
                 ];
 
-                let vertex_buffer =
-                    self.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                window.cached_vertex_buffer =
+                    Some(self.device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
                             label: Some(&format!("Window {} Vertex Buffer", window.id)),
                             contents: bytemuck::cast_slice(&vertices),
                             usage: wgpu::BufferUsages::VERTEX,
-                        });
+                        },
+                    ));
+                window.cached_position = window.position;
+                window.cached_size = window.size;
+            }
+        }
+    }
+
+    /// Render all windows to a wgpu surface (real rendering).
+    /// Uses the provided `config` for projection dimensions — no longer
+    /// picks an arbitrary first surface from the map.
+    pub fn render_to_surface(
+        &mut self,
+        _surface: &wgpu::Surface<'_>,
+        config: &wgpu::SurfaceConfiguration,
+        surface_texture: &wgpu::SurfaceTexture,
+    ) -> Result<()> {
+        debug!("\u{1f3a8} Rendering {} windows to surface", self.windows.len());
+
+        let view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
+
+        let width = config.width as f32;
+        let height = config.height as f32;
+
+        // Reuse cached projection buffer when dimensions haven't changed.
+        // This avoids the dominant per-frame GPU allocation in this function.
+        let dims = (config.width, config.height);
+        if self.cached_projection_dims != dims {
+            let projection = create_projection_matrix(width, height);
+            let flat: Vec<f32> = projection.iter().flatten().copied().collect();
+            let contents = bytemuck::cast_slice(&flat);
+
+            // Recreate when dimensions change (write_buffer can't resize).
+            // The old buffer is dropped when `Some` is replaced.
+            self.cached_projection_buffer = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("Projection Uniform Buffer"),
+                    contents,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                },
+            ));
+            self.cached_projection_dims = dims;
+        }
+
+        // Delegate per-window uniform/vertex buffer cache management to
+        // the extracted helper so it can be tested in isolation.
+        // Called before borrowing cached_projection_buffer to satisfy
+        // NLL — prepare_window_resources needs &mut self, but
+        // uniform_buffer below needs a shared borrow that lives through
+        // the bind-group loop.
+        self.prepare_window_resources();
+
+        let uniform_buffer = self
+            .cached_projection_buffer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("projection buffer not initialized"))?;
+
+        // Prepare resources before starting render pass to avoid lifetime issues
+        let mut draw_commands = Vec::new();
+
+        for window in &self.windows {
+            if let Some(texture_view) = &window.texture_view {
+                let window_uniform_buffer = window
+                    .cached_uniform_buffer
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("uniform buffer for window {} not initialized", window.id))?;
+
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout: &self.render_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(texture_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: window_uniform_buffer.as_entire_binding(),
+                        },
+                    ],
+                    label: Some(&format!("Window {} Bind Group", window.id)),
+                });
+
+                let vertex_buffer = window
+                    .cached_vertex_buffer
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("vertex buffer for window {} not initialized", window.id))?;
 
                 draw_commands.push((window.id, bind_group, vertex_buffer));
             }
@@ -1063,9 +1216,335 @@ impl AxiomRenderer {
         self.queue.clone()
     }
 
+    /// Render a clear-color fill to a headless target and read it back.
+    ///
+    /// Creates a temporary `RENDER_ATTACHMENT | COPY_SRC` texture at the
+    /// given size, fills it with `(r, g, b, a)` via a render pass, copies
+    /// the result to a staging buffer, and maps it back to the CPU. The
+    /// returned `Vec<u8>` contains `width × height × 4` RGBA bytes.
+    ///
+    /// This exercises the full headless GPU pipeline — texture creation,
+    /// command encoding, render pass, copy, and async buffer mapping —
+    /// without requiring a surface. Useful for integration tests.
+    pub fn render_headless_clear_readback(
+        &self,
+        width: u32,
+        height: u32,
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+    ) -> Result<Vec<u8>> {
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+
+        // Render-target texture
+        let target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Headless Clear Target"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Render pass: clear to the requested color
+        let mut encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Headless Clear Encoder"),
+                });
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Headless Clear Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: r as f64 / 255.0,
+                            g: g as f64 / 255.0,
+                            b: b as f64 / 255.0,
+                            a: a as f64 / 255.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+        }
+
+        // Staging buffer for readback
+        let buffer_size = (width as u64)
+            .saturating_mul(height as u64)
+            .saturating_mul(4);
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Headless Readback Buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &staging,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * width),
+                    rows_per_image: Some(height),
+                },
+            },
+            size,
+        );
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Map and read back
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()
+            .map_err(|_| anyhow::anyhow!("GPU readback channel closed"))??;
+
+        let mapped = slice.get_mapped_range();
+        let result = mapped.to_vec();
+        drop(mapped);
+        staging.unmap();
+
+        Ok(result)
+    }
+
     /// Get instance for external use (creating surfaces)
     pub fn instance(&self) -> Arc<Instance> {
         self.instance.clone()
+    }
+
+    /// Composite all textured windows to a headless render target and
+    /// read the result back to CPU memory.
+    ///
+    /// Creates a temporary headless texture, runs the full compositor
+    /// render pipeline (projection → vertex shader → textured quad
+    /// fragment shader with alpha blending), copies the result to a
+    /// staging buffer, and maps it back as RGBA bytes. The returned
+    /// `Vec<u8>` has `width × height × 4` elements.
+    ///
+    /// This exercises the full textured-quad render path — GPU buffers,
+    /// bind groups, pipeline, draw calls, and readback — without
+    /// needing a `wgpu::Surface`. Designed for integration tests.
+    pub fn render_to_headless_target(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>> {
+        // Ensure per-window GPU buffers are up to date
+        self.prepare_window_resources();
+
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+
+        // Headless render target — must match the pipeline's format.
+        // The headless pipeline was created with Bgra8UnormSrgb.
+        let target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Headless Composite Target"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Reuse cached projection buffer when dimensions match.
+        // Mirrors the optimisation in render_to_surface — avoids
+        // per-frame GPU allocation churn for repeated same-size
+        // headless composites (e.g. integration test loops).
+        let dims = (width, height);
+        if self.cached_projection_dims != dims {
+            let projection = create_projection_matrix(width as f32, height as f32);
+            let flat: Vec<f32> = projection.iter().flatten().copied().collect();
+            self.cached_projection_buffer = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("Headless Projection Uniform"),
+                    contents: bytemuck::cast_slice(&flat),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                },
+            ));
+            self.cached_projection_dims = dims;
+        }
+        let proj_buffer = self
+            .cached_projection_buffer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("projection buffer not initialized"))?;
+
+        let mut encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Headless Composite Encoder"),
+                });
+
+        // Build draw commands before the render pass to keep borrows happy
+        let mut draw_commands = Vec::new();
+        for window in &self.windows {
+            if let Some(texture_view) = &window.texture_view {
+                let window_ub = window
+                    .cached_uniform_buffer
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "uniform buffer for window {} not initialized",
+                            window.id
+                        )
+                    })?;
+                let vertex_buf = window
+                    .cached_vertex_buffer
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "vertex buffer for window {} not initialized",
+                            window.id
+                        )
+                    })?;
+
+                let bind_group =
+                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        layout: &self.render_pipeline.get_bind_group_layout(0),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: proj_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(
+                                    texture_view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(
+                                    &self.sampler,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: window_ub.as_entire_binding(),
+                            },
+                        ],
+                        label: Some(&format!(
+                            "Window {} Headless Bind Group",
+                            window.id
+                        )),
+                    });
+
+                draw_commands.push((window.id, bind_group, vertex_buf));
+            }
+        }
+
+        // Render pass: clear to transparent black, then composite windows
+        {
+            let mut render_pass =
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Headless Composite Pass"),
+                    color_attachments: &[Some(
+                        wgpu::RenderPassColorAttachment {
+                            view: &target_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: 0.0,
+                                    g: 0.0,
+                                    b: 0.0,
+                                    a: 0.0,
+                                }),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        },
+                    )],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+
+            render_pass.set_pipeline(&self.render_pipeline);
+
+            for (_id, bind_group, vertex_buf) in &draw_commands {
+                render_pass.set_bind_group(0, bind_group, &[]);
+                render_pass.set_vertex_buffer(0, vertex_buf.slice(..));
+                render_pass.draw(0..6, 0..1);
+            }
+        }
+
+        // Staging buffer for GPU→CPU readback
+        let buffer_size = (width as u64)
+            .saturating_mul(height as u64)
+            .saturating_mul(4);
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Headless Readback Buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &staging,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * width),
+                    rows_per_image: Some(height),
+                },
+            },
+            size,
+        );
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Map and read back
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()
+            .map_err(|_| anyhow::anyhow!("GPU readback channel closed"))??;
+
+        let mapped = slice.get_mapped_range();
+        let result = mapped.to_vec();
+        drop(mapped);
+        staging.unmap();
+
+        Ok(result)
     }
 
     /// Render to a surface with optional shadow post-processing.
@@ -1192,6 +1671,8 @@ impl AxiomRenderer {
         // Clear per-frame effect queues after consumption
         self.window_shadows.clear();
         self.window_blurs.clear();
+        self.pending_shadows.store(0, Ordering::Relaxed);
+        self.pending_blurs.store(0, Ordering::Relaxed);
 
         Ok(())
     }
@@ -1205,6 +1686,26 @@ impl AxiomRenderer {
         self.effects_engine = Some(engine);
     }
 
+    /// Set the border width in pixels for window decoration rendering.
+    ///
+    /// When the border width changes, all per-window uniform buffers are
+    /// invalidated so the next `render_to_surface` pass will recreate them
+    /// with the updated value. Without this, windows whose opacity hasn't
+    /// changed would render with a stale border width baked into their
+    /// cached uniform buffer.
+    pub fn set_border_width(&mut self, width: f32) {
+        if (self.border_width - width).abs() < f32::EPSILON {
+            return;
+        }
+        self.border_width = width;
+        // Invalidate all per-window uniform buffer caches: border_width is
+        // embedded in every WindowUniforms write, so they must be
+        // regenerated on the next render pass.
+        for window in &mut self.windows {
+            window.cached_uniform_buffer = None;
+        }
+    }
+
     /// Queue shadow rendering for a window. Called each frame from render_frame()
     /// with data pulled from the effects engine. Shadows are consumed by the
     /// surface rendering pass (render_to_surface_with_shadows).
@@ -1216,11 +1717,18 @@ impl AxiomRenderer {
         params: crate::effects::ShadowParams,
     ) {
         self.window_shadows.insert(id, (position, size, params));
+        // Mirror the queue length into the atomic so the backend can
+        // observe whether work is pending without acquiring the renderer
+        // lock. `len()` is O(1) for HashMap and reflects reality after
+        // the insert.
+        self.pending_shadows
+            .store(self.window_shadows.len(), Ordering::Relaxed);
     }
 
     /// Clear the per-frame shadow queue (should be called at the start of each frame).
     pub fn clear_shadows(&mut self) {
         self.window_shadows.clear();
+        self.pending_shadows.store(0, Ordering::Relaxed);
     }
 
     /// Queue blur rendering for a window. Called each frame from render_frame()
@@ -1233,24 +1741,14 @@ impl AxiomRenderer {
         params: crate::effects::BlurParams,
     ) {
         self.window_blurs.insert(id, (position, size, params));
+        self.pending_blurs
+            .store(self.window_blurs.len(), Ordering::Relaxed);
     }
 
     /// Clear the per-frame blur queue (should be called at the start of each frame).
     pub fn clear_blurs(&mut self) {
         self.window_blurs.clear();
-    }
-
-    /// Get the current blur queue for surface rendering.
-    #[allow(dead_code)]
-    pub fn blur_queue(&self) -> &BlurQueue {
-        &self.window_blurs
-    }
-
-    /// Get the current shadow queue for surface rendering.
-    /// Consumed by the backend when calling render_to_surface_with_shadows.
-    #[allow(dead_code)]
-    pub fn shadow_queue(&self) -> &ShadowQueue {
-        &self.window_shadows
+        self.pending_blurs.store(0, Ordering::Relaxed);
     }
 
     /// Get number of rendered windows
@@ -1262,41 +1760,54 @@ impl AxiomRenderer {
     /// GPU textures owned by this renderer are dropped along with the
     /// `RenderedWindow` entry, fixing a long-running compositor that would
     /// otherwise accumulate stale GPU resources across window lifecycle.
-    pub fn remove_window(&mut self, id: u64) {
+    /// Check whether the projection buffer cache is populated.
+    /// Used by integration tests to verify caching behaviour.
+    pub fn has_cached_projection(&self) -> bool {
+        self.cached_projection_buffer.is_some()
+    }
+
+    /// Get the cached projection dimensions, or `(0, 0)` when empty.
+    /// Used by integration tests to verify cache reuse across calls.
+    pub fn cached_projection_dims(&self) -> (u32, u32) {
+        self.cached_projection_dims
+    }
+
+    /// Check whether a window has a queued shadow effect.
+    /// Used by integration tests to verify queue lifecycle.
+    pub fn has_window_shadow(&self, id: u64) -> bool {
+        self.window_shadows.contains_key(&id)
+    }
+
+    /// Check whether a window has a queued blur effect.
+    /// Used by integration tests to verify queue lifecycle.
+    pub fn has_window_blur(&self, id: u64) -> bool {
+        self.window_blurs.contains_key(&id)
+    }
+
+    /// Remove a window and its associated state (texture, queued shadow/blur).
+    /// GPU textures owned by this renderer are dropped along with the
+    /// `RenderedWindow` entry, fixing a long-running compositor that would
+    /// otherwise accumulate stale GPU resources across window lifecycle.
+    ///
+    /// Returns `true` if the window existed and was removed, `false` if
+    /// the ID was not found (no-op).
+    pub fn remove_window(&mut self, id: u64) -> bool {
         let before = self.windows.len();
         self.windows.retain(|w| w.id != id);
         let removed = self.windows.len() != before;
         if removed {
             self.window_shadows.remove(&id);
             self.window_blurs.remove(&id);
+            // Unconditional `store(Relaxed)` is a few cycles; cheaper than
+            // the len()/compare branch the previous code had, and the
+            // hashmap `.remove` already invalidated any stale queue entry.
+            self.pending_shadows
+                .store(self.window_shadows.len(), Ordering::Relaxed);
+            self.pending_blurs
+                .store(self.window_blurs.len(), Ordering::Relaxed);
             log::trace!("🗑️ Renderer: removed window {}", id);
         }
-    }
-
-    /// Start a simple headless render loop at ~60 FPS for development
-    pub async fn start_headless_loop() -> Result<tokio::task::JoinHandle<()>> {
-        let mut renderer = Self::new_headless().await?;
-        // Initialize shared render state if not already
-        let _ = RENDER_STATE.get_or_init(|| Arc::new(Mutex::new(SharedRenderState::default())));
-        info!("🖥️ Starting headless render loop (~60 FPS)");
-
-        let handle = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_millis(16));
-            loop {
-                ticker.tick().await;
-                // Sync placeholders into renderer's window list
-                if let Some(state) = RENDER_STATE.get() {
-                    if let Ok(s) = state.lock() {
-                        for (id, (pos, size, opacity)) in &s.placeholders {
-                            renderer.upsert_window_rect(*id, *pos, *size, *opacity);
-                        }
-                    }
-                }
-                renderer.render();
-            }
-        });
-
-        Ok(handle)
+        removed
     }
 }
 
@@ -1330,7 +1841,7 @@ fn ensure_headless_target<'a>(
     headless_target: &'a mut Option<(Texture, TextureView)>,
     width: u32,
     height: u32,
-) -> (&'a Texture, &'a TextureView) {
+) -> Result<(&'a Texture, &'a TextureView)> {
     let recreate = headless_target
         .as_ref()
         .is_none_or(|(tex, _)| tex.width() != width || tex.height() != height);
@@ -1359,8 +1870,8 @@ fn ensure_headless_target<'a>(
 
     let (ref tex, ref view) = headless_target
         .as_ref()
-        .expect("headless_target must be initialized before get_or_create_headless_target returns");
-    (tex, view)
+        .ok_or_else(|| anyhow::anyhow!("headless_target must be initialized before ensure_headless_target returns"))?;
+    Ok((tex, view))
 }
 
 /// Build a 4×4 column-major orthographic projection matrix for a surface
@@ -1410,11 +1921,188 @@ mod tests {
             texture_view: None,
             dirty: true,
             opacity: 1.0,
+            cached_uniform_buffer: None,
+            cached_opacity: f32::NAN,
+            cached_uniform_size: (f32::NAN, f32::NAN),
+            cached_vertex_buffer: None,
+            cached_position: (f32::NAN, f32::NAN),
+            cached_size: (f32::NAN, f32::NAN),
         };
 
         assert_eq!(window.id, 1);
         assert_eq!(window.position, (100.0, 100.0));
         assert_eq!(window.size, (400.0, 300.0));
         assert!(window.dirty);
+    }
+
+    // ---- Post-processing queue / fast-path ----
+    //
+    // The atomic-counter mirroring and `drain_post_process` no-op
+    // branches are exercised end-to-end by the compositor integration
+    // tests (which actually run a real headless `AxiomRenderer`).
+    // Per-process unit tests that hand-craft a `wgpu::Device` would
+    // require `Arc::new(unsafe { mem::zeroed() })` on internal
+    // non-Zeroable handles — which is UB even when the GPU is never
+    // touched — so we keep coverage at the integration layer only.
+
+    // ── Cache invalidation tests ──────────────────────────────────
+    //
+    // These tests verify the uniform-buffer and vertex-buffer caching
+    // logic added for the L1 renderer optimisation. They use a real
+    // headless WGPU renderer so we can create genuine Buffer handles
+    // and exercise the invalidation paths without a surface.
+
+    /// Verify that `set_border_width(new_value)` sets
+    /// `cached_uniform_buffer = None` on every managed window so the
+    /// next `render_to_surface` pass regenerates them with the updated
+    /// border width baked into the uniform data.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_set_border_width_invalidates_cached_uniform_buffers() {
+        let mut renderer = AxiomRenderer::new_headless()
+            .await
+            .expect("headless renderer");
+
+        // Add two windows
+        renderer.add_window(1, (0.0, 0.0), (400.0, 300.0));
+        renderer.add_window(2, (500.0, 0.0), (400.0, 300.0));
+
+        // Create real uniform buffers and stash them as cached so we
+        // can verify they are cleared by set_border_width.
+        let dev = renderer.device();
+        for window in &mut renderer.windows {
+            let buf = dev.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("test uniform buffer"),
+                size: std::mem::size_of::<WindowUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            window.cached_uniform_buffer = Some(buf);
+        }
+
+        // Sanity: both windows have cached buffers
+        assert!(renderer.windows[0].cached_uniform_buffer.is_some());
+        assert!(renderer.windows[1].cached_uniform_buffer.is_some());
+
+        // Change border width — should invalidate ALL cached uniform buffers
+        renderer.set_border_width(5.0);
+
+        assert!(
+            renderer.windows[0].cached_uniform_buffer.is_none(),
+            "window 0 cached uniform buffer should be invalidated"
+        );
+        assert!(
+            renderer.windows[1].cached_uniform_buffer.is_none(),
+            "window 1 cached uniform buffer should be invalidated"
+        );
+        assert!(
+            (renderer.border_width - 5.0).abs() < f32::EPSILON,
+            "border_width should be updated"
+        );
+    }
+
+    /// `set_border_width` with the same value that's already stored
+    /// must be a no-op — cached uniform buffers survive untouched.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_set_border_width_noop_for_same_value() {
+        let mut renderer = AxiomRenderer::new_headless()
+            .await
+            .expect("headless renderer");
+        renderer.add_window(1, (0.0, 0.0), (400.0, 300.0));
+
+        // Seed a real cached uniform buffer
+        let dev = renderer.device();
+        let buf = dev.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test uniform buffer"),
+            size: std::mem::size_of::<WindowUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        renderer.windows[0].cached_uniform_buffer = Some(buf);
+        assert!(renderer.windows[0].cached_uniform_buffer.is_some());
+
+        // Set to the same width (default is 2.0)
+        renderer.set_border_width(2.0);
+
+        assert!(
+            renderer.windows[0].cached_uniform_buffer.is_some(),
+            "buffer should survive a no-op set_border_width call"
+        );
+    }
+
+    /// `set_border_width` with zero windows in the renderer must not
+    /// panic — the `for window in &mut self.windows` loop simply
+    /// executes zero iterations and the border width is updated.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_set_border_width_zero_windows_no_panic() {
+        let mut renderer = AxiomRenderer::new_headless()
+            .await
+            .expect("headless renderer");
+
+        assert!(renderer.windows.is_empty(), "renderer starts with zero windows");
+
+        // Should not panic — iterates an empty Vec and updates the field
+        renderer.set_border_width(5.0);
+
+        assert!(
+            (renderer.border_width - 5.0).abs() < f32::EPSILON,
+            "border_width should be updated even with zero windows"
+        );
+    }
+
+    /// After `upsert_window_rect` changes a window's size, the
+    /// `cached_uniform_size` field must remain stale (i.e. mismatch
+    /// the new size) so the next `render_to_surface` pass detects
+    /// `size_changed = true` and regenerates the uniform buffer.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_size_change_marks_uniform_stale() {
+        let mut renderer = AxiomRenderer::new_headless()
+            .await
+            .expect("headless renderer");
+        renderer.add_window(1, (0.0, 0.0), (400.0, 300.0));
+
+        // Simulate a previous render pass that synced cached_uniform_size
+        renderer.windows[0].cached_uniform_size = (400.0, 300.0);
+
+        // Resize the window (as the compositor does each frame)
+        renderer.upsert_window_rect(1, (0.0, 0.0), (600.0, 400.0), 1.0);
+
+        let w = &renderer.windows[0];
+        assert_eq!(w.size, (600.0, 400.0), "size should be updated");
+        assert_eq!(
+            w.cached_uniform_size,
+            (400.0, 300.0),
+            "cached_uniform_size should retain old value (stale)"
+        );
+        // The mismatch means render_to_surface would recreate the buffer
+    }
+
+    /// Changing a window's opacity via `upsert_window_rect` must leave
+    /// `cached_opacity` stale so the next render pass recreates the
+    /// uniform buffer with the new opacity baked in.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_opacity_change_marks_uniform_stale() {
+        let mut renderer = AxiomRenderer::new_headless()
+            .await
+            .expect("headless renderer");
+        renderer.add_window(1, (0.0, 0.0), (400.0, 300.0));
+
+        // Simulate a previous render pass syncing cached_opacity
+        renderer.windows[0].cached_opacity = 1.0;
+
+        // Change opacity via upsert
+        renderer.upsert_window_rect(1, (0.0, 0.0), (400.0, 300.0), 0.5);
+
+        let w = &renderer.windows[0];
+        assert!((w.opacity - 0.5).abs() < f32::EPSILON, "opacity should be updated");
+        assert!(
+            (w.cached_opacity - 1.0).abs() < f32::EPSILON,
+            "cached_opacity should retain old value (stale)"
+        );
+        // The mismatch triggers uniform buffer recreation on next render
     }
 }

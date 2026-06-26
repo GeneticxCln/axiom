@@ -126,6 +126,8 @@ launch_terminal = 'Super+Enter'
 launch_launcher = 'Super+Space'
 toggle_effects = 'Super+e'
 quit = 'Super+Shift+q'
+toggle_floating = 'Super+Shift+Space'
+toggle_minimize = 'Super+grave'
 
 [xwayland]
 enabled = false

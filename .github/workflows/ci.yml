@@ -174,12 +174,18 @@ jobs:
     - name: Install cargo-audit
       run: cargo install cargo-audit
       
+    - name: Install cargo-deny
+      run: cargo install cargo-deny
+      
     - name: Run security audit
       run: cargo audit
       
     - name: Check for vulnerable dependencies
       run: |
         cargo audit --deny warnings || echo "Security warnings found"
+      
+    - name: Run cargo deny (license & dependency checks)
+      run: cargo deny check
 
   package:
     name: Test Packaging

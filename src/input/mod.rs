@@ -66,6 +66,15 @@ pub enum GestureType {
 
 /// Represents compositor actions that can be triggered by input
 /// Actions triggered by input events
+///
+/// `ToggleMinimize` is the hot-key / titlebar-button counterpart to
+/// the titlebar's server-side minimize button. The actual
+/// minimize/restore policy lives in the compositor backend
+/// (see `AxiomSmithayBackendReal::process_actions`) — the input
+/// layer just delivers the request. Disabled by the per-binding
+/// `features.enable_minimize` kill-switch in
+/// `crate::config::FeaturesConfig` so users without a minimize
+/// flow wired up cannot accidentally trigger a no-op.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompositorAction {
     ScrollWorkspaceLeft,
@@ -74,6 +83,13 @@ pub enum CompositorAction {
     MoveWindowRight,
     CloseWindow,
     ToggleFullscreen,
+    ToggleFloating,
+    /// Toggle the focused window's minimized state. Treated as idle
+    /// when no window is focused or when minimize feature is off.
+    ToggleMinimize,
+    ToggleEffects,
+    LaunchTerminal,
+    LaunchLauncher,
     Quit,
     Custom(String),
 }
@@ -84,6 +100,9 @@ pub struct InputManager {
     /// Key binding mappings
     key_bindings: HashMap<String, CompositorAction>,
 
+    /// Mouse button binding mappings (button_code -> action)
+    mouse_bindings: HashMap<u32, CompositorAction>,
+
     /// Current modifier state
     active_modifiers: Vec<String>,
 
@@ -92,20 +111,22 @@ pub struct InputManager {
 
     /// Gesture state for momentum scrolling
     gesture_state: Option<GestureState>,
+
+    /// Input configuration (for repeat rate, etc.)
+    #[allow(dead_code)]
+    input_config: InputConfig,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // scaffolding for future momentum scrolling
 struct GestureState {
-    #[allow(dead_code)]
     start_time: std::time::Instant,
-    #[allow(dead_code)]
     start_position: (f64, f64),
-    #[allow(dead_code)]
     current_velocity: (f64, f64),
 }
 
 impl InputManager {
-    pub fn new(_input_config: &InputConfig, bindings_config: &BindingsConfig) -> Self {
+    pub fn new(input_config: &InputConfig, bindings_config: &BindingsConfig) -> Self {
         info!("⌨️ Phase 3: Initializing enhanced input manager...");
 
         // Parse key bindings from config
@@ -132,17 +153,49 @@ impl InputManager {
             CompositorAction::ToggleFullscreen,
         );
         key_bindings.insert(
+            bindings_config.toggle_floating.clone(),
+            CompositorAction::ToggleFloating,
+        );
+        key_bindings.insert(
+            bindings_config.toggle_minimize.clone(),
+            CompositorAction::ToggleMinimize,
+        );
+        key_bindings.insert(
             bindings_config.close_window.clone(),
             CompositorAction::CloseWindow,
         );
+        key_bindings.insert(
+            bindings_config.toggle_effects.clone(),
+            CompositorAction::ToggleEffects,
+        );
+        key_bindings.insert(
+            bindings_config.launch_terminal.clone(),
+            CompositorAction::LaunchTerminal,
+        );
+        key_bindings.insert(
+            bindings_config.launch_launcher.clone(),
+            CompositorAction::LaunchLauncher,
+        );
 
-        debug!("🔑 Loaded {} key bindings", key_bindings.len());
+        // Mouse button bindings: map common mouse buttons to actions.
+        // Button codes follow the Linux input event codes (0x110 = BTN_LEFT, etc.)
+        let mut mouse_bindings = HashMap::new();
+        // BTN_LEFT (0x110): no default binding (used for window focus/click)
+        // BTN_MIDDLE (0x112): paste from clipboard
+        // BTN_SIDE (0x113): scroll workspace left
+        // BTN_EXTRA (0x114): scroll workspace right
+        mouse_bindings.insert(0x113, CompositorAction::ScrollWorkspaceLeft);
+        mouse_bindings.insert(0x114, CompositorAction::ScrollWorkspaceRight);
+
+        debug!("🔑 Loaded {} key bindings, {} mouse bindings", key_bindings.len(), mouse_bindings.len());
 
         Self {
             key_bindings,
+            mouse_bindings,
             active_modifiers: Vec::new(),
             mouse_position: (0.0, 0.0),
             gesture_state: None,
+            input_config: input_config.clone(),
         }
     }
 
@@ -236,7 +289,20 @@ impl InputManager {
                 "🐁 Mouse button {:?} pressed at ({:.1}, {:.1})",
                 button, x, y
             );
-            // TODO: Add mouse button bindings from config
+
+            // Map MouseButton enum to Linux input event button code
+            let button_code = match &button {
+                MouseButton::Left => 0x110,
+                MouseButton::Right => 0x111,
+                MouseButton::Middle => 0x112,
+                MouseButton::Other(code) => *code as u32,
+            };
+
+            // Check for matching mouse button binding
+            if let Some(action) = self.mouse_bindings.get(&button_code) {
+                info!("🚀 Mouse button triggered action: {:?}", action);
+                return vec![action.clone()];
+            }
         }
 
         Vec::new()
@@ -324,6 +390,14 @@ impl InputManager {
         self.mouse_position
     }
 
+    /// Get keyboard repeat rate configuration
+    pub fn keyboard_repeat_config(&self) -> (u32, u32) {
+        (
+            self.input_config.keyboard_repeat_delay,
+            self.input_config.keyboard_repeat_rate,
+        )
+    }
+
     /// Check if a modifier is currently active
     pub fn is_modifier_active(&self, modifier: &str) -> bool {
         self.active_modifiers.contains(&modifier.to_string())
@@ -378,6 +452,18 @@ mod tests {
         let mut manager = InputManager::new(&input_cfg, &bindings_cfg);
         let actions = manager.simulate_key_press("unknown+key+binding");
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn test_simulate_key_press_toggle_minimize() {
+        let (input_cfg, bindings_cfg) = make_configs();
+        let mut manager = InputManager::new(&input_cfg, &bindings_cfg);
+        // The default toggle_minimize binding is `Super+grave`; verify
+        // the input layer dispatches it to `ToggleMinimize` so the
+        // backend's process_actions can pick it up.
+        let actions = manager.simulate_key_press(&bindings_cfg.toggle_minimize);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0], CompositorAction::ToggleMinimize);
     }
 
     #[test]

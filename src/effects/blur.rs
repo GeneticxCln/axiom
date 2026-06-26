@@ -55,6 +55,9 @@ pub struct BlurRenderer {
     horizontal_blur_pipeline: Option<RenderPipeline>,
     vertical_blur_pipeline: Option<RenderPipeline>,
 
+    // Cached bind group layout (shared by both H/V pipelines)
+    blur_bind_group_layout: Option<wgpu::BindGroupLayout>,
+
     // Uniform buffers
     blur_params_buffer: Buffer,
 
@@ -127,6 +130,7 @@ impl BlurRenderer {
             shader_manager,
             horizontal_blur_pipeline: None,
             vertical_blur_pipeline: None,
+            blur_bind_group_layout: None,
             blur_params_buffer,
             intermediate_texture: None,
             intermediate_texture_view: None,
@@ -201,6 +205,9 @@ impl BlurRenderer {
                 bind_group_layouts: &[&bind_group_layout],
                 push_constant_ranges: &[],
             });
+
+        // Cache the layout for bind group creation in apply_*_blur
+        self.blur_bind_group_layout = Some(bind_group_layout);
 
         // Horizontal blur pipeline
         self.horizontal_blur_pipeline = Some(self.device.create_render_pipeline(
@@ -347,15 +354,20 @@ impl BlurRenderer {
             bytemuck::cast_slice(&[uniforms]),
         );
 
-        // Create bind group for this pass
+        // Create bind group for this pass using cached layout
         let h_pipeline = self
             .horizontal_blur_pipeline
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Horizontal blur pipeline not initialized"))?;
 
+        let layout = self
+            .blur_bind_group_layout
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Blur bind group layout not initialized"))?;
+
         let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Horizontal Blur Bind Group"),
-            layout: &h_pipeline.get_bind_group_layout(0),
+            layout,
             entries: &[
                 BindGroupEntry {
                     binding: 0,
@@ -419,15 +431,20 @@ impl BlurRenderer {
             bytemuck::cast_slice(&[uniforms]),
         );
 
-        // Create bind group for this pass
+        // Create bind group for this pass using cached layout
         let v_pipeline = self
             .vertical_blur_pipeline
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vertical blur pipeline not initialized"))?;
 
+        let layout = self
+            .blur_bind_group_layout
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Blur bind group layout not initialized"))?;
+
         let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Vertical Blur Bind Group"),
-            layout: &v_pipeline.get_bind_group_layout(0),
+            layout,
             entries: &[
                 BindGroupEntry {
                     binding: 0,
@@ -503,25 +520,6 @@ impl BlurRenderer {
         }
 
         Ok(())
-    }
-
-    /// Create sampler for blur effects (reserved for future custom sampling modes)
-    #[allow(dead_code)]
-    fn create_blur_sampler(&self) -> wgpu::Sampler {
-        self.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Blur Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
-            lod_min_clamp: 0.0,
-            lod_max_clamp: 1.0,
-            compare: None,
-            anisotropy_clamp: 1,
-            border_color: None,
-        })
     }
 
     /// Update blur parameters

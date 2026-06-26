@@ -44,6 +44,7 @@ const KNOWN_WORKSPACE_ACTIONS: &[&str] = &[
     "remove_window",
     "move_focus_left",
     "move_focus_right",
+    "toggle_floating",
 ];
 
 /// Maximum accepted blur radius in **pixels**. Anything above this is
@@ -772,35 +773,6 @@ impl AxiomIPCServer {
         Ok(())
     }
 
-    /// Send performance metrics to Lazy UI (via broadcast channel)
-    #[allow(dead_code)]
-    #[allow(clippy::unused_async)]
-    pub async fn send_performance_metrics(
-        &self,
-        cpu_usage: f32,
-        memory_usage: f32,
-        gpu_usage: f32,
-        frame_time: f32,
-        active_windows: u32,
-        current_workspace: i32,
-    ) -> Result<()> {
-        if let Some(tx) = &self.broadcast_tx {
-            let _ = tx.send(AxiomMessage::PerformanceMetrics {
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs(),
-                cpu_usage,
-                memory_usage,
-                gpu_usage,
-                frame_time,
-                active_windows,
-                current_workspace,
-            });
-        }
-
-        Ok(())
-    }
-
     /// Phase 3: Process pending IPC messages and apply configuration changes.
     /// Returns `(config_changed, pending_actions)`:
     /// - `config_changed`: true if any `OptimizeConfig` / `SetConfig` mutator
@@ -898,29 +870,7 @@ impl AxiomIPCServer {
             }
         }
 
-        // Small delay to prevent busy loop
-        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         Ok((config_changed, pending_actions))
-    }
-
-    /// Send user event to Lazy UI (via broadcast channel)
-    #[allow(clippy::unused_async)]
-    pub async fn send_user_event(
-        &self,
-        event_type: String,
-        details: serde_json::Value,
-    ) -> Result<()> {
-        if let Some(tx) = &self.broadcast_tx {
-            let _ = tx.send(AxiomMessage::UserEvent {
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs(),
-                event_type,
-                details,
-            });
-        }
-
-        Ok(())
     }
 
     /// Get the socket path

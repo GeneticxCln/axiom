@@ -8,13 +8,17 @@
 //! - [`ScrollableWorkspaces`]: Manager that holds multiple tapes.
 
 use log::{debug, info, warn};
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::config::WorkspaceConfig;
 use crate::window::Rectangle;
 
 /// Maximum number of workspace columns allowed per tape.
+/// Prevents unbounded memory growth from a malicious or runaway client.
+/// When the limit is reached, the oldest empty column is evicted to make
+/// room for new columns. Non-empty columns are never evicted.
 const MAX_COLUMNS: usize = 256;
 
 /// Default viewport width (pixels) until updated by the backend.
@@ -540,6 +544,31 @@ pub struct ScrollableWorkspaces {
 
     /// The currently focused output ID
     pub focused_output: String,
+
+    /// Cached layout map from `calculate_workspace_layouts`, invalidated
+    /// whenever the scroll position changes. This avoids recomputing all
+    /// window rectangles on every pointer motion (the hot path for
+    /// `element_under`). Uses `RefCell` for interior mutability since
+    /// the method is called from a read lock context.
+    cached_layouts: RefCell<Option<(f64, HashMap<u64, Rectangle>)>>,
+
+    /// Set of window IDs that are currently minimized (hidden). Such
+    /// windows are still owned (the compositor can restore them) but
+    /// `calculate_workspace_layouts` skips them so the renderer
+    /// never allocates a rectangle for them. Mirrors
+    /// [`crate::window::WindowManager`]'s `minimized` flag at the
+    /// workspace layer — both must agree on every minimize/restore call.
+    /// See `minimize_window` / `restore_window` below.
+    minimized_windows: HashSet<u64>,
+    /// Per-window originating column captured at minimize time. When a
+    /// window is restored, that column is preferred over the focused
+    /// column so the window "comes back" to where it was instead of
+    /// quietly sliding to whichever workspace the user happens to be
+    /// viewing. Entries are inserted on `minimize_window` and removed
+    /// on `restore_window`; `restore_window` falls back to focused
+    /// when this map has no entry (e.g. window was empty before
+    /// minimize or a hot-reload cleared the in-memory map).
+    pub originating_column: HashMap<u64, i32>,
 }
 
 impl ScrollableWorkspaces {
@@ -554,6 +583,9 @@ impl ScrollableWorkspaces {
             config: config.clone(),
             tapes: HashMap::new(),
             focused_output: "default".to_string(),
+            cached_layouts: RefCell::new(None),
+            minimized_windows: HashSet::new(),
+            originating_column: HashMap::new(),
         };
 
         // Create default tape
@@ -561,6 +593,103 @@ impl ScrollableWorkspaces {
 
         info!("🔄 Scrollable workspaces initialized with multi-monitor support");
         manager
+    }
+
+    /// Mark a window as minimized on the workspace layer.
+    ///
+    /// Removes the window from whatever column it currently occupies on
+    /// every tape (so `calculate_workspace_layouts` no longer emits a
+    /// rectangle for it) and adds the ID to [`minimized_windows`]. The
+    /// companion `WindowManager::minimize_window` must be called by the
+    /// caller to keep both layers in sync — this method does not touch
+    /// it. Returns `true` when the window was actually located on a
+    /// tape (and therefore hidden); `false` is treated as a no-op.
+    ///
+    /// Invalidation of `cached_layouts` is implied: since the window is
+    /// removed from a column, the cached map may already include it
+    /// and must be re-computed on the next layout query.
+    pub fn minimize_window(&mut self, window_id: u64) -> bool {
+        // Idempotent: minimize of an already-minimized window is a no-op.
+        if self.minimized_windows.contains(&window_id) {
+            return false;
+        }
+        let mut removed_anywhere = false;
+        let mut last_column: Option<i32> = None;
+        for tape in self.tapes.values_mut() {
+            if let Some(col) = tape.remove_window_internal(window_id) {
+                removed_anywhere = true;
+                last_column = Some(col);
+            }
+        }
+        // Remember the originating column so restore_window can put the
+        // window back where it came from. If the window is on more than
+        // one tape (defense-in-depth — a window is unique per workspace
+        // manager today but multi-monitor could change that), keep the
+        // last-seen column. The restoring path falls back to focused
+        // when this map has no entry.
+        if let Some(col) = last_column {
+            self.originating_column.insert(window_id, col);
+        }
+        // Even when the window is not in any column yet (e.g. layout is
+        // built lazily), still mark it minimized so a future layout
+        // query that DOES see it will filter accordingly.
+        self.minimized_windows.insert(window_id);
+        *self.cached_layouts.borrow_mut() = None;
+        debug!(
+            "📦 Workspace: minimized window {} (removed_from_column={}, origin={:?})",
+            window_id, removed_anywhere, last_column
+        );
+        true
+    }
+
+    /// Restore a minimized window on the workspace layer.
+    ///
+    /// Re-adds the window to the focused column of the focused tape,
+    /// removes its ID from [`minimized_windows`], and invalidates the
+    /// layout cache. Returns `true` when the window was actually
+    /// minimized and has now been added back to a column.
+    pub fn restore_window(&mut self, window_id: u64) -> bool {
+        if !self.minimized_windows.remove(&window_id) {
+            return false;
+        }
+        // Prefer the originating column when present; otherwise the
+        // focused column (preserves the pre-minimize workspace choice).
+        let target_column = self
+            .originating_column
+            .remove(&window_id)
+            .unwrap_or_else(|| self.active_tape().focused_column);
+        // Capture the focused column BEFORE the mutable borrow so we
+        // can drop the tape borrow before asking RefCell for another
+        // mutable borrow on `cached_layouts`. Two simultaneous
+        // `&mut self.<field>` borrows across the same scope trigger
+        // E0502; the explicit inner block lets NLL release the
+        // `tape` borrow before `cached_layouts` takes its own.
+        let focused_column = self.active_tape().focused_column;
+        {
+            let tape = self.active_tape_mut();
+            tape.add_window_to_column(window_id, target_column);
+        }
+        *self.cached_layouts.borrow_mut() = None;
+        debug!(
+            "📦 Workspace: restored window {} to column {} (focused = {})",
+            window_id,
+            target_column,
+            focused_column
+        );
+        true
+    }
+
+    /// Is the given window currently minimized at the workspace layer?
+    /// Reads the [`minimized_windows`] set synchronously; does not
+    /// consult the column map (a minimized window is, by definition,
+    /// absent from any column).
+    pub fn is_window_minimized(&self, window_id: u64) -> bool {
+        self.minimized_windows.contains(&window_id)
+    }
+
+    /// Number of currently-minimized windows across all tapes.
+    pub fn minimized_window_count(&self) -> usize {
+        self.minimized_windows.len()
     }
 
     /// Ensure a tape exists for the given output
@@ -625,6 +754,9 @@ impl ScrollableWorkspaces {
     /// Set the viewport size on the active tape.
     pub fn set_viewport_size(&mut self, width: f64, height: f64) {
         self.active_tape_mut().set_viewport_size(width, height);
+        // Viewport resize invalidates every cached layout — the new
+        // dimensions change column widths and window tiling.
+        *self.cached_layouts.borrow_mut() = None;
     }
 
     /// Add a window to a specific column on the active tape.
@@ -695,10 +827,20 @@ impl ScrollableWorkspaces {
         for tape in self.tapes.values_mut() {
             tape.update_animations();
         }
+        // Invalidate layout cache since scroll positions may have changed
+        *self.cached_layouts.borrow_mut() = None;
     }
 
     /// Calculate layout rectangles for all visible windows across all tapes.
     pub fn calculate_workspace_layouts(&self) -> HashMap<u64, Rectangle> {
+        // Return cached layouts if still valid
+        let tape = self.active_tape();
+        if let Some((cached_pos, ref cached)) = *self.cached_layouts.borrow() {
+            if (cached_pos - tape.current_position).abs() < f64::EPSILON {
+                return cached.clone();
+            }
+        }
+
         // Collect layouts from ALL tapes (outputs)
         // Note: For now, we assume a single viewport for backwards compatibility or just return relative coords.
         // In real multi-monitor, this would offset by output position.
@@ -733,6 +875,16 @@ impl ScrollableWorkspaces {
                     };
 
                     for (i, &window_id) in column.windows.iter().enumerate() {
+                        // Skip minimized windows — the renderer should not
+                        // allocate a rectangle for them because they are
+                        // hidden behind the compositor and excluded from
+                        // pointer hit-testing by `element_under` (which
+                        // reads the same returned map). The hidden window
+                        // still lives in `minimized_windows` for the
+                        // restore path.
+                        if self.minimized_windows.contains(&window_id) {
+                            continue;
+                        }
                         let y = gap + i as i32 * (window_height + gap);
                         let width = column_bounds.width.saturating_sub(2 * gap as u32).max(1);
                         let height = (window_height as u32).max(1);
@@ -748,6 +900,7 @@ impl ScrollableWorkspaces {
             }
         }
 
+        *self.cached_layouts.borrow_mut() = Some((tape.current_position, layouts.clone()));
         layouts
     }
 
@@ -813,6 +966,9 @@ impl ScrollableWorkspaces {
     pub fn shutdown(&mut self) {
         info!("🔽 Shutting down scrollable workspaces...");
         self.tapes.clear();
+        self.minimized_windows.clear();
+        self.originating_column.clear();
+        *self.cached_layouts.borrow_mut() = None;
     }
 }
 

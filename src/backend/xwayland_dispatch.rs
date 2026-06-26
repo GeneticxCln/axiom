@@ -13,73 +13,117 @@
 //! read in isolation from the Wayland protocol-state machine.
 
 use anyhow::Result;
-use log::{debug, warn};
+use log::{info, warn};
 
-// Re-export the parent module's State struct so signatures below can spell
-// `&State` / `&mut State` without the full `crate::backend::State` path.
 use super::State;
-
 use super::xwm::{AxiomXwm, XwmEvent};
 
-/// Populate the clipboard cache with bytes from an external source (e.g.
-/// Lazy UI IPC, compositor-managed text). When X11 apps request clipboard
-/// contents, this data is served back to them. Also claims X11 clipboard
-/// ownership so X11 apps come to us for selection data.
-#[allow(dead_code)]
-pub(super) fn set_clipboard_data(state: &mut State, data: Vec<u8>) {
-    debug!("📋 Clipboard cache populated ({} bytes)", data.len());
-    state.clipboard_cache = Some(data);
-    if let Some(xwm) = state.xwm.as_ref() {
-        if let Err(e) = xwm.own_selection() {
-            warn!("⚠️ Failed to claim X11 clipboard: {}", e);
-        }
-    }
-}
-
-/// Poll X11 events coming from the XWayland manager and dispatch them
-/// to the compositor. Currently:
-///
-/// - `SelectionRequest` → [`handle_clipboard_request`]
-/// - All other events are handled inside `AxiomXwm::handle_event`
-///   (MapRequest bookkeeping, ConfigureRequest grants, UnmapNotify
-///   removal, SelectionNotify logging).
+/// Collect and dispatch X11 events from XWayland.
 ///
 /// Returns `Ok(())` if no XWM is wired (no-op). Propagates errors from
 /// `xwm.handle_event` or `xwm.handle_selection_request`.
 pub(super) fn poll_and_dispatch_events(state: &mut State) -> Result<()> {
-    let Some(xwm) = state.xwm.as_mut() else {
-        return Ok(());
-    };
-    while let Some(event) = xwm.poll_event() {
-        match xwm.handle_event(&event) {
-            Ok(Some(XwmEvent::ClipboardRequest {
-                requestor,
-                selection,
-                target,
-                property,
-                time,
-            })) => {
-                let clipboard_data = state.clipboard_cache.as_deref();
-                handle_clipboard_request(
-                    xwm,
+    let mut clipboard_requests: Vec<(
+        x11rb::protocol::xproto::Window,
+        x11rb::protocol::xproto::Atom,
+        x11rb::protocol::xproto::Atom,
+        x11rb::protocol::xproto::Atom,
+        x11rb::protocol::xproto::Timestamp,
+    )> = Vec::new();
+    let mut window_mapped: Vec<(u32, String)> = Vec::new();
+    let mut window_unmapped: Vec<u32> = Vec::new();
+    let mut had_errors: Vec<String> = Vec::new();
+
+    {
+        let Some(xwm) = state.xwm.as_mut() else {
+            return Ok(());
+        };
+        while let Some(event) = xwm.poll_event() {
+            match xwm.handle_event(&event) {
+                Ok(Some(XwmEvent::ClipboardRequest {
                     requestor,
                     selection,
                     target,
                     property,
                     time,
-                    clipboard_data,
-                )?;
+                })) => {
+                    clipboard_requests.push((requestor, selection, target, property, time));
+                }
+                Ok(Some(XwmEvent::WindowMapped {
+                    x11_window_id,
+                    title,
+                })) => {
+                    window_mapped.push((x11_window_id, title));
+                }
+                Ok(Some(XwmEvent::WindowUnmapped { x11_window_id })) => {
+                    window_unmapped.push(x11_window_id);
+                }
+                Ok(_) => {}
+                Err(e) => had_errors.push(format!("XWM event error: {}", e)),
             }
-            Ok(_) => {}
-            Err(e) => warn!("⚠️ XWM event error: {}", e),
         }
     }
+
+    for (requestor, selection, target, property, time) in clipboard_requests {
+        let clipboard_data = state.clipboard_cache.as_deref();
+        if let Some(xwm) = state.xwm.as_ref() {
+            if let Err(e) = handle_clipboard_request(
+                xwm,
+                requestor,
+                selection,
+                target,
+                property,
+                time,
+                clipboard_data,
+            ) {
+                warn!("Failed to serve X11 clipboard request: {}", e);
+            }
+        }
+    }
+
+    for (x11_window_id, title) in window_mapped {
+        let window_id = state.create_window_from_x11(x11_window_id, title);
+        info!(
+            "X11 window {} mapped as compositor window {}",
+            x11_window_id, window_id
+        );
+        state.needs_redraw = true;
+    }
+
+    for x11_window_id in window_unmapped {
+        if let Some(window_id) = state.x11_window_map.remove(&x11_window_id) {
+            state.workspace_manager.write().remove_window(window_id);
+            state.window_manager.write().remove_window(window_id);
+            state.decoration_manager.write().remove_window(window_id);
+
+            let synthetic_surface_id = x11_window_id | 0x8000_0000;
+            if let Some(handle) = state.foreign_toplevel_handles.remove(&synthetic_surface_id) {
+                handle.send_closed();
+                state.foreign_toplevel_list_state.remove_toplevel(&handle);
+            }
+
+            info!(
+                "X11 window {} removed (compositor window {})",
+                x11_window_id, window_id
+            );
+        } else {
+            info!(
+                "X11 window {} unmapped (not tracked in compositor)",
+                x11_window_id
+            );
+        }
+        state.needs_redraw = true;
+    }
+
+    for err_msg in had_errors {
+        warn!("⚠️ {}", err_msg);
+    }
+
     Ok(())
 }
 
 /// Serve the cached Wayland clipboard data (or a placeholder) to a
-/// requesting X11 client. See [`super::xwm::AxiomXwm::handle_selection_request`]
-/// for the per-target handling logic.
+/// requesting X11 client.
 fn handle_clipboard_request(
     xwm: &AxiomXwm,
     requestor: x11rb::protocol::xproto::Window,
@@ -92,11 +136,7 @@ fn handle_clipboard_request(
     if let Err(e) =
         xwm.handle_selection_request(requestor, selection, target, property, time, clipboard_data)
     {
-        warn!("⚠️ Failed to serve X11 clipboard request: {}", e);
+        warn!("Failed to serve X11 clipboard request: {}", e);
     }
     Ok(())
 }
-
-// (No second `use super::State` re-import needed — the line at the top
-// of this file aliases `super::State` directly so all signatures below
-// can spell `State` plain.)

@@ -3,9 +3,8 @@
 //! This module contains the main AxiomCompositor struct and event loop.
 //! It coordinates between all subsystems: workspaces, effects, input, etc.
 //!
-//! This implementation can optionally use Smithay for proper Wayland compositor functionality
-//! with window management, surface handling, and protocol support when the
-//! `experimental-smithay` feature is enabled.
+//! Uses Smithay 0.7 for Wayland compositor functionality including
+//! window management, surface handling, and protocol support.
 
 use anyhow::{Context, Result};
 use log::{debug, info, warn};
@@ -35,8 +34,6 @@ pub struct AxiomCompositor {
     workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
     effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
     window_manager: Arc<parking_lot::RwLock<WindowManager>>,
-    #[allow(dead_code)]
-    decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
     input_manager: Arc<parking_lot::RwLock<InputManager>>,
     xwayland_manager: Option<Arc<AsyncRwLock<XWaylandManager>>>,
     ipc_server: AxiomIPCServer,
@@ -48,6 +45,9 @@ pub struct AxiomCompositor {
 
     // Renderer (optional — may be unavailable in headless/CI environments)
     renderer: Option<Arc<parking_lot::RwLock<AxiomRenderer>>>,
+
+    // Server-side decoration manager for titlebar/button rendering
+    decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
 
     // Smithay Backend
     smithay_backend: AxiomSmithayBackendReal,
@@ -78,7 +78,6 @@ impl AxiomCompositor {
         workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
         effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
         window_manager: Arc<parking_lot::RwLock<WindowManager>>,
-        decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
         input_manager: Arc<parking_lot::RwLock<InputManager>>,
         xwayland_manager: Option<Arc<AsyncRwLock<XWaylandManager>>>,
         mut ipc_server: AxiomIPCServer,
@@ -87,31 +86,14 @@ impl AxiomCompositor {
         // Initialize IPC server for Lazy UI integration. Wire the live config
         // handle so `GetConfig` queries resolve against the real config tree
         // rather than the previous hard-coded default placeholder.
-        debug!("🔗 Initializing IPC server...");
+        debug!("Initializing IPC server...");
         ipc_server.set_config_handle(Arc::new(parking_lot::RwLock::new(config.clone())));
         ipc_server
             .start()
             .await
             .context("Failed to start IPC server")?;
 
-        let smithay_backend = {
-            info!("🏗️ Initializing Axiom compositor with Smithay backend...");
-            debug!("🚀 Initializing Smithay Wayland backend...");
-            let mut backend = AxiomSmithayBackendReal::new(
-                config.clone(),
-                window_manager.clone(),
-                workspace_manager.clone(),
-                effects_engine.clone(),
-                input_manager.clone(),
-                renderer.clone(),
-            )?;
-            backend
-                .initialize()
-                .context("Failed to initialize Smithay backend")?;
-            backend
-        };
-
-        info!("✅ All subsystems initialized successfully");
+        info!("All subsystems initialized successfully");
 
         // Initialize GPU effects acceleration (blur, shadows, shaders).
         // This wires the effects engine into the wgpu device/queue so that
@@ -126,7 +108,7 @@ impl AxiomCompositor {
             .initialize_gpu(device, queue)
             .unwrap_or_else(|e| {
                 warn!(
-                    "⚠️ GPU effects initialization skipped ({}): blur/shadows will not render",
+                    "GPU effects initialization skipped ({}): blur/shadows will not render",
                     e
                 );
             });
@@ -134,13 +116,40 @@ impl AxiomCompositor {
         // Wire effects engine into renderer for GPU shadow/blur post-processing
         renderer.write().set_effects_engine(effects_engine.clone());
 
+        // Wire border width from config into renderer
+        renderer.write().set_border_width(config.window.border_width as f32);
+
+        // Initialize server-side decoration manager (must be created before
+        // the Smithay backend so it can receive a clone).
+        let minimize_enabled = config.features.enable_minimize;
+        let decoration_manager = Arc::new(parking_lot::RwLock::new(
+            DecorationManager::new(&config.window, minimize_enabled),
+        ));
+
+        let smithay_backend = {
+            info!("Initializing Axiom compositor with Smithay backend...");
+            debug!("Initializing Smithay Wayland backend...");
+            let mut backend = AxiomSmithayBackendReal::new(
+                config.clone(),
+                window_manager.clone(),
+                workspace_manager.clone(),
+                effects_engine.clone(),
+                input_manager.clone(),
+                renderer.clone(),
+                decoration_manager.clone(),
+            )?;
+            backend
+                .initialize()
+                .context("Failed to initialize Smithay backend")?;
+            backend
+        };
+
         Ok(Self {
             config,
             _windowed: windowed,
             workspace_manager,
             effects_engine,
             window_manager,
-            decoration_manager,
             input_manager,
             xwayland_manager,
             ipc_server,
@@ -149,14 +158,14 @@ impl AxiomCompositor {
             consecutive_error_count: 0,
             force_next_tick_error: false,
             renderer: Some(renderer),
+            decoration_manager,
             running: false,
         })
     }
 
     /// Start the compositor main event loop
     pub async fn run(mut self) -> Result<()> {
-        info!("🎬 Starting Axiom compositor event loop");
-
+        info!("Starting Axiom compositor event loop");
         self.running = true;
 
         // Set up signal handling
@@ -168,11 +177,11 @@ impl AxiomCompositor {
             tokio::select! {
                 // Handle system signals
                 _ = sigterm.recv() => {
-                    info!("📨 Received SIGTERM, shutting down gracefully");
+                    info!("Received SIGTERM, shutting down gracefully");
                     self.shutdown().await?;
                 }
                 _ = sigint.recv() => {
-                    info!("📨 Received SIGINT (Ctrl+C), shutting down gracefully");
+                    info!("Received SIGINT (Ctrl+C), shutting down gracefully");
                     self.shutdown().await?;
                 }
 
@@ -181,7 +190,7 @@ impl AxiomCompositor {
             }
         }
 
-        info!("🛑 Axiom compositor event loop finished");
+        info!("Axiom compositor event loop finished");
         Ok(())
     }
 
@@ -224,13 +233,13 @@ impl AxiomCompositor {
                         // EffectsControl into the actions vec; the catch-all
                         // is here only to satisfy the exhaustive match.
                         _ => {
-                            warn!("⚠️ Unexpected pending action variant from IPC queue");
+                            warn!("Unexpected pending action variant from IPC queue");
                         }
                     }
                 }
             }
             Err(e) => {
-                warn!("⚠️ Error processing IPC messages: {}", e);
+                warn!("Error processing IPC messages: {}", e);
             }
         }
 
@@ -256,14 +265,14 @@ impl AxiomCompositor {
             "remove_window" => match parameters.get("window_id").and_then(|v| v.as_u64()) {
                 Some(id) => self.remove_window(id),
                 None => {
-                    warn!("⚠️ WorkspaceCommand remove_window missing 'window_id' parameter — no-op")
+                    warn!("WorkspaceCommand remove_window missing 'window_id' parameter — no-op")
                 }
             },
             "move_focus_left" => {
                 let focused_id = self.window_manager.read().focused_window_id();
                 match focused_id {
                     Some(id) => self.move_window_left(id),
-                    None => debug!("🖥️ WorkspaceCommand move_focus_left: no focused window, no-op"),
+                    None => debug!("WorkspaceCommand move_focus_left: no focused window, no-op"),
                 }
             }
             "move_focus_right" => {
@@ -271,15 +280,24 @@ impl AxiomCompositor {
                 match focused_id {
                     Some(id) => self.move_window_right(id),
                     None => {
-                        debug!("🖥️ WorkspaceCommand move_focus_right: no focused window, no-op")
+                        debug!("WorkspaceCommand move_focus_right: no focused window, no-op")
                     }
+                }
+            }
+            "toggle_floating" => {
+                let focused_id = self.window_manager.read().focused_window_id();
+                match focused_id {
+                    Some(id) => {
+                        self.window_manager.write().toggle_floating(id);
+                    }
+                    None => debug!("WorkspaceCommand toggle_floating: no focused window, no-op"),
                 }
             }
             // Defensive catch-all. The IPC layer's whitelist already rejects
             // unknown actions, so reaching here means a future handler or
             // schema change introduced a mismatch — surface it loudly.
             unknown => warn!(
-                "⚠️ WorkspaceCommand '{}' reached dispatch despite whitelist validation",
+                "WorkspaceCommand '{}' reached dispatch despite whitelist validation",
                 unknown
             ),
         }
@@ -300,7 +318,7 @@ impl AxiomCompositor {
             animation_speed,
         );
         debug!(
-            "✨ Effects control dispatched — enabled: {:?}, blur: {:?}, animation: {:?}",
+            "Effects control dispatched — enabled: {:?}, blur: {:?}, animation: {:?}",
             enabled, blur_radius, animation_speed
         );
     }
@@ -342,42 +360,57 @@ impl AxiomCompositor {
         // in renderer — avoids nesting effects.read() inside renderer.write()
         // which would invert the lock order vs composite_effects_on_buffer
         // (renderer &mut → effects.write()).
-        if let Some(ref renderer) = self.renderer {
-            let mut pending_shadows: Vec<PendingShadow> = Vec::new();
-            let mut pending_blurs: Vec<PendingBlur> = Vec::new();
+        //
+        // Skip the queue entirely when effects are globally disabled: the
+        // backend's `has_pending_post_process` non-locking peek will see
+        // both atomics at zero and skip the GL→CPU readback. This makes
+        // the no-effects hot path zero-cost (no HashMap inserts, no atomic
+        // stores, no GPU work, no `glReadPixels`).
+        let effects_enabled = self.effects_engine.read().is_enabled();
+        if effects_enabled {
+            if let Some(ref renderer) = self.renderer {
+                let mut pending_shadows: Vec<PendingShadow> = Vec::new();
+                let mut pending_blurs: Vec<PendingBlur> = Vec::new();
 
-            {
-                let effects = self.effects_engine.read();
-                for data in &self.render_data_buffer {
-                    if let Some(effect_state) = effects.get_window_effects(data.id) {
-                        let pos = (data.layout_rect.x as f32, data.layout_rect.y as f32);
-                        let size = (
-                            data.layout_rect.width as f32,
-                            data.layout_rect.height as f32,
-                        );
-                        if effect_state.shadow.enabled {
-                            pending_shadows.push((data.id, pos, size, effect_state.shadow.clone()));
-                        }
-                        if effect_state.blur_radius > 0.0 {
-                            let engine_blur_params = crate::effects::BlurParams {
-                                enabled: true,
-                                radius: effect_state.blur_radius,
-                                intensity: 0.8,
-                                background_blur: true,
-                                window_blur: false,
-                            };
-                            pending_blurs.push((data.id, pos, size, engine_blur_params));
+                {
+                    let effects = self.effects_engine.read();
+                    for data in &self.render_data_buffer {
+                        if let Some(effect_state) = effects.get_window_effects(data.id) {
+                            let pos =
+                                (data.layout_rect.x as f32, data.layout_rect.y as f32);
+                            let size = (
+                                data.layout_rect.width as f32,
+                                data.layout_rect.height as f32,
+                            );
+                            if effect_state.shadow.enabled {
+                                pending_shadows.push((
+                                    data.id,
+                                    pos,
+                                    size,
+                                    effect_state.shadow.clone(),
+                                ));
+                            }
+                            if effect_state.blur_radius > 0.0 {
+                                let engine_blur_params = crate::effects::BlurParams {
+                                    enabled: true,
+                                    radius: effect_state.blur_radius,
+                                    intensity: 0.8,
+                                    background_blur: true,
+                                    window_blur: false,
+                                };
+                                pending_blurs.push((data.id, pos, size, engine_blur_params));
+                            }
                         }
                     }
-                }
-            } // Drop effects lock before acquiring renderer lock
+                } // Drop effects lock before acquiring renderer lock
 
-            let mut r = renderer.write();
-            for (id, pos, size, params) in pending_shadows {
-                r.queue_shadow(id, pos, size, params);
-            }
-            for (id, pos, size, params) in pending_blurs {
-                r.queue_blur(id, pos, size, params);
+                let mut r = renderer.write();
+                for (id, pos, size, params) in pending_shadows {
+                    r.queue_shadow(id, pos, size, params);
+                }
+                for (id, pos, size, params) in pending_blurs {
+                    r.queue_blur(id, pos, size, params);
+                }
             }
         }
 
@@ -423,7 +456,7 @@ impl AxiomCompositor {
             self.effects_engine.read().get_performance_stats();
         if frame_time.as_millis() > 20 {
             debug!(
-                "⚡ Frame time: {:.1}ms, effects quality: {:.1}, active effects: {}",
+                "Frame time: {:.1}ms, effects quality: {:.1}, active effects: {}",
                 frame_time.as_secs_f64() * 1000.0,
                 effects_quality,
                 active_effects
@@ -431,7 +464,7 @@ impl AxiomCompositor {
         }
 
         debug!(
-            "🎨 Frame rendered - position: {:.1}, column: {}, effects: {}",
+            "Frame rendered - position: {:.1}, column: {}, effects: {}",
             self.workspace_manager.read().current_position(),
             self.workspace_manager.read().focused_column_index(),
             active_effects
@@ -450,7 +483,7 @@ impl AxiomCompositor {
 
             // In a real implementation, this would apply visual effects to the entire compositor
             debug!(
-                "🌊 Workspace transition: position={:.1}, progress={:.2}",
+                "Workspace transition: position={:.1}, progress={:.2}",
                 current_pos, progress
             );
         }
@@ -458,7 +491,7 @@ impl AxiomCompositor {
 
     /// Gracefully shutdown the compositor (with Smithay backend)
     async fn shutdown(&mut self) -> Result<()> {
-        info!("🔽 Shutting down Axiom compositor...");
+        info!("Shutting down Axiom compositor...");
 
         self.running = false;
 
@@ -467,23 +500,23 @@ impl AxiomCompositor {
         // because they use an async-aware Mutex internally.
         #[allow(clippy::await_holding_lock)]
         if let Some(ref xwayland) = self.xwayland_manager {
-            debug!("🔗 Shutting down XWayland...");
+            debug!("Shutting down XWayland...");
             xwayland.write().await.shutdown().await?;
         }
 
         // Clean up Smithay backend
-        debug!("🚀 Shutting down Smithay backend...");
+        debug!("Shutting down Smithay backend...");
         self.smithay_backend.shutdown()?;
 
         // Clean up other subsystems
-        debug!("🧩 Cleaning up compositor subsystems...");
+        debug!("Cleaning up compositor subsystems...");
         self.ipc_server.shutdown().await?;
         self.input_manager.write().shutdown();
         self.effects_engine.write().shutdown();
         self.workspace_manager.write().shutdown();
         self.window_manager.write().shutdown();
 
-        info!("✅ Axiom compositor shutdown complete");
+        info!("Axiom compositor shutdown complete");
         Ok(())
     }
 
@@ -518,7 +551,7 @@ impl AxiomCompositor {
         // WGPU GPU post-processing within the GL submit window.
         if let Err(e) = self.prepare_frame_data() {
             tick_error = true;
-            warn!("⚠️ Error preparing frame data: {}", e);
+            warn!("Error preparing frame data: {}", e);
         }
 
         // Process events (calls backend.process_events → run_one_cycle → render)
@@ -528,21 +561,21 @@ impl AxiomCompositor {
         }
         if let Err(e) = self.process_events().await {
             tick_error = true;
-            warn!("⚠️ Error processing events: {}", e);
+            warn!("Error processing events: {}", e);
         }
 
         // Render frame — now only handles post-render monitoring after the
         // backend has already presented the frame with effects applied.
         if let Err(e) = self.render_frame().await {
             tick_error = true;
-            warn!("⚠️ Error rendering frame: {}", e);
+            warn!("Error rendering frame: {}", e);
         }
 
         // Update stability metrics
         if tick_error {
             self.consecutive_error_count += 1;
             warn!(
-                "⚠️ Consecutive error count: {}",
+                "Consecutive error count: {}",
                 self.consecutive_error_count
             );
         } else if self.consecutive_error_count < 5 {
@@ -575,7 +608,7 @@ impl AxiomCompositor {
         // Check stability threshold
         if self.consecutive_error_count >= 5 {
             log::error!(
-                "🚨 CRITICAL: Too many consecutive errors ({}). Initiating emergency shutdown.",
+                "CRITICAL: Too many consecutive errors ({}). Initiating emergency shutdown.",
                 self.consecutive_error_count
             );
             let _ = self.shutdown().await;
@@ -591,19 +624,21 @@ impl AxiomCompositor {
 
     /// Scroll workspace left (for input handling)
     pub fn scroll_workspace_left(&mut self) {
-        info!("⬅️ Scrolling workspace left");
+        info!("Scrolling workspace left");
         self.workspace_manager.write().scroll_left();
     }
 
     /// Scroll workspace right (for input handling)
     pub fn scroll_workspace_right(&mut self) {
-        info!("➡️ Scrolling workspace right");
+        info!("Scrolling workspace right");
         self.workspace_manager.write().scroll_right();
     }
 
-    /// Add a new window to the current workspace
+    /// Add a new window to the current workspace.
+    /// Also registers the window with the server-side decoration manager so
+    /// titlebar buttons are positioned from real geometry (not a placeholder).
     pub fn add_window(&mut self, title: String) -> u64 {
-        // Create window in window manager
+        // Create window in window manager (default size: 800x600)
         let window_id = self.window_manager.write().add_window(title.clone());
 
         // Add to current workspace column
@@ -612,8 +647,18 @@ impl AxiomCompositor {
         // Trigger window open animation (spring-physics scale + fade-in)
         self.effects_engine.write().animate_window_open(window_id);
 
+        // Register with DecorationManager using real window geometry.
+        // The default BackendWindow size is 800×600; callers can update
+        // via `set_window_width` after a Wayland configure arrives.
+        self.decoration_manager.write().add_window(
+            window_id,
+            title.clone(),
+            /* prefers_server_side */ true,
+            800, // default BackendWindow width
+        );
+
         info!(
-            "🪟 Added window '{}' (ID: {}) to current workspace",
+            "Added window '{}' (ID: {}) to current workspace",
             title, window_id
         );
         window_id
@@ -622,13 +667,13 @@ impl AxiomCompositor {
     /// Remove a window from the compositor.
     ///
     /// Locks are taken in the same order as `render_frame`
-    /// (`workspace -> window_manager -> renderer`); keep them in lockstep
-    /// to avoid lock-order inversion if a future contributor adds a
-    /// concurrent removal path.
+    /// (`workspace -> window_manager -> renderer -> decoration_manager`);
+    /// keep them in lockstep to avoid lock-order inversion if a future
+    /// contributor adds a concurrent removal path.
     pub fn remove_window(&mut self, window_id: u64) {
         if let Some(column) = self.workspace_manager.write().remove_window(window_id) {
             info!(
-                "🗑️ Removed window {} from workspace column {}",
+                "Removed window {} from workspace column {}",
                 window_id, column
             );
         }
@@ -638,19 +683,21 @@ impl AxiomCompositor {
         if let Some(ref renderer) = self.renderer {
             renderer.write().remove_window(window_id);
         }
+
+        self.decoration_manager.write().remove_window(window_id);
     }
 
     /// Move window to left workspace
     pub fn move_window_left(&mut self, window_id: u64) {
         if self.workspace_manager.write().move_window_left(window_id) {
-            info!("⬅️ Moved window {} to left workspace", window_id);
+            info!("Moved window {} to left workspace", window_id);
         }
     }
 
     /// Move window to right workspace
     pub fn move_window_right(&mut self, window_id: u64) {
         if self.workspace_manager.write().move_window_right(window_id) {
-            info!("➡️ Moved window {} to right workspace", window_id);
+            info!("Moved window {} to right workspace", window_id);
         }
     }
 
@@ -670,7 +717,7 @@ impl AxiomCompositor {
         self.workspace_manager
             .write()
             .set_viewport_size(width as f64, height as f64);
-        info!("📐 Updated viewport size to {}x{}", width, height);
+        info!("Updated viewport size to {}x{}", width, height);
     }
 
     /// Single tick for integration testing — calls the private `tick()` method.
@@ -696,6 +743,7 @@ impl AxiomCompositor {
     }
 
     /// Check whether the compositor is still running.
+    /// Used by integration tests to verify shutdown behavior.
     #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.running
@@ -717,7 +765,7 @@ impl AxiomCompositor {
 
     /// Propagate configuration changes to all subsystems
     fn update_subsystems_config(&mut self) {
-        info!("🔄 Propagating configuration changes to subsystems...");
+        info!("Propagating configuration changes to subsystems...");
 
         // Update Effects Engine
         self.effects_engine
@@ -728,6 +776,13 @@ impl AxiomCompositor {
         self.workspace_manager
             .write()
             .update_config(self.config.workspace.clone());
+
+        // Update renderer border width from config
+        if let Some(renderer) = &self.renderer {
+            renderer
+                .write()
+                .set_border_width(self.config.window.border_width as f32);
+        }
 
         // Future: Update Input Manager, etc.
     }
@@ -744,7 +799,6 @@ impl AxiomCompositor {
         workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
         effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
         window_manager: Arc<parking_lot::RwLock<WindowManager>>,
-        decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
         input_manager: Arc<parking_lot::RwLock<InputManager>>,
     ) -> Result<Self> {
         // Attempt GPU renderer initialization; degrade gracefully if unavailable.
@@ -756,13 +810,22 @@ impl AxiomCompositor {
                 Some(arc)
             }
             Err(e) => {
-                log::warn!("⚠️ GPU renderer unavailable in test mode ({}): compositor tests will run without rendering", e);
+                log::warn!(
+                    "GPU renderer unavailable in test mode ({}): compositor tests will run without rendering",
+                    e
+                );
                 None
             }
         };
 
         // Dummy IPC server (skip socket bind)
         let ipc_server = AxiomIPCServer::new();
+
+        // Initialize server-side decoration manager for tests
+        let minimize_enabled = config.features.enable_minimize;
+        let decoration_manager = Arc::new(parking_lot::RwLock::new(
+            DecorationManager::new(&config.window, minimize_enabled),
+        ));
 
         // Test Smithay backend (no socket bind, no GPU init)
         let smithay_backend = AxiomSmithayBackendReal::new_for_test(
@@ -772,6 +835,7 @@ impl AxiomCompositor {
             effects_engine.clone(),
             input_manager.clone(),
             renderer.clone(),
+            decoration_manager.clone(),
         )?;
 
         Ok(Self {
@@ -780,7 +844,6 @@ impl AxiomCompositor {
             workspace_manager,
             effects_engine,
             window_manager,
-            decoration_manager,
             input_manager,
             xwayland_manager: None,
             ipc_server,
@@ -789,6 +852,7 @@ impl AxiomCompositor {
             consecutive_error_count: 0,
             force_next_tick_error: false,
             renderer,
+            decoration_manager,
             running: true, // Test compositor starts in running state
         })
     }
@@ -810,7 +874,6 @@ mod tests {
         let effects_engine = Arc::new(RwLock::new(
             EffectsEngine::new(&config.effects).expect("effects init"),
         ));
-        let decoration_manager = Arc::new(RwLock::new(DecorationManager::new(&config.window)));
         let input_manager = Arc::new(RwLock::new(InputManager::new(
             &config.input,
             &config.bindings,
@@ -821,7 +884,6 @@ mod tests {
             workspace_manager,
             effects_engine,
             window_manager,
-            decoration_manager,
             input_manager,
         )
         .await
@@ -834,6 +896,8 @@ mod tests {
         let comp = make_test_compositor().await;
         assert!(!comp.is_windowed());
         assert!(comp.config().effects.enabled);
+        // DecorationManager should be initialized
+        assert!(comp.decoration_manager.read().get_decoration(1).is_none());
     }
 
     #[tokio::test]
@@ -844,10 +908,20 @@ mod tests {
         let id = comp.add_window("Test Window".into());
         assert_eq!(id, 1);
 
+        // Window should be registered with DecorationManager using real geometry
+        {
+            let deco = comp.decoration_manager.read();
+            let d = deco.get_decoration(id).expect("decoration should exist after add_window");
+            assert_eq!(d.title, "Test Window");
+            assert_eq!(d.window_width, 800, "should use default BackendWindow width");
+        }
+
         let (column, _pos, _count, _scrolling) = comp.get_workspace_info();
         assert!(column >= 0);
 
         comp.remove_window(id);
+        // Window should be removed from DecorationManager too
+        assert!(comp.decoration_manager.read().get_decoration(id).is_none());
     }
 
     #[tokio::test]

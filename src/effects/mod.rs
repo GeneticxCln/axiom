@@ -94,6 +94,20 @@ pub struct WindowEffectState {
     pub corner_radius: f32,
     /// Current shadow parameters
     pub shadow: ShadowParams,
+    /// `Some(instant)` if this element has an active open animation.
+    /// For top-level windows set by [`EffectsEngine::animate_window_open`].
+    /// For popups set by [`EffectsEngine::animate_popup_open`] to the
+    /// moment the popup was first registered, giving the popup its own
+    /// independent fade-in timeline independent of the parent's open
+    /// time (a popup opened long after the parent settles starts with
+    /// `t > 1.0` and renders at full alpha immediately).
+    pub opened_at: Option<Instant>,
+    /// `Some(parent_window_id)` if this effect state represents a popup.
+    /// The render path resolves the parent's live `scale` and
+    /// `position_offset` via this id so the popup inherits the parent's
+    /// spring physics in real time (not a stale snapshot at popup
+    /// creation). `None` for top-level windows.
+    pub parent_id: Option<u64>,
 }
 
 /// Shadow rendering parameters
@@ -165,6 +179,8 @@ impl Default for WindowEffectState {
             blur_radius: 0.0,
             corner_radius: 8.0,
             shadow: ShadowParams::default(),
+            opened_at: None,
+            parent_id: None,
         }
     }
 }
@@ -223,7 +239,8 @@ impl EffectsEngine {
         let default_easing_curve = match config.animations.curve.as_str() {
             "linear" => EasingCurve::Linear,
             "ease-in" => EasingCurve::EaseIn,
-
+            "ease" => EasingCurve::EaseOut,
+            "ease-out" => EasingCurve::EaseOut,
             "ease-in-out" => EasingCurve::EaseInOut,
             _ => EasingCurve::EaseOut,
         };
@@ -317,18 +334,6 @@ impl EffectsEngine {
                             effect_state.scale = v.max(0.0);
                         }
                         (
-                            animations::AnimationProperty::Rotation,
-                            animations::AnimationValue::Float(_v),
-                        ) => {
-                            // Rotation not yet stored on WindowEffectState — no-op for now
-                        }
-                        (
-                            animations::AnimationProperty::Size,
-                            animations::AnimationValue::Vector2(_size),
-                        ) => {
-                            // Size not yet stored on WindowEffectState — no-op for now
-                        }
-                        (
                             animations::AnimationProperty::SpringProperty(name),
                             animations::AnimationValue::Float(v),
                         ) => match name.as_str() {
@@ -372,6 +377,10 @@ impl EffectsEngine {
         let effect_state = self.window_effects.entry(window_id).or_default();
         effect_state.scale = 0.8;
         effect_state.opacity = 0.0;
+        // Mark the open instant so the render path can compute
+        // a per-frame fade-in for top-level windows and (via
+        // `animate_popup_open`) for descendants that key off it.
+        effect_state.opened_at = Some(Instant::now());
 
         // Start spring animations for smooth physics-driven transition
         self.animation_controller.start_spring_animation(
@@ -400,6 +409,55 @@ impl EffectsEngine {
         );
 
         info!("🎬 Started window open animation for window {}", window_id);
+    }
+
+    /// Register a popup as opened and seed its `WindowEffectState`.
+    ///
+    /// Stores a marker entry in `window_effects` keyed by `popup_id`.
+    /// The popup's effect state deliberately keeps `scale`, `opacity`,
+    /// and `position_offset` at identity defaults — those values are
+    /// resolved live at render time from the **parent** window's effect
+    /// state (via `parent_id`), so the popup's geometry tracks the
+    /// parent's spring physics in real time. The entry's `opened_at` is
+    /// set to `Instant::now()` so the popup has its own fade-in
+    /// timeline: a popup that appears well after its parent settles
+    /// starts at `t > 1.0` and renders immediately at full alpha;
+    /// a popup that appears together with its parent fades in over
+    /// `default_animation_duration` with an EaseOut cubic ramp.
+    ///
+    /// `parent_window_id` is the **`u64` window key** used by the
+    /// compositor's `window_map`, not the Wayland surface id. The
+    /// caller is responsible for resolving the surface-to-window
+    /// mapping before this call.
+    pub fn animate_popup_open(&mut self, popup_id: u64, parent_window_id: u64) {
+        let now = Instant::now();
+        self.window_effects.entry(popup_id).and_modify(|e| {
+            // Update parent_id and refresh opened_at so a reused popup
+            // id (rare on most compositors) gets a fresh fade-in too.
+            e.parent_id = Some(parent_window_id);
+            e.opened_at = Some(now);
+        }).or_insert_with(|| WindowEffectState {
+            scale: 1.0,
+            opacity: 1.0,
+            position_offset: (0.0, 0.0),
+            blur_radius: 0.0,
+            corner_radius: 8.0,
+            shadow: ShadowParams::default(),
+            opened_at: Some(now),
+            parent_id: Some(parent_window_id),
+        });
+        debug!(
+            "🎬 Popup {} registered with parent window {} (opened_at = {:?})",
+            popup_id, parent_window_id, now
+        );
+    }
+
+    /// Default animation duration in milliseconds. Exposed to render
+    /// callers (e.g. compute per-popup fade-in t = now - opened_at /
+    /// default_animation_duration) without forcing them to compute
+    /// Duration arithmetic on f32 inputs.
+    pub fn default_animation_duration_ms(&self) -> u32 {
+        self.default_animation_duration.as_millis() as u32
     }
 
     /// Start a window closing animation (routed through AnimationController spring physics)
@@ -491,20 +549,6 @@ impl EffectsEngine {
         // but we can add visual enhancements here
     }
 
-    /// Apply blur effect to a window
-    pub fn apply_blur_effect(&self, window_id: u64, _surface_data: &mut [u8]) {
-        if !self.blur_params.enabled || !self.config.enabled {
-            return;
-        }
-
-        // In a real implementation, this would apply GPU-based blur
-        // For now, we simulate the effect
-        debug!(
-            "🌊 Applying blur effect to window {} (radius: {:.1})",
-            window_id, self.blur_params.radius
-        );
-    }
-
     /// Get current visual state for a window
     pub fn get_window_effects(&self, window_id: u64) -> Option<&WindowEffectState> {
         self.window_effects.get(&window_id)
@@ -518,7 +562,7 @@ impl EffectsEngine {
     }
 
     /// Apply easing curve to animation progress (used in tests and internally)
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn apply_easing_curve(&self, t: f32, curve: &EasingCurve) -> f32 {
         let t = t.clamp(0.0, 1.0);
 
@@ -594,6 +638,20 @@ impl EffectsEngine {
     /// Get current effects quality (for performance monitoring)
     pub fn get_effects_quality(&self) -> f32 {
         self.effects_quality
+    }
+
+    /// Cheap read-only accessor for the global "effects enabled" flag in
+    /// the active [`EffectsConfig`]. Returned by the config layer's
+    /// `enabled` field and toggled at runtime via
+    /// [`apply_live_effects_control`] or [`toggle_effects`]. Used by the
+    /// compositor to decide whether to skip per-window effect queueing
+    /// before the WGPU post-process pass.
+    ///
+    /// [`EffectsConfig`]: crate::config::EffectsConfig
+    /// [`apply_live_effects_control`]: EffectsEngine::apply_live_effects_control
+    /// [`toggle_effects`]: EffectsEngine::toggle_effects
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled
     }
 
     /// Enable or disable animations

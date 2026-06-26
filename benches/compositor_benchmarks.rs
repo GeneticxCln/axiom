@@ -268,6 +268,85 @@ fn bench_input_processing(c: &mut Criterion) {
     group.finish();
 }
 
+/// Build a 64×64 RGBA benchmark texture with a simple gradient pattern.
+fn make_bench_texture_rgba() -> Vec<u8> {
+    let w = 64usize;
+    let h = 64usize;
+    let mut pixels = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            pixels.push((x * 4) as u8);
+            pixels.push((y * 4) as u8);
+            pixels.push(128u8);
+            pixels.push(255u8);
+        }
+    }
+    pixels
+}
+
+/// Benchmark `render_to_headless_target` with cached projection buffer.
+///
+/// Two variants:
+/// - `cold_path`: fresh renderer each iteration → always cache miss.
+/// - `hot_path`: same renderer across iterations → first call populates
+///   the projection cache; subsequent calls in the same iteration reuse
+///   it, measuring the per-frame speedup from the caching optimisation.
+fn bench_headless_render(c: &mut Criterion) {
+    use axiom::renderer::AxiomRenderer;
+
+    let mut group = c.benchmark_group("headless_render");
+
+    // ── Cold path: fresh renderer → cache always empty ────────────
+    group.bench_function("composite_128x128_cold", |b| {
+        b.iter_batched(
+            || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let mut renderer = rt.block_on(AxiomRenderer::new_headless()).unwrap();
+                let tex = make_bench_texture_rgba();
+                renderer.add_window(1, (0.0, 0.0), (64.0, 64.0));
+                renderer.update_window_texture(1, 64, 64, &tex);
+                renderer
+            },
+            |mut renderer| {
+                // Cache miss — allocates projection buffer
+                black_box(
+                    renderer
+                        .render_to_headless_target(128, 128)
+                        .unwrap(),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    // ── Hot path: call twice — first populates cache, second reuses │
+    group.bench_function("composite_128x128_hot", |b| {
+        b.iter_batched(
+            || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let mut renderer = rt.block_on(AxiomRenderer::new_headless()).unwrap();
+                let tex = make_bench_texture_rgba();
+                renderer.add_window(1, (0.0, 0.0), (64.0, 64.0));
+                renderer.update_window_texture(1, 64, 64, &tex);
+                // Warm: populate the projection cache (untimed)
+                renderer.render_to_headless_target(128, 128).unwrap();
+                renderer
+            },
+            |mut renderer| {
+                // Cache hit — projection buffer reused from warm call
+                black_box(
+                    renderer
+                        .render_to_headless_target(128, 128)
+                        .unwrap(),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
 /// Benchmark frame timing simulation
 fn bench_frame_timing(c: &mut Criterion) {
     let mut group = c.benchmark_group("frame_timing");
@@ -325,7 +404,8 @@ criterion_group!(
     bench_memory_operations,
     bench_concurrency,
     bench_input_processing,
-    bench_frame_timing
+    bench_frame_timing,
+    bench_headless_render
 );
 
 criterion_main!(benches);

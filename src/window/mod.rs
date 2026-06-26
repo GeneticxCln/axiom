@@ -80,6 +80,15 @@ pub struct AxiomWindow {
 /// Per-window properties that the compositor reads when applying layout or
 /// effects (floating vs tiled, fullscreen / maximized, opacity for fade
 /// animations, border radius for decorations).
+///
+/// `minimized` is the **compositor-internal** hidden-state flag — Wayland
+/// has no standard minimize protocol, so the compositor remembers the
+/// window is hidden, removes it from the visible layout, and replays
+/// `animate_window_open` on restore. Such windows are kept in the
+/// [`WindowManager`] map (so a `KeyRelease` event still routes to them)
+/// but absent from `ScrollableWorkspaces::calculate_workspace_layouts`.
+/// The kill-switch `features.enable_minimize` (see [`crate::config`])
+/// gates the titlebar button that drives this flip.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowProperties {
     /// Whether the window is floating (vs tiled)
@@ -90,6 +99,9 @@ pub struct WindowProperties {
 
     /// Whether the window is maximized
     pub maximized: bool,
+
+    /// Whether the window is minimized (hidden from layout, can be restored).
+    pub minimized: bool,
 
     /// Custom window opacity (0.0 - 1.0)
     pub opacity: f32,
@@ -104,6 +116,7 @@ impl Default for WindowProperties {
             floating: false,
             fullscreen: false,
             maximized: false,
+            minimized: false,
             opacity: 1.0,
             border_radius: 0,
         }
@@ -218,6 +231,80 @@ impl WindowManager {
         }
     }
 
+    /// Toggle the floating state of a window. Floating windows are
+    /// positioned by the user rather than auto-tiled.
+    pub fn toggle_floating(&mut self, id: u64) {
+        if let Some(window) = self.windows.get_mut(&id) {
+            window.properties.floating = !window.properties.floating;
+        }
+    }
+
+    /// Mark a window as minimized. Returns `true` if the window existed
+    /// and its state changed (i.e. it was previously visible). Minimizing
+    /// a window that is already minimized, or that does not exist, returns
+    /// `false` and leaves state untouched.
+    ///
+    /// Minimizing clears the keyboard focus if the minimized window was
+    /// focused, mirroring X11/Wayland conventions: clicking the minimize
+    /// button hides the window and focus moves to the next *visible*
+    /// window (any ID whose `properties.minimized` is `false`).
+    pub fn minimize_window(&mut self, id: u64) -> bool {
+        let Some(window) = self.windows.get_mut(&id) else {
+            return false;
+        };
+        if window.properties.minimized {
+            return false; // already minimized: idempotent
+        }
+        window.properties.minimized = true;
+        // If the minimized window was focused, drop focus to a visible
+        // sibling if one exists; otherwise leave focus = None.
+        if self.focused_window == Some(id) {
+            self.focused_window = self
+                .windows
+                .iter()
+                .find(|(_, w)| !w.properties.minimized)
+                .map(|(k, _)| *k);
+        }
+        true
+    }
+
+    /// Restore (un-minimize) a window. Returns `true` if the window
+    /// existed and was previously minimized. Restoring a window that is
+    /// already visible, or that does not exist, returns `false`.
+    ///
+    /// Restoring does NOT change focus — the caller (the backend) is
+    /// responsible for focusing the newly-restored window if desired.
+    /// This separation keeps `WindowManager` policy-neutral about who
+    /// gets the keyboard after a restore.
+    pub fn restore_window(&mut self, id: u64) -> bool {
+        let Some(window) = self.windows.get_mut(&id) else {
+            return false;
+        };
+        if !window.properties.minimized {
+            return false; // already visible: idempotent
+        }
+        window.properties.minimized = false;
+        true
+    }
+
+    /// Read-only accessor: is the given window currently minimized?
+    pub fn is_minimized(&self, id: u64) -> bool {
+        self.windows
+            .get(&id)
+            .map(|w| w.properties.minimized)
+            .unwrap_or(false)
+    }
+
+    /// Snapshot of currently-minimized window IDs. Useful for tests
+    /// and for rendering a (not-yet-shipped) taskbar list.
+    pub fn minimized_ids(&self) -> Vec<u64> {
+        self.windows
+            .iter()
+            .filter(|(_, w)| w.properties.minimized)
+            .map(|(k, _)| *k)
+            .collect()
+    }
+
     /// Drop every managed window. The `WindowManager` itself stays usable;
     /// subsequent calls to [`add_window`](Self::add_window) start mapping
     /// from ID 1 again.
@@ -305,6 +392,64 @@ mod tests {
         wm.toggle_fullscreen(id);
         let win = wm.get_window(id).unwrap();
         assert!(win.properties.fullscreen);
+    }
+
+    #[test]
+    fn test_minimize_window_marks_minimized_and_drops_focus() {
+        let mut wm = WindowManager::new(&WindowConfig::default());
+        let id_a = wm.add_window("a".into());
+        let _id_b = wm.add_window("b".into());
+        // Add order: a has id=1, b has id=2. a should still be focused.
+        assert_eq!(wm.focused_window_id(), Some(id_a));
+        assert!(wm.minimize_window(id_a));
+        assert!(wm.is_minimized(id_a));
+        // After minimizing the focused window, focus moves to a visible sibling.
+        assert_eq!(wm.focused_window_id(), Some(2));
+        assert_eq!(wm.minimized_ids(), vec![id_a]);
+    }
+
+    #[test]
+    fn test_minimize_window_is_idempotent() {
+        let mut wm = WindowManager::new(&WindowConfig::default());
+        let id = wm.add_window("only".into());
+        assert!(wm.minimize_window(id));
+        // Second call should be a no-op (idempotent).
+        assert!(!wm.minimize_window(id));
+        assert!(wm.is_minimized(id));
+    }
+
+    #[test]
+    fn test_minimize_unknown_window_returns_false() {
+        let mut wm = WindowManager::new(&WindowConfig::default());
+        assert!(!wm.minimize_window(99));
+        assert!(!wm.is_minimized(99));
+    }
+
+    #[test]
+    fn test_restore_window_unmarks_minimized() {
+        let mut wm = WindowManager::new(&WindowConfig::default());
+        let id = wm.add_window("only".into());
+        // With only one window present, minimizing the focused window
+        // drops focus to `None` (no visible sibling to take over).
+        wm.minimize_window(id);
+        assert!(wm.is_minimized(id));
+        assert_eq!(wm.focused_window_id(), None);
+        assert!(wm.restore_window(id));
+        assert!(!wm.is_minimized(id));
+        // Restore does NOT auto-focus (caller decides who gets the
+        // keyboard). A previous version of this test asserted
+        // `Some(2)` which was incorrect because (a) only one window
+        // exists so the only id is 1, not 2, and (b) restore is
+        // deliberately focus-neutral per the method's docstring.
+        assert_eq!(wm.focused_window_id(), None);
+    }
+
+    #[test]
+    fn test_restore_visible_window_returns_false() {
+        let mut wm = WindowManager::new(&WindowConfig::default());
+        let id = wm.add_window("only".into());
+        // Already visible — restore is a no-op.
+        assert!(!wm.restore_window(id));
     }
 
     #[test]

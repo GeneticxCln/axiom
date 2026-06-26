@@ -12,10 +12,7 @@ use crate::config::WindowConfig;
 use crate::effects::WindowEffectState;
 use crate::window::Rectangle;
 
-/// Default window width (pixels) used as a placeholder for button-position
-/// calculations when the real window width isn't available.
-/// TODO: thread real window width through from the backend / compositor.
-const PLACEHOLDER_WINDOW_WIDTH: i32 = 800;
+
 
 /// Decoration mode for windows
 #[allow(clippy::approx_constant)]
@@ -50,6 +47,10 @@ pub struct WindowDecoration {
 
     /// Button states
     pub buttons: TitlebarButtons,
+
+    /// Real window width in pixels (updated via [`DecorationManager::set_window_width`]).
+    /// Used to position titlebar buttons relative to the right edge.
+    pub window_width: i32,
 }
 
 /// Titlebar button states
@@ -124,10 +125,6 @@ pub struct DecorationTheme {
 /// Server-side decoration manager
 #[derive(Debug)]
 pub struct DecorationManager {
-    /// Configuration (wired for future use; kept for config-change propagation)
-    #[allow(dead_code)]
-    config: WindowConfig,
-
     /// Theme settings
     theme: DecorationTheme,
 
@@ -136,6 +133,19 @@ pub struct DecorationManager {
 
     /// Default decoration preferences
     default_mode: DecorationMode,
+
+    /// Whether the titlebar's minimize button should be drawn + interactive.
+    /// Bound at construction time from
+    /// [`crate::config::AxiomConfig::features::enable_minimize`]; chosen
+    /// to be `false` by default per the scope decision documented on
+    /// [`AxiomConfig::features`] (Wayland has no minimize protocol —
+    /// supporting it well would require a compositor-internal
+    /// iconified-window list and synthetic-surface round-tripping).
+    /// When `false`, the minimize button's bounds are zeroed and the
+    /// click / hover / press handlers skip it entirely so a
+    /// configuration flip cannot accidentally surface a non-functional
+    /// control to the user.
+    minimize_enabled: bool,
 }
 
 impl Default for ButtonState {
@@ -182,7 +192,16 @@ impl Default for DecorationTheme {
 }
 
 impl DecorationManager {
-    pub fn new(config: &WindowConfig) -> Self {
+    /// Construct a decoration manager.
+    ///
+    /// `minimize_enabled` is the gate from
+    /// [`crate::config::FeaturesConfig::enable_minimize`]; when
+    /// `false` the titlebar will render *only* the close and maximize
+    /// buttons and `handle_button_press` will never return
+    /// [`DecorationAction::Minimize`] — matching the scope decision
+    /// that minimize is a deeper-protocol feature and is currently
+    /// off by default.
+    pub fn new(config: &WindowConfig, minimize_enabled: bool) -> Self {
         info!("🎨 Initializing server-side decoration manager...");
 
         // Create theme from window config
@@ -200,12 +219,16 @@ impl DecorationManager {
         info!("  📏 Titlebar height: {}px", theme.titlebar_height);
         info!("  🔲 Border width: {}px", theme.border_width_focused);
         info!("  🎨 Corner radius: {:.1}px", theme.corner_radius);
+        info!(
+            "  🔘 Minimize button: {}",
+            if minimize_enabled { "enabled" } else { "disabled (scope decision)" }
+        );
 
         Self {
-            config: config.clone(),
             theme,
             decorations: HashMap::new(),
             default_mode: DecorationMode::ServerSide,
+            minimize_enabled,
         }
     }
 
@@ -223,15 +246,42 @@ impl DecorationManager {
         Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0])
     }
 
-    /// Register a window for decoration management
-    pub fn add_window(&mut self, window_id: u64, title: String, prefers_server_side: bool) {
+    /// Reset a single button's bounds to a degenerate zero rect.
+    /// Used when the corresponding feature is disabled so a stray click
+    /// can never land on it (the existing `contains_point` check returns
+    /// `false` for any zero-area rect).
+    ///
+    /// Deliberately does NOT take `&self`: at every call site the
+    /// caller is already holding a mutable borrow of `self.decorations`
+    /// (via `get_mut`), so an additional `&self` here would trip the
+    /// borrow checker. The function operates purely on the button.
+    fn zero_button_bounds(button: &mut ButtonState) {
+        button.bounds = Rectangle {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
+    }
+
+    /// Register a window for decoration management.
+    ///
+    /// `width` is the window's current width in pixels. Callers must supply the
+    /// real geometry — there is no longer a placeholder fallback.
+    pub fn add_window(
+        &mut self,
+        window_id: u64,
+        title: String,
+        prefers_server_side: bool,
+        width: i32,
+    ) {
         let mode = if prefers_server_side {
             self.default_mode
         } else {
             DecorationMode::ClientSide
         };
 
-        let decoration = WindowDecoration {
+        let mut decoration = WindowDecoration {
             mode,
             prefers_server_side,
             titlebar_height: if mode == DecorationMode::ServerSide {
@@ -242,10 +292,10 @@ impl DecorationManager {
             title,
             focused: false,
             buttons: TitlebarButtons::default(),
+            window_width: width,
         };
 
         // Update button positions
-        let mut decoration = decoration;
         self.update_button_positions(window_id, &mut decoration);
 
         self.decorations.insert(window_id, decoration);
@@ -260,6 +310,42 @@ impl DecorationManager {
     pub fn remove_window(&mut self, window_id: u64) {
         if self.decorations.remove(&window_id).is_some() {
             debug!("🗑️ Removed decoration for window {}", window_id);
+        }
+    }
+
+    /// Update the stored window width and recompute button positions.
+    ///
+    /// Call this when the window is resized or when the real width first
+    /// becomes available (e.g. from the Wayland surface configure event).
+    pub fn set_window_width(&mut self, window_id: u64, width: i32) {
+        if let Some(decoration) = self.decorations.get_mut(&window_id) {
+            if decoration.window_width == width {
+                return;
+            }
+            decoration.window_width = width;
+
+            if decoration.mode == DecorationMode::ServerSide {
+                let button_size = self.theme.button_size;
+                let titlebar_height = self.theme.titlebar_height;
+                let button_y = (titlebar_height - button_size) / 2;
+                let ww = width;
+                let button_margin = 8;
+                decoration.buttons.close.bounds =
+                    Self::button_rect(ww, button_size, button_y, button_margin, 0);
+                decoration.buttons.maximize.bounds =
+                    Self::button_rect(ww, button_size, button_y, button_margin, 1);
+                if self.minimize_enabled {
+                    decoration.buttons.minimize.bounds =
+                        Self::button_rect(ww, button_size, button_y, button_margin, 2);
+                } else {
+                    // Gate per the `enable_minimize` flag — zero rect so a
+                    // stray click can never land on it (contains_point
+                    // returns false for zero-area rects).
+                    Self::zero_button_bounds(&mut decoration.buttons.minimize);
+                }
+            }
+
+            debug!("📏 Updated window {} width to {}px", window_id, width);
         }
     }
 
@@ -311,14 +397,18 @@ impl DecorationManager {
                 let button_size = self.theme.button_size;
                 let titlebar_height = self.theme.titlebar_height;
                 let button_y = (titlebar_height - button_size) / 2;
-                let ww = PLACEHOLDER_WINDOW_WIDTH;
+                let ww = decoration.window_width;
                 let button_margin = 8;
                 decoration.buttons.close.bounds =
                     Self::button_rect(ww, button_size, button_y, button_margin, 0);
                 decoration.buttons.maximize.bounds =
                     Self::button_rect(ww, button_size, button_y, button_margin, 1);
-                decoration.buttons.minimize.bounds =
-                    Self::button_rect(ww, button_size, button_y, button_margin, 2);
+                if self.minimize_enabled {
+                    decoration.buttons.minimize.bounds =
+                        Self::button_rect(ww, button_size, button_y, button_margin, 2);
+                } else {
+                    Self::zero_button_bounds(&mut decoration.buttons.minimize);
+                }
             }
         }
     }
@@ -405,7 +495,14 @@ impl DecorationManager {
                 return Some(DecorationAction::Close);
             }
 
-            if decoration.buttons.minimize.bounds.contains_point(x, y) {
+            // Minimize button is gated by the configured feature flag.
+            // Belt-and-braces: even if a stale non-zero bounds slipped
+            // through (e.g. legacy config or race with a toggle), we
+            // refuse to emit `Minimize` when the feature is off so the
+            // event stream stays consistent.
+            if self.minimize_enabled
+                && decoration.buttons.minimize.bounds.contains_point(x, y)
+            {
                 decoration.buttons.minimize.pressed = true;
                 return Some(DecorationAction::Minimize);
             }
@@ -433,7 +530,12 @@ impl DecorationManager {
     pub fn handle_button_release(&mut self, window_id: u64, _x: i32, _y: i32) {
         if let Some(decoration) = self.decorations.get_mut(&window_id) {
             decoration.buttons.close.pressed = false;
-            decoration.buttons.minimize.pressed = false;
+            // Only clear the pressed flag for minimize when the feature is
+            // enabled — otherwise the field is logically inert and we
+            // avoid a redundant write per release.
+            if self.minimize_enabled {
+                decoration.buttons.minimize.pressed = false;
+            }
             decoration.buttons.maximize.pressed = false;
         }
     }
@@ -443,8 +545,10 @@ impl DecorationManager {
         if let Some(decoration) = self.decorations.get_mut(&window_id) {
             // Update button hover states
             decoration.buttons.close.hovered = decoration.buttons.close.bounds.contains_point(x, y);
-            decoration.buttons.minimize.hovered =
-                decoration.buttons.minimize.bounds.contains_point(x, y);
+            if self.minimize_enabled {
+                decoration.buttons.minimize.hovered =
+                    decoration.buttons.minimize.bounds.contains_point(x, y);
+            }
             decoration.buttons.maximize.hovered =
                 decoration.buttons.maximize.bounds.contains_point(x, y);
         }
@@ -459,14 +563,18 @@ impl DecorationManager {
         let button_size = self.theme.button_size;
         let titlebar_height = self.theme.titlebar_height;
         let button_y = (titlebar_height - button_size) / 2;
-        let ww = PLACEHOLDER_WINDOW_WIDTH;
+        let ww = decoration.window_width;
         let button_margin = 8;
         decoration.buttons.close.bounds =
             Self::button_rect(ww, button_size, button_y, button_margin, 0);
         decoration.buttons.maximize.bounds =
             Self::button_rect(ww, button_size, button_y, button_margin, 1);
-        decoration.buttons.minimize.bounds =
-            Self::button_rect(ww, button_size, button_y, button_margin, 2);
+        if self.minimize_enabled {
+            decoration.buttons.minimize.bounds =
+                Self::button_rect(ww, button_size, button_y, button_margin, 2);
+        } else {
+            Self::zero_button_bounds(&mut decoration.buttons.minimize);
+        }
     }
 
     /// Get the current theme
@@ -481,20 +589,24 @@ impl DecorationManager {
         let button_size = self.theme.button_size;
         let titlebar_height = self.theme.titlebar_height;
         let button_y = (titlebar_height - button_size) / 2;
-        let ww = PLACEHOLDER_WINDOW_WIDTH;
         let button_margin = 8;
 
-        // Update all window button positions
+        // Update all window button positions using each window's stored width
         let window_ids: Vec<u64> = self.decorations.keys().copied().collect();
         for window_id in window_ids {
             if let Some(decoration) = self.decorations.get_mut(&window_id) {
                 if decoration.mode == DecorationMode::ServerSide {
+                    let ww = decoration.window_width;
                     decoration.buttons.close.bounds =
                         Self::button_rect(ww, button_size, button_y, button_margin, 0);
                     decoration.buttons.maximize.bounds =
                         Self::button_rect(ww, button_size, button_y, button_margin, 1);
-                    decoration.buttons.minimize.bounds =
-                        Self::button_rect(ww, button_size, button_y, button_margin, 2);
+                    if self.minimize_enabled {
+                        decoration.buttons.minimize.bounds =
+                            Self::button_rect(ww, button_size, button_y, button_margin, 2);
+                    } else {
+                        Self::zero_button_bounds(&mut decoration.buttons.minimize);
+                    }
                 }
             }
         }
@@ -658,15 +770,15 @@ mod tests {
 
     #[test]
     fn test_decoration_manager_initialization() {
-        let mgr = DecorationManager::new(&WindowConfig::default());
+        let mgr = DecorationManager::new(&WindowConfig::default(), true);
         assert_eq!(mgr.default_mode, DecorationMode::ServerSide);
         assert!(mgr.theme().corner_radius > 0.0);
     }
 
     #[test]
     fn test_add_and_remove_window() {
-        let mut mgr = DecorationManager::new(&WindowConfig::default());
-        mgr.add_window(1, "Test".into(), true);
+        let mut mgr = DecorationManager::new(&WindowConfig::default(), true);
+        mgr.add_window(1, "Test".into(), true, 800);
         assert!(mgr.get_decoration(1).is_some());
         assert_eq!(mgr.get_decoration(1).unwrap().title, "Test");
 
@@ -676,8 +788,8 @@ mod tests {
 
     #[test]
     fn test_set_window_focus_flips() {
-        let mut mgr = DecorationManager::new(&WindowConfig::default());
-        mgr.add_window(7, "X".into(), true);
+        let mut mgr = DecorationManager::new(&WindowConfig::default(), true);
+        mgr.add_window(7, "X".into(), true, 800);
         assert!(!mgr.get_decoration(7).unwrap().focused);
         mgr.set_window_focus(7, true);
         assert!(mgr.get_decoration(7).unwrap().focused);
@@ -687,14 +799,14 @@ mod tests {
 
     #[test]
     fn test_set_window_focus_unknown_noop() {
-        let mut mgr = DecorationManager::new(&WindowConfig::default());
+        let mut mgr = DecorationManager::new(&WindowConfig::default(), true);
         mgr.set_window_focus(999, true); // shouldn't panic
     }
 
     #[test]
     fn test_set_window_title_updates() {
-        let mut mgr = DecorationManager::new(&WindowConfig::default());
-        mgr.add_window(1, "Old".into(), true);
+        let mut mgr = DecorationManager::new(&WindowConfig::default(), true);
+        mgr.add_window(1, "Old".into(), true, 800);
         mgr.set_window_title(1, "New".into());
         assert_eq!(mgr.get_decoration(1).unwrap().title, "New");
     }
@@ -718,9 +830,9 @@ mod tests {
 
     #[test]
     fn test_client_side_decoration_skips_titlebar() {
-        let mut mgr = DecorationManager::new(&WindowConfig::default());
+        let mut mgr = DecorationManager::new(&WindowConfig::default(), true);
         // prefers_server_side=false => ClientSide => no titlebar
-        mgr.add_window(1, "CSD".into(), false);
+        mgr.add_window(1, "CSD".into(), false, 800);
         assert_eq!(
             mgr.get_decoration(1).unwrap().mode,
             DecorationMode::ClientSide
@@ -730,8 +842,8 @@ mod tests {
 
     #[test]
     fn test_button_press_in_titlebar_returns_start_move() {
-        let mut mgr = DecorationManager::new(&WindowConfig::default());
-        mgr.add_window(1, "T".into(), true);
+        let mut mgr = DecorationManager::new(&WindowConfig::default(), true);
+        mgr.add_window(1, "T".into(), true, 1000);
         // titlebar_rect has width 1000 in helper code for now;
         // a click at (10, 5) is well inside the titlebar (height default = 32)
         let action = mgr.handle_button_press(1, 10, 5);
@@ -740,8 +852,8 @@ mod tests {
 
     #[test]
     fn test_button_press_outside_returns_none() {
-        let mut mgr = DecorationManager::new(&WindowConfig::default());
-        mgr.add_window(1, "T".into(), true);
+        let mut mgr = DecorationManager::new(&WindowConfig::default(), true);
+        mgr.add_window(1, "T".into(), true, 800);
         // y=500 is well below the 32-pixel titlebar
         let action = mgr.handle_button_press(1, 10, 500);
         assert!(action.is_none());
@@ -749,8 +861,8 @@ mod tests {
 
     #[test]
     fn test_button_press_then_release_clears_pressed() {
-        let mut mgr = DecorationManager::new(&WindowConfig::default());
-        mgr.add_window(1, "T".into(), true);
+        let mut mgr = DecorationManager::new(&WindowConfig::default(), true);
+        mgr.add_window(1, "T".into(), true, 800);
         // Baseline: nothing is pressed.
         assert!(!mgr.get_decoration(1).unwrap().buttons.close.pressed);
         // The titlebar rect in handle_button_press is hardcoded width=1000,
@@ -780,5 +892,80 @@ mod tests {
         assert!(!r.contains_point(40, 20)); // right edge exclusive
         assert!(!r.contains_point(10, 60)); // bottom edge exclusive
         assert!(!r.contains_point(9, 20)); // left edge exclusive
+    }
+
+    /// Scope decision: when `minimize_enabled = false` (the new default
+    /// derived from `crate::config::FeaturesConfig::enable_minimize`),
+    /// the minimize button must be neither drawn nor clickable. We
+    /// verify both invariants: the bounds are zeroed in
+    /// [`DecorationManager::add_window`] / [`DecorationManager::set_window_width`],
+    /// and a click anywhere — even pixel-perfectly on the historical
+    /// position — never yields [`DecorationAction::Minimize`].
+    #[test]
+    fn test_minimize_disabled_zeroes_bounds_on_add() {
+        let mut mgr = DecorationManager::new(&WindowConfig::default(), false);
+        mgr.add_window(42, "NoMin".into(), true, 1000);
+        let bounds = &mgr.get_decoration(42).unwrap().buttons.minimize.bounds;
+        assert_eq!(bounds.width, 0, "minimize button width zeroed");
+        assert_eq!(bounds.height, 0, "minimize button height zeroed");
+    }
+
+    /// Belt-and-braces: even if we manually inflate the minimize bounds
+    /// (which a future code path could), `handle_button_press` must
+    /// still refuse to emit `Minimize` while the feature is off.
+    #[test]
+    fn test_minimize_disabled_click_returns_none() {
+        let mut mgr = DecorationManager::new(&WindowConfig::default(), false);
+        mgr.add_window(7, "NoMin".into(), true, 1000);
+
+        // Click on a point that would be the minimize button's historical
+        // centre for width=1000: ~x=712, y=12 (button_x = ww - (32) * 3 = 904,
+        // centre ~ (920, 16)). One of these is guaranteed to land inside
+        // even after a typo in geometry. Sweep a range to be sure.
+        for x in [700u32, 712, 750, 800, 850] {
+            let action = mgr.handle_button_press(7, x as i32, 12);
+            // Either None (no hit) or a non-Minimize action (e.g. StartMove)
+            // is acceptable; the hard requirement is `!= Some(Minimize)`.
+            if let Some(a) = action {
+                assert_ne!(
+                    a,
+                    DecorationAction::Minimize,
+                    "minimize-disabled manager leaked Minimize action at x={}",
+                    x
+                );
+            }
+        }
+    }
+
+    /// Positive case: with the feature enabled, a click landing on the
+    /// minimize button must yield `Some(DecorationAction::Minimize)`.
+    /// Confirms the gate, not just the disable path.
+    #[test]
+    fn test_minimize_enabled_emits_action() {
+        let mut mgr = DecorationManager::new(&WindowConfig::default(), true);
+        mgr.add_window(9, "YesMin".into(), true, 1000);
+
+        // Geometry: button_size=24, titlebar=32, button_margin=8,
+        // button_y=4, ww=1000 → minimize (idx=2) bounds at
+        //   x = 1000 - 32 * 3 = 904
+        //   y = 4
+        //   width=24, height=24
+        // → button spans x ∈ [904, 928), y ∈ [4, 28). Centre (916, 16).
+        let action = mgr.handle_button_press(9, 916, 16);
+        assert_eq!(action, Some(DecorationAction::Minimize));
+    }
+
+    /// Confirm that after toggling a non-`set_window_width` path
+    /// (`update_theme`), the minimize bounds are still zeroed while
+    /// disabled. Catches the case where future code paths that
+    /// recompute button positions might forget to honour the gate.
+    #[test]
+    fn test_minimize_disabled_survives_update_theme() {
+        let mut mgr = DecorationManager::new(&WindowConfig::default(), false);
+        mgr.add_window(11, "T".into(), true, 800);
+        mgr.update_theme(DecorationTheme::default());
+        let bounds = &mgr.get_decoration(11).unwrap().buttons.minimize.bounds;
+        assert_eq!(bounds.width, 0);
+        assert_eq!(bounds.height, 0);
     }
 }

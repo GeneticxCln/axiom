@@ -44,8 +44,6 @@ impl Atoms {
     }
 }
 
-// use crate::experimental::smithay::smithay_backend_real::State;
-
 /// X11 Window Manager (`XWayland`) integration
 #[allow(missing_docs)]
 #[derive(Debug)]
@@ -57,14 +55,19 @@ pub enum XwmEvent {
         property: x11rb::protocol::xproto::Atom,
         time: x11rb::protocol::xproto::Timestamp,
     },
+    /// A new X11 window was mapped and should be added to the compositor.
+    WindowMapped {
+        x11_window_id: u32,
+        title: String,
+    },
+    /// An X11 window was unmapped and should be removed from the compositor.
+    WindowUnmapped {
+        x11_window_id: u32,
+    },
 }
 
 pub struct AxiomXwm {
     conn: Rc<RustConnection>,
-    #[allow(dead_code)]
-    screen_num: usize,
-    #[allow(dead_code)]
-    root: Window,
     windows: HashMap<Window, X11WindowData>,
     pub atoms: Atoms,
     selection_window: Window,
@@ -125,8 +128,6 @@ impl AxiomXwm {
 
         Ok(Self {
             conn,
-            screen_num,
-            root,
             windows: HashMap::new(),
             atoms,
             selection_window,
@@ -137,8 +138,7 @@ impl AxiomXwm {
     pub fn handle_event(&mut self, event: &x11rb::protocol::Event) -> Result<Option<XwmEvent>> {
         match event {
             x11rb::protocol::Event::MapRequest(event) => {
-                self.handle_map_request(*event)?;
-                Ok(None)
+                self.handle_map_request(*event)
             }
             x11rb::protocol::Event::ConfigureRequest(event) => {
                 // Grant configure request for now
@@ -153,7 +153,9 @@ impl AxiomXwm {
             x11rb::protocol::Event::UnmapNotify(event) => {
                 info!("🪟 X11 Window Unmapped: {}", event.window);
                 self.windows.remove(&event.window);
-                Ok(None)
+                Ok(Some(XwmEvent::WindowUnmapped {
+                    x11_window_id: event.window,
+                }))
             }
             x11rb::protocol::Event::SelectionNotify(event) => {
                 self.handle_selection_notify(*event);
@@ -176,36 +178,73 @@ impl AxiomXwm {
         }
     }
 
-    fn handle_map_request(&mut self, event: MapRequestEvent) -> Result<()> {
+    fn handle_map_request(&mut self, event: MapRequestEvent) -> Result<Option<XwmEvent>> {
         info!("🪟 Processing MapRequest for window {}", event.window);
 
         // Map the window
         self.conn.map_window(event.window)?;
         self.conn.flush()?;
 
+        // Fetch window title from _NET_WM_NAME or WM_NAME
+        let title = self.fetch_window_title(event.window);
+
         // Track the window
         let data = X11WindowData {
             window_id: event.window,
             mapped: true,
-            title: "X11 Window".into(), // TODO: Fetch title property
+            title: title.clone(),
         };
         self.windows.insert(event.window, data);
 
-        // Notify Axiom state about new window
-        // We'll use a placeholder surface ID for now, or need a way to wrap X11 window as surface
-        // Since Smithay 0.3 doesn't give us X11Surface, we might just track it internally
-        // or create a dummy surface if possible.
+        info!("✅ Mapped X11 window {}: \"{}\"", event.window, title);
 
-        // For Phase 7.2.2, simply seeing the window appear (managed by XWayland/X11) is the goal.
-        // Axiom needs to know it exists to layout it?
-        // If we map it, XWayland creates a Wayland surface for it.
-        // We will receive a XdgNewToplevel or similar?
-        // actually XWayland clients usually appear as wl_surface/xdg_surface to the compositor!
-        // So Smithay's `xdg_shell_init` callback might catch it IF XWayland uses XDG shell.
-        // Standard XWayland uses `zxdg_shell_v6` or `xdg_shell`.
+        // Return event so backend can create a compositor window
+        Ok(Some(XwmEvent::WindowMapped {
+            x11_window_id: event.window,
+            title,
+        }))
+    }
 
-        info!("✅ Mapped X11 window {}", event.window);
-        Ok(())
+    /// Fetch the window title from _NET_WM_NAME (UTF-8) or WM_NAME (STRING).
+    fn fetch_window_title(&self, window: Window) -> String {
+        // Try _NET_WM_NAME first (UTF-8 encoded)
+        if let Ok(reply) = self.conn.get_property(
+            false,
+            window,
+            self.atoms.UTF8_STRING,
+            x11rb::protocol::xproto::AtomEnum::ANY,
+            0,
+            1024,
+        ) {
+            if let Ok(prop) = reply.reply() {
+                if !prop.value.is_empty() {
+                    return String::from_utf8_lossy(&prop.value).into_owned();
+                }
+            }
+        }
+
+        // Fall back to WM_NAME (STRING type)
+        let wm_name = self.conn.intern_atom(false, b"WM_NAME");
+        if let Ok(reply) = wm_name {
+            if let Ok(atom) = reply.reply() {
+                if let Ok(reply) = self.conn.get_property(
+                    false,
+                    window,
+                    atom.atom,
+                    x11rb::protocol::xproto::AtomEnum::ANY,
+                    0,
+                    1024,
+                ) {
+                    if let Ok(prop) = reply.reply() {
+                        if !prop.value.is_empty() {
+                            return String::from_utf8_lossy(&prop.value).into_owned();
+                        }
+                    }
+                }
+            }
+        }
+
+        format!("X11 Window #{}", window)
     }
 
     fn handle_selection_notify(&mut self, event: x11rb::protocol::xproto::SelectionNotifyEvent) {
