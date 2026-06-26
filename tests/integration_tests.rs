@@ -1071,6 +1071,86 @@ async fn test_remove_window_clears_shadow_blur_queues() -> Result<()> {
     Ok(())
 }
 
+/// Integration test: creates 3 windows, queues shadows for all three,
+/// removes the middle one, and verifies only that window's shadow is cleared
+/// while the other two windows' shadows remain intact.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_remove_middle_window_clears_only_its_shadow() -> Result<()> {
+    use axiom::renderer::AxiomRenderer;
+
+    let mut renderer = AxiomRenderer::new_headless().await?;
+
+    // ── Add three windows with distinct positions ────────────────
+    renderer.add_window(1, (0.0, 0.0), (200.0, 150.0));
+    renderer.add_window(2, (0.0, 160.0), (200.0, 150.0));
+    renderer.add_window(3, (0.0, 320.0), (200.0, 150.0));
+
+    // ── Queue shadows for all three ─────────────────────────────
+    renderer.queue_shadow(1, (0.0, 0.0), (200.0, 150.0), Default::default());
+    renderer.queue_shadow(2, (0.0, 160.0), (200.0, 150.0), Default::default());
+    renderer.queue_shadow(3, (0.0, 320.0), (200.0, 150.0), Default::default());
+
+    // ── Queue blurs for all three ────────────────────────────────
+    let blur_params = axiom::effects::BlurParams {
+        enabled: true,
+        radius: 5.0,
+        intensity: 0.8,
+        background_blur: true,
+        window_blur: false,
+    };
+    renderer.queue_blur(1, (0.0, 0.0), (200.0, 150.0), blur_params.clone());
+    renderer.queue_blur(2, (0.0, 160.0), (200.0, 150.0), blur_params.clone());
+    renderer.queue_blur(3, (0.0, 320.0), (200.0, 150.0), blur_params);
+
+    // ── Pre-condition: exactly 3 windows ───────────────────────
+    assert_eq!(renderer.window_count(), 3, "three windows before removal");
+
+    // ── Verify all three are queued ──────────────────────────────
+    assert!(renderer.has_window_shadow(1), "window 1 shadow queued");
+    assert!(renderer.has_window_shadow(2), "window 2 shadow queued");
+    assert!(renderer.has_window_shadow(3), "window 3 shadow queued");
+    assert!(renderer.has_window_blur(1), "window 1 blur queued");
+    assert!(renderer.has_window_blur(2), "window 2 blur queued");
+    assert!(renderer.has_window_blur(3), "window 3 blur queued");
+
+    // ── Remove the middle window (ID 2) ─────────────────────────
+    assert!(renderer.remove_window(2), "should successfully remove window 2");
+
+    // ── Only window 2's shadow and blur entries should be cleared ──
+    assert!(
+        !renderer.has_window_shadow(2),
+        "window 2 shadow entry should be removed"
+    );
+    assert!(
+        !renderer.has_window_blur(2),
+        "window 2 blur entry should be removed"
+    );
+
+    // ── Windows 1 and 3 shadows remain intact ───────────────────
+    assert!(
+        renderer.has_window_shadow(1),
+        "window 1 shadow should survive removal of window 2"
+    );
+    assert!(
+        renderer.has_window_shadow(3),
+        "window 3 shadow should survive removal of window 2"
+    );
+    assert!(
+        renderer.has_window_blur(1),
+        "window 1 blur should survive removal of window 2"
+    );
+    assert!(
+        renderer.has_window_blur(3),
+        "window 3 blur should survive removal of window 2"
+    );
+
+    // ── Window count: 3 - 1 = 2 ─────────────────────────────────
+    assert_eq!(renderer.window_count(), 2, "two windows remaining after removal");
+
+    Ok(())
+}
+
 /// Integration test: `remove_window` on a completely empty renderer
 /// must not panic and must return `false` (no-op).
 #[tokio::test]
@@ -1262,6 +1342,109 @@ async fn test_two_overlapping_windows_alpha_blend() -> Result<()> {
     assert!(
         r > 10 || g > 10,
         "sanity: overlap pixel is not transparent black"
+    );
+
+    Ok(())
+}
+
+/// Integration test: reverse draw order from the alpha-blend test —
+/// green drawn FIRST (bottom), red SECOND (top, opaque). The overlap
+/// region at (48,48) must show red-dominant pixels (high R, low G)
+/// because the opaque red window completely covers the underlying
+/// green, proving the GPU blend pipeline correctly handles draw order.
+///
+/// Layout (128×128 target, BGRA sRGB):
+///   Window 1 (green, α=0.5): pos (0, 0)  size 64×64 — drawn first
+///   Window 2 (red, opaque):   pos (32,32) size 64×64 — drawn on top
+///
+/// Regions after composite:
+///   - (8,8)    → green-only (below window 2), dim green (G elevated, R low)
+///   - (72,72)  → red-only (below window 1, inside window 2), high R, low G
+///   - (48,48)  → overlap, red covers green → high R, low G (red-dominant)
+#[tokio::test]
+#[serial_test::serial]
+async fn test_reverse_draw_order_red_dominant_blend() -> Result<()> {
+    use axiom::renderer::AxiomRenderer;
+
+    let mut renderer = AxiomRenderer::new_headless().await?;
+
+    // ── Window 1: solid green, half-opacity, at top-left (bottom) ──
+    // Use upsert for window 1 with opacity=0.5.
+    let green_tex = make_solid_texture_rgba(0, 255, 0, 255);
+    renderer.upsert_window_rect(1, (0.0, 0.0), (64.0, 64.0), 0.5);
+    renderer.update_window_texture(1, 32, 32, &green_tex);
+
+    // ── Window 2: solid red, fully opaque, offset to overlap (top) ──
+    // add_window defaults to opacity=1.0 — drawn second, covers green.
+    let red_tex = make_solid_texture_rgba(255, 0, 0, 255);
+    renderer.add_window(2, (32.0, 32.0), (64.0, 64.0));
+    renderer.update_window_texture(2, 32, 32, &red_tex);
+
+    // ── Composite via render pipeline ─────────────────────────────
+    let width = 128u32;
+    let height = 128u32;
+    let pixels = renderer.render_to_headless_target(width, height)?;
+    assert_eq!(pixels.len(), (width * height * 4) as usize, "correct byte count");
+
+    // Helper: fetch (R, G, B, A) at (x, y).
+    // BGRA sRGB target → bytes at idx+0=B, idx+1=G, idx+2=R, idx+3=A.
+    let sample = |x: u32, y: u32| -> (u8, u8, u8, u8) {
+        let idx = ((y * width + x) * 4) as usize;
+        (
+            pixels[idx + 2], // R
+            pixels[idx + 1], // G
+            pixels[idx + 0], // B
+            pixels[idx + 3], // A
+        )
+    };
+
+    // ── Green-only region (8, 8) ──────────────────────────────────
+    // Window 1 (green, α=0.5) drawn first, no red overlap here.
+    // Semi-transparent green over transparent black → dim green.
+    let (r, g, b, a) = sample(8, 8);
+    assert!(r < 10, "green-only: R should be low, got {}", r);
+    assert!(g > 50, "green-only: G should be elevated (even with α=0.5), got {}", g);
+    assert!(b < 10, "green-only: B should be low, got {}", b);
+    assert!(a < 200, "green-only: A should reflect partial opacity, got {}", a);
+
+    // ── Red-only region (72, 72) ───────────────────────────────────
+    // y=72 is below green window 1's bottom edge (64), inside red window 2.
+    // Opaque red over transparent black → pure red.
+    let (r, g, b, a) = sample(72, 72);
+    assert!(r > 200, "red-only: R should be high (opaque red), got {}", r);
+    assert!(g < 10, "red-only: G should be low, got {}", g);
+    assert!(b < 10, "red-only: B should be low, got {}", b);
+    assert!(a > 200, "red-only: A should be opaque, got {}", a);
+
+    // ── Overlap region (48, 48) ───────────────────────────────────
+    // Green drawn first, then opaque red on top.
+    // Blend = 1.0·red + 0.0·green → pure red → red-dominant.
+    let (r, g, b, a) = sample(48, 48);
+    assert!(
+        r > 200,
+        "overlap: R should be high (red dominates), got {}", r
+    );
+    assert!(
+        g < 30,
+        "overlap: G should be low (green covered by opaque red), got {}", g
+    );
+    assert!(
+        b < 10,
+        "overlap: B should stay low, got {}", b
+    );
+    assert!(
+        a > 200,
+        "overlap: A should be opaque (red is opaque), got {}", a
+    );
+
+    // ── Proof of red-dominant blending via draw order ─────────────
+    // Compare with the original alpha_blend test: there, red was bottom
+    // and green (α=0.5) blended on top → both R and G elevated.
+    // Here, red is on top (opaque) → overlap is pure red, proving draw
+    // order matters and the GPU blend pipeline handles it correctly.
+    assert!(
+        r > g * 5,
+        "overlap: R should be >5x G (red dominates, not a blend), R={} G={}", r, g
     );
 
     Ok(())
@@ -1693,7 +1876,7 @@ async fn test_ipc_workspace_command_flow() -> Result<()> {
     let mut ipc_server = AxiomIPCServer::new();
 
     // Start the server (creates broadcast and command channels)
-    ipc_server.start().await?;
+    ipc_server.start()?;
 
     // Simulate sending a WorkspaceCommand through the command channel
     // (same path the per-client handler uses)
@@ -1707,7 +1890,7 @@ async fn test_ipc_workspace_command_flow() -> Result<()> {
     }
 
     // Process the message
-    let (changed, actions) = ipc_server.process_messages(&mut config).await?;
+    let (changed, actions) = ipc_server.process_messages(&mut config)?;
 
     // add_window is a WorkspaceCommand -> forwarded to pending_actions
     // (compositor dispatches it); no config changes
@@ -1735,7 +1918,7 @@ async fn test_ipc_effects_control_flow() -> Result<()> {
     let mut config = AxiomConfig::default();
     let mut ipc_server = AxiomIPCServer::new();
 
-    ipc_server.start().await?;
+    ipc_server.start()?;
 
     let cmd = LazyUIMessage::EffectsControl {
         enabled: Some(false),
@@ -1747,7 +1930,7 @@ async fn test_ipc_effects_control_flow() -> Result<()> {
         sender.send(cmd).unwrap();
     }
 
-    let (changed, actions) = ipc_server.process_messages(&mut config).await?;
+    let (changed, actions) = ipc_server.process_messages(&mut config)?;
 
     // EffectsControl is forwarded to pending_actions
     assert!(!changed);
@@ -1768,7 +1951,7 @@ async fn test_ipc_optimize_config_flow() -> Result<()> {
     let mut config = AxiomConfig::default();
     let mut ipc_server = AxiomIPCServer::new();
 
-    ipc_server.start().await?;
+    ipc_server.start()?;
 
     let original_blur = config.effects.blur.radius;
 
@@ -1783,7 +1966,7 @@ async fn test_ipc_optimize_config_flow() -> Result<()> {
         sender.send(cmd).unwrap();
     }
 
-    let (changed, actions) = ipc_server.process_messages(&mut config).await?;
+    let (changed, actions) = ipc_server.process_messages(&mut config)?;
 
     assert!(changed, "OptimizeConfig should change config");
     assert!(actions.is_empty(), "no pending actions for config changes");
@@ -1959,7 +2142,7 @@ async fn test_ipc_readonly_messages() -> Result<()> {
     let config_clone = config.clone();
 
     let mut ipc_server = AxiomIPCServer::new();
-    ipc_server.start().await?;
+    ipc_server.start()?;
 
     // HealthCheck
     if let Some(sender) = ipc_server.command_sender_for_test() {
@@ -1967,7 +2150,7 @@ async fn test_ipc_readonly_messages() -> Result<()> {
         sender.send(LazyUIMessage::GetPerformanceReport).unwrap();
     }
 
-    let (changed, actions) = ipc_server.process_messages(&mut config).await?;
+    let (changed, actions) = ipc_server.process_messages(&mut config)?;
 
     assert!(!changed, "HealthCheck should not change config");
     assert!(actions.is_empty(), "HealthCheck produces no actions");

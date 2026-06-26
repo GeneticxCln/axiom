@@ -343,6 +343,28 @@ pub struct BindingsConfig {
 
     /// Quit compositor
     pub quit: String,
+
+    /// ── Mouse button bindings ─────────────────────────────────────────
+    /// Each field holds an action name (see `CompositorAction` variants):
+    ///   "scroll_left", "scroll_right", "close_window",
+    ///   "toggle_fullscreen", "toggle_floating", "toggle_minimize",
+    ///   "toggle_effects", "quit".
+    /// Button codes follow Linux input event codes:
+    ///   0x112 = BTN_MIDDLE,  0x113 = BTN_SIDE (back),
+    ///   0x114 = BTN_EXTRA (forward).
+    /// Empty string = no binding.
+
+    /// Action for mouse back button (BTN_SIDE, 0x113).
+    #[serde(default = "BindingsConfig::default_mouse_back")]
+    pub mouse_back: String,
+
+    /// Action for mouse forward button (BTN_EXTRA, 0x114).
+    #[serde(default = "BindingsConfig::default_mouse_forward")]
+    pub mouse_forward: String,
+
+    /// Action for middle mouse button (BTN_MIDDLE, 0x112).
+    #[serde(default = "BindingsConfig::default_mouse_middle")]
+    pub mouse_middle: String,
 }
 
 /// XWayland configuration
@@ -486,6 +508,9 @@ impl Default for BindingsConfig {
             launch_launcher: "Super+Space".to_string(),
             toggle_effects: "Super+e".to_string(),
             quit: "Super+Shift+q".to_string(),
+            mouse_back: Self::default_mouse_back(),
+            mouse_forward: Self::default_mouse_forward(),
+            mouse_middle: Self::default_mouse_middle(),
         }
     }
 }
@@ -518,6 +543,18 @@ impl WorkspaceConfig {
     }
     fn default_snap_threshold() -> f64 {
         48.0
+    }
+}
+
+impl BindingsConfig {
+    fn default_mouse_back() -> String {
+        "scroll_left".to_string()
+    }
+    fn default_mouse_forward() -> String {
+        "scroll_right".to_string()
+    }
+    fn default_mouse_middle() -> String {
+        String::new()
     }
 }
 

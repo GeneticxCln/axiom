@@ -113,12 +113,13 @@ pub struct InputManager {
     gesture_state: Option<GestureState>,
 
     /// Input configuration (for repeat rate, etc.)
-    #[allow(dead_code)]
     input_config: InputConfig,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // scaffolding for future momentum scrolling
+// scaffolding for future momentum scrolling — fields are populated
+// in process_gesture_event() and will be read when momentum is wired.
+#[allow(dead_code)]
 struct GestureState {
     start_time: std::time::Instant,
     start_position: (f64, f64),
@@ -177,15 +178,26 @@ impl InputManager {
             CompositorAction::LaunchLauncher,
         );
 
-        // Mouse button bindings: map common mouse buttons to actions.
-        // Button codes follow the Linux input event codes (0x110 = BTN_LEFT, etc.)
+        // Mouse button bindings: driven by config (not hardcoded).
+        // Button codes follow Linux input event codes (0x110 = BTN_LEFT, etc.)
         let mut mouse_bindings = HashMap::new();
         // BTN_LEFT (0x110): no default binding (used for window focus/click)
-        // BTN_MIDDLE (0x112): paste from clipboard
-        // BTN_SIDE (0x113): scroll workspace left
-        // BTN_EXTRA (0x114): scroll workspace right
-        mouse_bindings.insert(0x113, CompositorAction::ScrollWorkspaceLeft);
-        mouse_bindings.insert(0x114, CompositorAction::ScrollWorkspaceRight);
+        // Parse user-configurable mouse button actions from BindingsConfig.
+        // Empty string = no binding; unrecognised strings are silently skipped
+        // so a typo doesn't prevent the compositor from starting.
+        for (code, action_str) in [
+            (0x112u32, &bindings_config.mouse_middle),
+            (0x113u32, &bindings_config.mouse_back),
+            (0x114u32, &bindings_config.mouse_forward),
+        ] {
+            if !action_str.is_empty() {
+                if let Some(action) = Self::parse_action_str(action_str) {
+                    mouse_bindings.insert(code, action);
+                } else {
+                    debug!("⚠️ Unknown mouse binding action '{}' for button 0x{:x} — skipped", action_str, code);
+                }
+            }
+        }
 
         debug!("🔑 Loaded {} key bindings, {} mouse bindings", key_bindings.len(), mouse_bindings.len());
 
@@ -401,6 +413,26 @@ impl InputManager {
     /// Check if a modifier is currently active
     pub fn is_modifier_active(&self, modifier: &str) -> bool {
         self.active_modifiers.contains(&modifier.to_string())
+    }
+
+    /// Parse a mouse button action string (from config) into a [`CompositorAction`].
+    /// Returns `None` for unrecognised strings; callers should skip with a warning.
+    fn parse_action_str(action: &str) -> Option<CompositorAction> {
+        Some(match action {
+            "scroll_left" => CompositorAction::ScrollWorkspaceLeft,
+            "scroll_right" => CompositorAction::ScrollWorkspaceRight,
+            "move_left" => CompositorAction::MoveWindowLeft,
+            "move_right" => CompositorAction::MoveWindowRight,
+            "close_window" => CompositorAction::CloseWindow,
+            "toggle_fullscreen" => CompositorAction::ToggleFullscreen,
+            "toggle_floating" => CompositorAction::ToggleFloating,
+            "toggle_minimize" => CompositorAction::ToggleMinimize,
+            "toggle_effects" => CompositorAction::ToggleEffects,
+            "launch_terminal" => CompositorAction::LaunchTerminal,
+            "launch_launcher" => CompositorAction::LaunchLauncher,
+            "quit" => CompositorAction::Quit,
+            _ => return None,
+        })
     }
 
     /// Simulate input for testing

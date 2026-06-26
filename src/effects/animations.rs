@@ -504,9 +504,12 @@ pub struct AnimationUpdate {
 pub enum AnimationProperty {
     Transform,
     Position,
-    #[allow(dead_code)] // matched in effects/mod.rs but never constructed in current codebase
+    // Forward-compat scaffolding: these variants are matched in
+    // EffectsEngine::update() (effects/mod.rs) but the AnimationController
+    // does not yet construct them. Keep for future animation property types.
+    #[allow(dead_code)]
     Opacity,
-    #[allow(dead_code)] // matched in effects/mod.rs but never constructed in current codebase
+    #[allow(dead_code)]
     Scale,
     SpringProperty(String),
 }

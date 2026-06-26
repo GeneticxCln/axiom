@@ -400,6 +400,59 @@ fn test_workspace_bounds_checking() {
     }
 }
 
+/// Create 3 windows, remove the middle one, and verify the remaining
+/// two windows keep their original order (correct indices in the
+/// column's window list).
+#[test]
+fn test_remove_middle_window_preserves_order() {
+    let config = WorkspaceConfig::default();
+    let mut workspaces = ScrollableWorkspaces::new(&config);
+
+    // ── Add 3 windows to the focused column ─────────────────────────
+    workspaces.add_window(1);
+    workspaces.add_window(2);
+    workspaces.add_window(3);
+
+    let col = workspaces.get_focused_column_opt().unwrap();
+    assert_eq!(
+        col.windows,
+        vec![1, 2, 3],
+        "three windows added in order"
+    );
+
+    // ── Remove the middle window (ID 2) ─────────────────────────────
+    let removed = workspaces.remove_window(2);
+    assert!(removed.is_some(), "remove_window should find window 2");
+
+    // ── Verify remaining windows and their indices ───────────────────
+    assert!(
+        !workspaces.window_exists(2),
+        "window 2 must no longer exist"
+    );
+    assert!(
+        workspaces.window_exists(1),
+        "window 1 must still exist"
+    );
+    assert!(
+        workspaces.window_exists(3),
+        "window 3 must still exist"
+    );
+
+    let col = workspaces.get_focused_column_opt().unwrap();
+    assert_eq!(
+        col.windows,
+        vec![1, 3],
+        "remaining windows must be [1, 3] in original order after removing middle"
+    );
+
+    // ── Layout map must contain exactly windows 1 and 3 ─────────────
+    let layouts = workspaces.calculate_workspace_layouts();
+    assert_eq!(layouts.len(), 2, "exactly two windows in layout");
+    assert!(layouts.contains_key(&1), "window 1 in layout");
+    assert!(layouts.contains_key(&3), "window 3 in layout");
+    assert!(!layouts.contains_key(&2), "window 2 NOT in layout");
+}
+
 #[test]
 fn test_multi_monitor_tapes() {
     let config = WorkspaceConfig::default();

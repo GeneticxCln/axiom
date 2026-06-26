@@ -69,6 +69,16 @@ launch_launcher = "Super+Space"
 toggle_effects = "Super+e"
 quit = "Super+Shift+q"
 
+# Mouse button bindings — each field takes an action name:
+#   scroll_left, scroll_right, move_left, move_right,
+#   close_window, toggle_fullscreen, toggle_floating,
+#   toggle_minimize, toggle_effects, launch_terminal,
+#   launch_launcher, quit
+# Empty string = no binding.
+mouse_back = "scroll_left"
+mouse_forward = "scroll_right"
+mouse_middle = ""
+
 [xwayland]
 enabled = true
 

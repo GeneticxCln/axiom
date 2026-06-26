@@ -554,11 +554,14 @@ impl EffectsEngine {
         self.window_effects.get(&window_id)
     }
 
-    /// Remove window from effects tracking
-    pub fn remove_window(&mut self, window_id: u64) {
-        if self.window_effects.remove(&window_id).is_some() {
+    /// Remove window from effects tracking.
+    /// Returns `true` if the window existed and was removed, `false` if not found.
+    pub fn remove_window(&mut self, window_id: u64) -> bool {
+        let removed = self.window_effects.remove(&window_id).is_some();
+        if removed {
             debug!("🗑️ Removed window {} from effects tracking", window_id);
         }
+        removed
     }
 
     /// Apply easing curve to animation progress (used in tests and internally)

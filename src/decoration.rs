@@ -306,11 +306,14 @@ impl DecorationManager {
         );
     }
 
-    /// Remove window from decoration management
-    pub fn remove_window(&mut self, window_id: u64) {
-        if self.decorations.remove(&window_id).is_some() {
+    /// Remove window from decoration management.
+    /// Returns `true` if the window existed and was removed, `false` if not found.
+    pub fn remove_window(&mut self, window_id: u64) -> bool {
+        let removed = self.decorations.remove(&window_id).is_some();
+        if removed {
             debug!("🗑️ Removed decoration for window {}", window_id);
         }
+        removed
     }
 
     /// Update the stored window width and recompute button positions.

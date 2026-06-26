@@ -270,8 +270,7 @@ impl AxiomIPCServer {
     }
 
     /// Start the IPC server
-    #[allow(clippy::unused_async)]
-    pub async fn start(&mut self) -> Result<()> {
+    pub fn start(&mut self) -> Result<()> {
         // Ensure parent dir exists with correct permissions (0700).
         // Do the mkdir+chmod before anything else so the directory is
         // never observable with wider permissions.
@@ -782,7 +781,7 @@ impl AxiomIPCServer {
     ///   `EffectsControl` (already validated at the per-client layer) that
     ///   the compositor owns — they require real subsystem access that the
     ///   IPC server does not hold. Caller is responsible for dispatch.
-    pub async fn process_messages(
+    pub fn process_messages(
         &mut self,
         config: &mut AxiomConfig,
     ) -> Result<(bool, Vec<LazyUIMessage>)> {

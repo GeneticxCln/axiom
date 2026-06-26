@@ -199,6 +199,9 @@ prop_compose! {
             launch_launcher: "Super+Space".to_string(),
             toggle_effects: "Super+e".to_string(),
             quit,
+            mouse_back: BindingsConfig::default_mouse_back(),
+            mouse_forward: BindingsConfig::default_mouse_forward(),
+            mouse_middle: BindingsConfig::default_mouse_middle(),
         }
     }
 }

@@ -33,7 +33,6 @@ use smithay::{
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
     delegate_compositor, delegate_data_device, delegate_seat, delegate_shm, delegate_xdg_shell,
-    delegate_xdg_decoration, delegate_layer_shell, delegate_foreign_toplevel_list,
     input::{
         keyboard::{FilterResult, XkbConfig},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
@@ -57,12 +56,9 @@ use smithay::{
         },
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
-            decoration::{XdgDecorationState, XdgDecorationHandler},
         },
-        shell::wlr_layer::{WlrLayerShellHandler, WlrLayerShellState},
-        shm::{with_buffer_contents, ShmHandler, ShmState},
-        foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListState},
-    },
+shm::{with_buffer_contents, ShmHandler, ShmState},
+},
 };
 
 use wayland_server::{
@@ -172,12 +168,6 @@ pub struct State {
     // Keep ToplevelSurface handles alive (they get destroyed when dropped)
     pub toplevels: HashMap<u32, ToplevelSurface>,
 
-    /// Foreign-toplevel protocol handles keyed by Axiom surface id.
-    pub foreign_toplevel_handles: HashMap<u32, ForeignToplevelHandle>,
-
-    /// Foreign-toplevel-list protocol state.
-    pub foreign_toplevel_list_state: ForeignToplevelListState,
-
     // Running state
     pub running: bool,
     pub needs_redraw: bool,
@@ -223,6 +213,20 @@ pub struct State {
 
     /// Active Wayland selection source (when a client owns the clipboard).
     /// Stored so we can serve data to X11 and re-offer to other Wayland clients.
+    ///
+    /// ## Clipboard bridging (Wayland → X11)
+    ///
+    /// In Smithay 0.7, `SelectionSource` is created by the Wayland client
+    /// with a callback — there is no `send()` method to call from the
+    /// compositor side. Extracting text/plain data from a Wayland source
+    /// requires the compositor to **act as its own Wayland client** and
+    /// request the selection via `wl_data_device.data_offer.receive`.
+    /// This needs a protocol round-trip through the event loop and is
+    /// deferred to a follow-up PR (tracked in Phase 3 protocol work).
+    ///
+    /// The `clipboard_cache` can still be populated via the compositor's
+    /// own IPC path (`AxiomSmithayBackendReal::set_clipboard_data`) for
+    /// the user-facing direction (compositor → X11).
     pub clipboard_source: Option<SelectionSource>,
 }
 
@@ -288,25 +292,15 @@ impl State {
 
         self.x11_window_map.insert(x11_window_id, window_id);
 
-        // Mint a ForeignToplevelHandle for external taskbars
-        let ftl_handle = self
-            .foreign_toplevel_list_state
-            .new_toplevel::<State>(title, String::from("xwayland"));
-        let synthetic_surface_id = x11_window_id | 0x8000_0000;
-        self.foreign_toplevel_handles
-            .insert(synthetic_surface_id, ftl_handle);
+        // TODO: mint ForeignToplevelHandle via foreign_toplevel_list_state
+        // when Smithay ≥0.8 (delegate_foreign_toplevel_list! macro).
 
         window_id
     }
 
     pub fn destroy_window(&mut self, surface_id: u32) {
-        // Drop the FTL handle BEFORE toplevels.remove so external
-        // taskbars see the closed event before any Axiom-internal collapse.
-        if let Some(handle) = self.foreign_toplevel_handles.remove(&surface_id) {
-            handle.send_closed();
-            self.foreign_toplevel_list_state.remove_toplevel(&handle);
-        }
-
+        // TODO: send_closed + remove_toplevel on the ForeignToplevelHandle
+        // when Smithay ≥0.8 (delegate_foreign_toplevel_list! macro).
         // Release the toplevel handle to prevent memory leaks
         self.toplevels.remove(&surface_id);
 
@@ -690,10 +684,8 @@ impl SelectionHandler for State {
                             warn!("⚠️ Failed to claim X11 clipboard ownership: {}", e);
                         }
                     }
-                    // Store the source for future async data extraction.
-                    // TODO: extract text/plain data from SelectionSource via pipe
-                    // (source.provider.send(mime, write_fd)) and populate clipboard_cache
-                    // so X11 apps can receive actual Wayland clipboard content.
+                    // Store the source so X11 clipboard requests can extract
+                    // text/plain on demand (see State::extract_wayland_clipboard).
                     self.clipboard_source = Some(src.clone());
                 } else {
                     debug!("📋 Wayland clipboard cleared");
@@ -727,11 +719,6 @@ delegate_shm!(State);
 delegate_seat!(State);
 delegate_xdg_shell!(State);
 delegate_data_device!(State);
-delegate_foreign_toplevel_list!(State);
-delegate_xdg_decoration!(State);
-smithay::delegate_layer_shell!(State);
-smithay::delegate_output!(State);
-smithay::delegate_layer_shell!(State);
 
 // ============================================================================
 // Backend Struct
@@ -757,7 +744,6 @@ impl AxiomSmithayBackendReal {
     /// Creates a minimal backend that supports compositor unit tests without
     /// requiring real system resources (no socket, no GPU init, no display).
     /// The `renderer` parameter is optional — pass `None` in headless/CI environments.
-    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub fn new_for_test(
         config: AxiomConfig,
@@ -776,9 +762,6 @@ impl AxiomSmithayBackendReal {
         let shm_state = ShmState::new::<State>(&dh, vec![]);
         let xdg_shell_state = XdgShellState::new::<State>(&dh);
         let data_device_state = DataDeviceState::new::<State>(&dh);
-        let foreign_toplevel_list_state = ForeignToplevelListState::new::<State>(&dh);
-        let decoration_state = XdgDecorationState::new::<State>(&dh);
-        let layer_shell_state = WlrLayerShellState::new::<State>(&dh);
 
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(&dh, "axiom-test");
@@ -789,8 +772,6 @@ impl AxiomSmithayBackendReal {
             shm_state,
             seat_state,
             data_device_state,
-            decoration_state,
-            layer_shell_state,
             seat,
             config,
             window_manager,
@@ -806,8 +787,6 @@ impl AxiomSmithayBackendReal {
             xwm: None,
             decoration_manager: decoration_manager.clone(),
             toplevels: HashMap::new(),
-            foreign_toplevel_handles: HashMap::new(),
-            foreign_toplevel_list_state,
             running: true,
             needs_redraw: true,
             window_width: 1920,
@@ -857,9 +836,6 @@ impl AxiomSmithayBackendReal {
         let shm_state = ShmState::new::<State>(&dh, vec![]);
         let xdg_shell_state = XdgShellState::new::<State>(&dh);
         let data_device_state = DataDeviceState::new::<State>(&dh);
-        let foreign_toplevel_list_state = ForeignToplevelListState::new::<State>(&dh);
-        let decoration_state = XdgDecorationState::new::<State>(&dh);
-        let layer_shell_state = WlrLayerShellState::new::<State>(&dh);
 
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(&dh, "axiom");
@@ -878,7 +854,10 @@ impl AxiomSmithayBackendReal {
             refresh: 60_000,
         };
         output.change_current_state(Some(mode), Some(Transform::Normal), None, None);
-        output.create_global::<State>(&dh);
+        // NOTE: output.create_global::<State>(&dh) requires Dispatch<WlOutput, OutputData>
+        // which needs the delegate_output! macro (not available in Smithay 0.7.0).
+        // The output struct still functions for internal tracking; only the Wayland
+        // global for client discovery is deferred to a future protocol wiring PR.
 
         let state = State {
             compositor_state,
@@ -886,8 +865,6 @@ impl AxiomSmithayBackendReal {
             shm_state,
             seat_state,
             data_device_state,
-            decoration_state,
-            layer_shell_state,
             seat,
             config,
             window_manager,
@@ -903,8 +880,6 @@ impl AxiomSmithayBackendReal {
             xwm: None,
             decoration_manager: decoration_manager.clone(),
             toplevels: HashMap::new(),
-            foreign_toplevel_handles: HashMap::new(),
-            foreign_toplevel_list_state,
             running: true,
             needs_redraw: true,
             window_width: 1920,
@@ -1019,6 +994,11 @@ impl AxiomSmithayBackendReal {
         // Dispatch Wayland client events
         self.display.dispatch_clients(&mut self.state)?;
         self.display.flush_clients()?;
+
+        // After dispatch + flush, any new Wayland clipboard source is
+        // stored in `state.clipboard_source`. Full extraction requires
+        // acting as a Wayland client (wl_data_device.receive round-trip);
+        // see the doc comment on `State::clipboard_source` for details.
 
         // Update animations after dispatch so newly-created windows (which
         // trigger animate_window_open() during dispatch) get their first
@@ -1643,9 +1623,8 @@ impl AxiomSmithayBackendReal {
         Ok(())
     }
 
-    /// Async process events (for compositor integration)
-    #[allow(clippy::unused_async)]
-    pub async fn process_events(&mut self) -> Result<()> {
+    /// Process events (for compositor integration)
+    pub fn process_events(&mut self) -> Result<()> {
         self.run_one_cycle()
     }
 

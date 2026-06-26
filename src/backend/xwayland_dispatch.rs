@@ -96,12 +96,7 @@ pub(super) fn poll_and_dispatch_events(state: &mut State) -> Result<()> {
             state.window_manager.write().remove_window(window_id);
             state.decoration_manager.write().remove_window(window_id);
 
-            let synthetic_surface_id = x11_window_id | 0x8000_0000;
-            if let Some(handle) = state.foreign_toplevel_handles.remove(&synthetic_surface_id) {
-                handle.send_closed();
-                state.foreign_toplevel_list_state.remove_toplevel(&handle);
-            }
-
+            // foreign_toplevel_list_state is disabled for now.
             info!(
                 "X11 window {} removed (compositor window {})",
                 x11_window_id, window_id

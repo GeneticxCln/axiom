@@ -90,7 +90,6 @@ impl AxiomCompositor {
         ipc_server.set_config_handle(Arc::new(parking_lot::RwLock::new(config.clone())));
         ipc_server
             .start()
-            .await
             .context("Failed to start IPC server")?;
 
         info!("All subsystems initialized successfully");
@@ -195,15 +194,15 @@ impl AxiomCompositor {
     }
 
     /// Process all pending compositor events with real input handling
-    async fn process_events(&mut self) -> Result<()> {
+    fn process_events(&mut self) -> Result<()> {
         // Process backend events (Wayland, input devices)
-        self.smithay_backend.process_events().await?;
+        self.smithay_backend.process_events()?;
 
         // Process IPC messages from Lazy UI. The new return shape surfaces
         // (config_changed, pending_actions): config mutations refresh the
         // IPC handle; subsystem-bound actions (WorkspaceCommand,
         // EffectsControl) are dispatched below.
-        match self.ipc_server.process_messages(&mut self.config).await {
+        match self.ipc_server.process_messages(&mut self.config) {
             Ok((config_changed, pending_actions)) => {
                 if config_changed {
                     self.update_subsystems_config();
@@ -263,7 +262,9 @@ impl AxiomCompositor {
                 self.add_window(title.to_string());
             }
             "remove_window" => match parameters.get("window_id").and_then(|v| v.as_u64()) {
-                Some(id) => self.remove_window(id),
+                Some(id) => {
+                    self.remove_window(id);
+                }
                 None => {
                     warn!("WorkspaceCommand remove_window missing 'window_id' parameter — no-op")
                 }
@@ -421,8 +422,7 @@ impl AxiomCompositor {
     /// and window rect upserts for the renderer. The WGPU effects composite
     /// now happens in the backend's GL render pass (between window drawing
     /// and `submit`), so this method no longer calls `renderer.render()`.
-    #[allow(clippy::unused_async)]
-    async fn render_frame(&mut self) -> Result<()> {
+    fn render_frame(&mut self) -> Result<()> {
         // Push window rects to renderer for metrics/housekeeping
         for win_data in &self.render_data_buffer {
             let mut scale = 1.0_f32;
@@ -559,14 +559,14 @@ impl AxiomCompositor {
             tick_error = true;
             self.force_next_tick_error = false;
         }
-        if let Err(e) = self.process_events().await {
+        if let Err(e) = self.process_events() {
             tick_error = true;
             warn!("Error processing events: {}", e);
         }
 
         // Render frame — now only handles post-render monitoring after the
         // backend has already presented the frame with effects applied.
-        if let Err(e) = self.render_frame().await {
+        if let Err(e) = self.render_frame() {
             tick_error = true;
             warn!("Error rendering frame: {}", e);
         }
@@ -666,16 +666,22 @@ impl AxiomCompositor {
 
     /// Remove a window from the compositor.
     ///
+    /// Returns `true` if the window existed (in workspace manager) and was
+    /// removed from all subsystems, `false` if the ID was not found.
+    ///
     /// Locks are taken in the same order as `render_frame`
     /// (`workspace -> window_manager -> renderer -> decoration_manager`);
     /// keep them in lockstep to avoid lock-order inversion if a future
     /// contributor adds a concurrent removal path.
-    pub fn remove_window(&mut self, window_id: u64) {
-        if let Some(column) = self.workspace_manager.write().remove_window(window_id) {
-            info!(
-                "Removed window {} from workspace column {}",
-                window_id, column
-            );
+    pub fn remove_window(&mut self, window_id: u64) -> bool {
+        let removed = self
+            .workspace_manager
+            .write()
+            .remove_window(window_id)
+            .is_some();
+
+        if removed {
+            info!("Removed window {}", window_id);
         }
 
         self.window_manager.write().remove_window(window_id);
@@ -685,6 +691,8 @@ impl AxiomCompositor {
         }
 
         self.decoration_manager.write().remove_window(window_id);
+
+        removed
     }
 
     /// Move window to left workspace
@@ -722,14 +730,12 @@ impl AxiomCompositor {
 
     /// Single tick for integration testing — calls the private `tick()` method.
     /// Returns `Ok(())` on success or `Err(...)` if the error threshold is exceeded.
-    #[allow(dead_code)]
     pub async fn tick_for_test(&mut self) -> Result<()> {
         self.tick().await
     }
 
     /// Artificially set the consecutive error count for testing error recovery.
     /// When set >= 5, the next `tick()` will trigger an emergency shutdown.
-    #[allow(dead_code)]
     pub fn set_errors_for_test(&mut self, count: u32) {
         self.consecutive_error_count = count;
     }
@@ -737,14 +743,12 @@ impl AxiomCompositor {
     /// Force the next `tick()` to count as an error tick, incrementing the
     /// error count. This lets tests simulate real consecutive errors rather
     /// than just pre-setting the count. Resets after the next tick.
-    #[allow(dead_code)]
     pub fn force_next_tick_error(&mut self) {
         self.force_next_tick_error = true;
     }
 
     /// Check whether the compositor is still running.
     /// Used by integration tests to verify shutdown behavior.
-    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.running
     }
@@ -793,7 +797,6 @@ impl AxiomCompositor {
     /// Subsystems are fully initialized. Smithay backend uses a test
     /// constructor that doesn't bind Wayland sockets. WGPU renderer is
     /// a real headless instance (requires GPU adapter).
-    #[allow(dead_code)]
     pub async fn new_for_test(
         config: AxiomConfig,
         workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,

@@ -345,6 +345,38 @@ fn bench_headless_render(c: &mut Criterion) {
     });
 
     group.finish();
+
+    // ── Throughput: N composites with warm cache (separate group) ─
+    let mut tp_group = c.benchmark_group("headless_render_throughput");
+    const BATCH: u32 = 100;
+    tp_group.throughput(criterion::Throughput::Elements(BATCH as u64));
+    tp_group.bench_function("composite_128x128", |b| {
+        b.iter_batched(
+            || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let mut renderer = rt.block_on(AxiomRenderer::new_headless()).unwrap();
+                let tex = make_bench_texture_rgba();
+                renderer.add_window(1, (0.0, 0.0), (64.0, 64.0));
+                renderer.update_window_texture(1, 64, 64, &tex);
+                // Warm: populate the projection cache (untimed)
+                renderer.render_to_headless_target(128, 128).unwrap();
+                renderer
+            },
+            |mut renderer| {
+                // Timed: BATCH cache-hit composites (projection buffer reused,
+                // window resources cached after first call)
+                for _ in 0..BATCH {
+                    black_box(
+                        renderer
+                            .render_to_headless_target(128, 128)
+                            .unwrap(),
+                    );
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    tp_group.finish();
 }
 
 /// Benchmark frame timing simulation
