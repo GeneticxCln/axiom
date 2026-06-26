@@ -407,7 +407,14 @@ async fn test_window_layout_with_workspaces() -> Result<()> {
 
 /// Helper: construct a fully-initialized test compositor with all subsystems.
 /// Returns the compositor and the subsystem Arcs for tests that need direct access.
-#[allow(clippy::type_complexity)]
+///
+/// `Arc<parking_lot::RwLock<ScrollableWorkspaces>>` is intentionally
+/// `!Sync` (the layout cache uses `RefCell` for the single-threaded hot
+/// path). These `Arc`s never cross thread boundaries — every caller is
+/// a `tokio::test` task — so the lint is harmless for tests but we
+/// allow it explicitly to avoid future contributors being puzzled by
+/// the warning.
+#[allow(clippy::type_complexity, clippy::arc_with_non_send_sync)]
 async fn make_test_compositor(
     config: AxiomConfig,
 ) -> Result<(
@@ -1292,7 +1299,7 @@ async fn test_two_overlapping_windows_alpha_blend() -> Result<()> {
         (
             pixels[idx + 2], // R
             pixels[idx + 1], // G
-            pixels[idx + 0], // B
+            pixels[idx], // B
             pixels[idx + 3], // A
         )
     };
@@ -1393,7 +1400,7 @@ async fn test_reverse_draw_order_red_dominant_blend() -> Result<()> {
         (
             pixels[idx + 2], // R
             pixels[idx + 1], // G
-            pixels[idx + 0], // B
+            pixels[idx], // B
             pixels[idx + 3], // A
         )
     };

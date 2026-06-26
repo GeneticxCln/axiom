@@ -12,6 +12,7 @@ use tokio::signal;
 
 use crate::backend::AxiomSmithayBackendReal;
 use crate::config::AxiomConfig;
+use crate::decoration::DecorationManager;
 use crate::effects::EffectsEngine;
 use crate::input::InputManager;
 use crate::ipc::{AxiomIPCServer, LazyUIMessage};
@@ -869,6 +870,14 @@ mod tests {
     use std::sync::Arc;
 
     /// Create subsystems and a test compositor for unit testing public API methods.
+    ///
+    /// `Arc<parking_lot::RwLock<ScrollableWorkspaces>>` is flagged as
+    /// non-`Sync` by clippy because `ScrollableWorkspaces` contains a
+    /// `RefCell` for its layout cache. This is intentional (single-threaded
+    /// interior mutability on the hot path) and the `Arc` here is only
+    /// ever held within this test's `tokio::test` task — it never crosses
+    /// thread boundaries, so the absence of `Sync` is harmless for tests.
+    #[allow(clippy::arc_with_non_send_sync)]
     async fn make_test_compositor() -> AxiomCompositor {
         let config = AxiomConfig::default();
         let workspace_manager = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)));

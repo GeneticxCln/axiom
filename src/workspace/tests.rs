@@ -506,7 +506,7 @@ fn test_multi_monitor_tapes() {
         workspaces.set_viewport_size(1920.0, 1080.0);
         let layouts_1080 = workspaces.calculate_workspace_layouts();
         assert_eq!(layouts_1080.len(), 3, "all three windows tiled");
-        for (_id, rect) in &layouts_1080 {
+        for rect in layouts_1080.values() {
             assert!(rect.height > 0, "height must be positive at 1080p");
             assert!(rect.height <= 1080, "height must not exceed viewport");
         }
@@ -516,7 +516,7 @@ fn test_multi_monitor_tapes() {
         workspaces.set_viewport_size(800.0, 600.0);
         let layouts_600 = workspaces.calculate_workspace_layouts();
         assert_eq!(layouts_600.len(), 3);
-        for (_id, rect) in &layouts_600 {
+        for rect in layouts_600.values() {
             assert!(rect.height > 0, "height must be positive at 600p");
             assert!(
                 rect.height < heights_1080[0],
@@ -530,7 +530,7 @@ fn test_multi_monitor_tapes() {
         workspaces.set_viewport_size(3840.0, 2160.0);
         let layouts_4k = workspaces.calculate_workspace_layouts();
         assert_eq!(layouts_4k.len(), 3);
-        for (_id, rect) in &layouts_4k {
+        for rect in layouts_4k.values() {
             assert!(rect.height > 0, "height must be positive at 4K");
             assert!(
                 rect.height > heights_1080[0],

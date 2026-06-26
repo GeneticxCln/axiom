@@ -1538,13 +1538,15 @@ impl AxiomSmithayBackendReal {
         // target, then blit the result back as a fullscreen GL quad.
         // The per-frame effect queues were pre-populated by
         // compositor::prepare_frame_data() before process_events().
+        //
+        // Uses `drain_post_process` (preferred over the deprecated
+        // `composite_effects_on_buffer`) — when no shadows/blurs are queued
+        // it returns `Ok(None)` and the GL framebuffer is left untouched,
+        // avoiding the GL→CPU readback allocation on every no-effects frame.
         if let Some(ref renderer) = self.state.renderer {
             let gl_pixels = shm_upload::read_gl_framebuffer(ww, wh);
-            match renderer
-                .write()
-                .composite_effects_on_buffer(&gl_pixels, ww, wh)
-            {
-                Ok(processed) => {
+            match renderer.write().drain_post_process(ww, wh, gl_pixels) {
+                Ok(Some(processed)) => {
                     // Upload processed pixels to a temporary GL texture and
                     // draw a fullscreen quad to replace the framebuffer.
                     let mut tex: gl::types::GLuint = 0;
@@ -1598,6 +1600,15 @@ impl AxiomSmithayBackendReal {
                     unsafe {
                         gl::DeleteTextures(1, &tex);
                     }
+                }
+                Ok(None) => {
+                    // No effects queued this frame — `drain_post_process` already
+                    // cleared the per-frame queues and dropped the readback bytes;
+                    // the GL framebuffer we already drew is the final image.
+                    debug!(
+                        "🎨 No WGPU post-process this frame ({}x{}, no queued shadows/blurs)",
+                        ww, wh
+                    );
                 }
                 Err(e) => {
                     warn!(

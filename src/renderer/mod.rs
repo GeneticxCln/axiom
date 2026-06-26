@@ -1028,35 +1028,28 @@ impl AxiomRenderer {
                 let y = window.position.1;
                 let w = window.size.0;
                 let h = window.size.1;
+                let xw = x + w;
+                let yh = y + h;
 
-                // Two triangles forming a textured quad in screen-space.
-                // Vertex order matches the 6 vertices the shader expects
-                // (see `render_to_surface` which issues `draw(0..6, …)`).
+                // Two triangles forming a textured quad.
+                //
+                // Winding matters: the render pipeline uses
+                // `front_face: Ccw` + `cull_mode: Some(Face::Back)`, so
+                // triangles must be CCW in NDC Y-up — otherwise both
+                // triangles get culled and zero pixels are written.
+                // TL→BL→TR and BL→BR→TR is CCW when compositor y=0 maps
+                // to NDC y=+1 (top of screen), which our projection matrix
+                // does. Tex-coords per corner follow the screen layout:
+                // TL(0,0) BL(0,1) TR(1,0) BR(1,1).
                 let vertices = [
-                    Vertex {
-                        position: [x, y, 0.0],
-                        tex_coords: [0.0, 0.0],
-                    },
-                    Vertex {
-                        position: [x + w, y, 0.0],
-                        tex_coords: [1.0, 0.0],
-                    },
-                    Vertex {
-                        position: [x, y + h, 0.0],
-                        tex_coords: [0.0, 1.0],
-                    },
-                    Vertex {
-                        position: [x + w, y, 0.0],
-                        tex_coords: [1.0, 0.0],
-                    },
-                    Vertex {
-                        position: [x + w, y + h, 0.0],
-                        tex_coords: [1.0, 1.0],
-                    },
-                    Vertex {
-                        position: [x, y + h, 0.0],
-                        tex_coords: [0.0, 1.0],
-                    },
+                    // Triangle 1: TL, BL, TR
+                    Vertex { position: [x, y, 0.0],    tex_coords: [0.0, 0.0] },
+                    Vertex { position: [x, yh, 0.0],   tex_coords: [0.0, 1.0] },
+                    Vertex { position: [xw, y, 0.0],   tex_coords: [1.0, 0.0] },
+                    // Triangle 2: BL, BR, TR
+                    Vertex { position: [x, yh, 0.0],   tex_coords: [0.0, 1.0] },
+                    Vertex { position: [xw, yh, 0.0],  tex_coords: [1.0, 1.0] },
+                    Vertex { position: [xw, y, 0.0],   tex_coords: [1.0, 0.0] },
                 ];
 
                 window.cached_vertex_buffer =
