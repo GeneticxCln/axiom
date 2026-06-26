@@ -12,7 +12,6 @@ use tokio::signal;
 
 use crate::backend::AxiomSmithayBackendReal;
 use crate::config::AxiomConfig;
-use crate::decoration::DecorationManager;
 use crate::effects::EffectsEngine;
 use crate::input::InputManager;
 use crate::ipc::{AxiomIPCServer, LazyUIMessage};

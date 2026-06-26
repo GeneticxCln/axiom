@@ -352,6 +352,35 @@ impl DecorationManager {
         }
     }
 
+    /// Update the stored window width and recompute button positions.
+    ///
+    /// Call this when the window is resized or when the real width first
+    /// becomes available (e.g. from the Wayland surface configure event).
+    pub fn set_window_width(&mut self, window_id: u64, width: i32) {
+        if let Some(decoration) = self.decorations.get_mut(&window_id) {
+            if decoration.window_width == width {
+                return;
+            }
+            decoration.window_width = width;
+
+            if decoration.mode == DecorationMode::ServerSide {
+                let button_size = self.theme.button_size;
+                let titlebar_height = self.theme.titlebar_height;
+                let button_y = (titlebar_height - button_size) / 2;
+                let ww = width;
+                let button_margin = 8;
+                decoration.buttons.close.bounds =
+                    Self::button_rect(ww, button_size, button_y, button_margin, 0);
+                decoration.buttons.maximize.bounds =
+                    Self::button_rect(ww, button_size, button_y, button_margin, 1);
+                decoration.buttons.minimize.bounds =
+                    Self::button_rect(ww, button_size, button_y, button_margin, 2);
+            }
+
+            debug!("📏 Updated window {} width to {}px", window_id, width);
+        }
+    }
+
     /// Set window focus state
     pub fn set_window_focus(&mut self, window_id: u64, focused: bool) {
         if let Some(decoration) = self.decorations.get_mut(&window_id) {
