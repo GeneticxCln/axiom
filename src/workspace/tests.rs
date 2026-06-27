@@ -453,6 +453,53 @@ fn test_remove_middle_window_preserves_order() {
     assert!(!layouts.contains_key(&2), "window 2 NOT in layout");
 }
 
+/// Issue #8 regression: rapid scroll-left-then-right must keep
+/// `get_focused_column_windows()` returning the user's LAST-targeted column's
+/// windows (logical-target semantics, NOT mid-animation visual rounding).
+///
+/// Pre-fix behavior: `visual_focused_column_index` rounded the in-flight
+/// `current_position` BACK to the left column (`(-1000/1920).round() == -1`)
+/// mid right-animation, so `get_focused_column_windows()` returned column
+/// -1's windows while `focused_column` was 0. Input routing and engine
+/// passes targeted the wrong column. This test pins the fix in place.
+#[test]
+fn test_rapid_back_and_forth_scroll_keeps_logical_target() {
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    let config = WorkspaceConfig::default();
+    let mut workspaces = ScrollableWorkspaces::new(&config);
+
+    // Setup: col -1 has W11, col 0 has W12.
+    workspaces.add_window_to_column(11, -1);
+    workspaces.add_window_to_column(12, 0);
+
+    // 1) scroll left -> focused_column = -1 instantly, animation starts.
+    workspaces.scroll_left();
+    assert_eq!(workspaces.focused_column_index(), -1);
+
+    // 2) Drift partway through the left animation (~150 ms of ~250 ms total)
+    //    so current_position crosses the -width/2 (visual midpoint) boundary.
+    sleep(Duration::from_millis(150));
+    workspaces.update_animations();
+
+    // 3) User changes mind instantly, scrolls right back. focused_column
+    //    snaps to 0; new animation Scrolling(start~-width/2, target=0).
+    workspaces.scroll_right();
+    assert_eq!(workspaces.focused_column_index(), 0);
+
+    // 4) Do NOT update animations: right-animation is mid-flight from past
+    //    visual midpoint. Pre-fix code returned column -1's windows here
+    //    (visual rounding bias); post-fix returns column 0's windows
+    //    (the user's last input verb).
+    let windows = workspaces.get_focused_column_windows();
+    assert_eq!(
+        windows,
+        vec![12],
+        "rapid left-followed-by-right must surface the user\'s last-targeted          column 0\'s windows (W12), NOT visual-rounded column -1\'s (W11)."
+    );
+}
+
 #[test]
 fn test_multi_monitor_tapes() {
     let config = WorkspaceConfig::default();

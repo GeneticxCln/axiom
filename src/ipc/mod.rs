@@ -327,6 +327,67 @@ impl AxiomIPCServer {
         *handle.write() = snapshot;
     }
 
+    /// Build the WorkspaceCommand ACK UserEvent for the per-client handler.
+    /// Schema owned here (Issue #2 single source of truth) so the
+    /// `test_workspace_command_ack_schema_includes_status` regression test
+    /// exercises the actual production constructor. A pure helper that does
+    /// not take `&self` so call sites are both `Self::` (from inside the
+    /// impl) and `AxiomIPCServer::` (from the test mod) without forcing a
+    /// `new()` plumbing for each call.
+    pub(super) fn build_workspace_command_ack(
+        action: &str,
+        accepted: bool,
+    ) -> AxiomMessage {
+        AxiomMessage::UserEvent {
+            // Fail loudly on a pre-1970 system clock rather than silently
+            // emitting `timestamp: 0` that IPC clients would misread.
+            // This is live in production hardware environments but a `map`
+            // -> `unwrap_or(0)` would be silent on a faulted/low-level test
+            // environment. `expect` makes the failure mode self-diagnosing.
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before UNIX_EPOCH — compositor hardware fault")
+                .as_secs(),
+            event_type: "WorkspaceCommandAck".into(),
+            details: serde_json::json!({
+                "action": action,
+                "accepted": accepted,
+                "status": if accepted { "queued_for_execution" } else { "unknown_action" },
+                "dispatched_via_mpsc": accepted,
+            }),
+        }
+    }
+
+    /// Build the EffectsControl ACK UserEvent (Issue #2 single source of
+    /// truth). `partially_queued` when at least one field failed range or
+    /// finite-validation; `queued_for_execution` when all fields passed.
+    /// Surface area mirrors WorkspaceCommand: a discriminator field that
+    /// disambiguates VALIDATION-time ACK from EXECUTION-time ACK, plus the
+    /// existing `accepted`/`rejected` arrays for per-field diagnostics.
+    pub(super) fn build_effects_control_ack(
+        accepted: Vec<String>,
+        rejected: Vec<(String, String)>,
+    ) -> AxiomMessage {
+        AxiomMessage::UserEvent {
+            // Fail loudly on a pre-1970 system clock rather than silently
+            // emitting `timestamp: 0`. Symmetric with build_workspace_command_ack.
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before UNIX_EPOCH — compositor hardware fault")
+                .as_secs(),
+            event_type: "EffectsControlAck".into(),
+            details: serde_json::json!({
+                "status": if rejected.is_empty() {
+                    "queued_for_execution"
+                } else {
+                    "partially_queued"
+                },
+                "accepted": accepted,
+                "rejected": rejected,
+            }),
+        }
+    }
+
     /// Start the IPC server
     pub fn start(&mut self) -> Result<()> {
         // Ensure parent dir exists with correct permissions (0700).
@@ -717,17 +778,12 @@ impl AxiomIPCServer {
                     "🖥️ Workspace command: {} (accepted: {}, params: {:?})",
                     action, accepted, parameters
                 );
-                let ack = AxiomMessage::UserEvent {
-                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-                    event_type: "WorkspaceCommandAck".into(),
-                    details: serde_json::json!({
-                        "action": action,
-                        "status": if accepted { "accepted" } else { "unknown_action" },
-                        // See doc-comment on `LazyUIMessage::WorkspaceCommand`
-                        // for the gap on compositor-side execution.
-                        "dispatched_via_mpsc": accepted,
-                    }),
-                };
+                // Schema (single source of truth) lives in
+                // `Self::build_workspace_command_ack` so the regression test
+                // `test_workspace_command_ack_schema_includes_status` exercises
+                // the actual production constructor rather than a hand-written
+                // fixture that could drift out of sync with this call site.
+                let ack = Self::build_workspace_command_ack(&action, accepted);
                 Self::send_message(writer, &ack).await?;
             }
 
@@ -768,17 +824,21 @@ impl AxiomIPCServer {
                     rejected.len()
                 );
                 // Compositor-side application: route via mpsc to `process_messages`
-                // once an effects dispatch arm is added; today the per-client ACK
-                // is the contract. `accepted` means the value passed whitelist +
-                // range checks; compositor-side application is outstanding.
-                let ack = AxiomMessage::UserEvent {
-                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-                    event_type: "EffectsControlAck".into(),
-                    details: serde_json::json!({
-                        "accepted": accepted,
-                        "rejected": rejected,
-                    }),
-                };
+                // and dispatched on the compositor's tick via
+                // `dispatch_effects_control` -> `effects_engine.write().apply_live_effects_control()`.
+                // The ACK is VALIDATION-time only — the field-value changes
+                // happen later, asynchronously, on the compositor thread.
+                // Status semantics mirror WorkspaceCommandAck:
+                // - "queued_for_execution": per-field validation passed; the
+                //   compositor will apply the changes on its next tick.
+                // - "rejected": at least one field failed validation (out-of-range,
+                //   non-finite, etc.); the compositor will NOT apply the rejected
+                //   sub-fields but will apply accepted ones.
+                // Schema (single source of truth) lives in
+                // `Self::build_effects_control_ack` so the regression test
+                // `test_effects_control_ack_schema_distinguishes_partial`
+                // exercises the actual production constructor.
+                let ack = Self::build_effects_control_ack(accepted, rejected);
                 Self::send_message(writer, &ack).await?;
             }
 
@@ -1503,5 +1563,95 @@ mod tests {
             effects_gpu_available: false,
         });
         assert!(server.live_metrics_handle.is_some());
+    }
+
+    /// Issue #2 regression: WorkspaceCommand ACK must carry the new
+    /// `"status": "queued_for_execution"` discriminator alongside the
+    /// legacy `"accepted": <bool>` field. The dual-key shim is a temporary
+    /// compat layer for clients that pattern-match on `"accepted"`. Schema
+    /// drift here is the regression vector — drop or rename the status
+    /// field without updating this test and existing IPC clients silently
+    /// mis-interpret the ACK as "executed" (= success) when it is actually
+    /// just "valid + queued for execution on next tick".
+    ///
+    /// Calls the actual production constructor
+    /// (`AxiomIPCServer::build_workspace_command_ack`) so this test FAILS
+    /// when production regresses, not only when the test fixture drifts.
+    /// Pins both branches (accepted + unknown) so a future refactor that
+    /// unifies or renames the status must touch this test deliberately.
+    #[test]
+    fn test_workspace_command_ack_schema_includes_status() {
+        // Accepted path — call the actual production constructor.
+        let ack_accepted =
+            AxiomIPCServer::build_workspace_command_ack("scroll_left", true);
+        let s = serde_json::to_string(&ack_accepted).unwrap();
+        assert!(
+            s.contains(r#""status":"queued_for_execution""#),
+            "accepted ACK must carry status:queued_for_execution. JSON: {s}"
+        );
+        assert!(
+            s.contains(r#""accepted":true"#),
+            "accepted ACK must preserve legacy 'accepted' bool for compat. JSON: {s}"
+        );
+        assert!(
+            s.contains(r#""action":"scroll_left""#),
+            "ACK must echo the action verb. JSON: {s}"
+        );
+
+        // Unknown-action path — call the actual production constructor with
+        // an action verb that's not in KNOWN_WORKSPACE_ACTIONS.
+        let ack_unknown =
+            AxiomIPCServer::build_workspace_command_ack("nuke_all_windows", false);
+        let s = serde_json::to_string(&ack_unknown).unwrap();
+        assert!(
+            s.contains(r#""status":"unknown_action""#),
+            "unknown ACK must carry status:unknown_action. JSON: {s}"
+        );
+        assert!(
+            s.contains(r#""accepted":false"#),
+            "unknown ACK must preserve legacy 'accepted' bool for compat. JSON: {s}"
+        );
+    }
+
+    /// Issue #2 regression: EffectsControl ACK must distinguish full vs
+    /// partial validation via the `"status"` discriminator.
+    /// `partially_queued` when at least one field failed range/finite
+    /// checks; `queued_for_execution` when all fields passed. Calls the
+    /// actual production constructor
+    /// (`AxiomIPCServer::build_effects_control_ack`) so the test fails
+    /// when production regresses. Pins both cases.
+    #[test]
+    fn test_effects_control_ack_schema_distinguishes_partial() {
+        // All fields accepted.
+        let ack_full = AxiomIPCServer::build_effects_control_ack(
+            vec![
+                "enabled=true".to_string(),
+                "blur_radius=4.0".to_string(),
+            ],
+            Vec::new(),
+        );
+        let s = serde_json::to_string(&ack_full).unwrap();
+        assert!(
+            s.contains(r#""status":"queued_for_execution""#),
+            "full ACK JSON must carry status:queued_for_execution. JSON: {s}"
+        );
+
+        // At least one field rejected.
+        let ack_partial = AxiomIPCServer::build_effects_control_ack(
+            vec!["enabled=false".to_string()],
+            vec![(
+                "blur_radius".to_string(),
+                "out_of_range_0..=32px".to_string(),
+            )],
+        );
+        let s = serde_json::to_string(&ack_partial).unwrap();
+        assert!(
+            s.contains(r#""status":"partially_queued""#),
+            "partial ACK JSON must carry status:partially_queued. JSON: {s}"
+        );
+        assert!(
+            s.contains("blur_radius"),
+            "partial ACK JSON must list the rejected field name. JSON: {s}"
+        );
     }
 }

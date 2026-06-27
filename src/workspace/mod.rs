@@ -373,20 +373,29 @@ impl WorkspaceTape {
         self.move_window_to_column(window_id, target_column)
     }
 
-    /// Get all windows in the currently focused column. During scroll
-    /// animations or momentum scrolling this returns the windows in
-    /// the column the user is *visually* looking at — i.e. the
-    /// column whose position contains `current_position` — rather
-    /// than the animation's logical destination (`focused_column`).
-    /// This fix addresses the audit: callers like the GL backend's
-    /// click-target lookup and effect-engine passes were returning
-    /// the wrong column's windows during fast back-and-forth scroll,
-    /// because `focused_column` was updated instantly in
-    /// `scroll_to_column()` while the actual visual position was
-    /// still mid-animation.
+    /// Get all windows in the currently focused column. This is the
+    /// **logical-target** column (the column the user's last input
+    /// commanded), updated instantly in `scroll_to_column()`,
+    /// independent of any in-flight scroll or momentum animation.
+    /// Use this for input routing, focus-driven engine passes, and
+    /// any query where "what did the user just ask for?" matters
+    /// more than "what is on screen right now?".
+    ///
+    /// For the column the user is *visually* looking at during a
+    /// smooth-scroll animation (which lags behind `focused_column`
+    /// by up to `MAX_SCROLL_DURATION_MS`), use
+    /// [`Self::visual_focused_column_index`] directly. The pre-fix
+    /// audit wired `get_focused_column_windows()` to that visual
+    /// path, which produced a real correctness bug under rapid
+    /// back-and-forth scroll: rounded visual position often pointed
+    /// *backward* relative to the user's most recent input (e.g.
+    /// scroll-left then scroll-right returned the left column's
+    /// windows while the right animation was still mid-flight),
+    /// causing input and effect-engine callers to target the wrong
+    /// column.
     pub fn get_focused_column_windows(&self) -> Vec<u64> {
         self.columns
-            .get(&self.visual_focused_column_index())
+            .get(&self.focused_column)
             .map(|column| column.windows.clone())
             .unwrap_or_default()
     }
@@ -399,7 +408,16 @@ impl WorkspaceTape {
     /// a mid-animation column map that has not yet created the
     /// target column (falls back to the closest populated column
     /// via `get_focused_column()` semantics upstream).
-    fn visual_focused_column_index(&self) -> i32 {
+    ///
+    /// Public because it serves a different semantic than
+    /// [`Self::focused_column`]: a rendering/framebuffer-positioning
+    /// caller wants the on-screen column (this method), while a
+    /// logical-target / input-routing caller wants the user's last
+    /// commanded destination ([`Self::focused_column`], exposed via
+    /// [`Self::get_focused_column_windows`]). Keep both APIs
+    /// available so callers can pick the one that matches their
+    /// semantic.
+    pub fn visual_focused_column_index(&self) -> i32 {
         if matches!(
             self.scroll_state,
             ScrollState::Scrolling { .. } | ScrollState::Momentum { .. }
