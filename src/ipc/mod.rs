@@ -98,6 +98,14 @@ pub struct LiveMetrics {
 /// Returns true when `action` is in the whitelisted
 /// [`KNOWN_WORKSPACE_ACTIONS`] set. Whitelist is enforced to avoid
 /// silently executing untyped JSON parameters against `workspace_manager`.
+///
+/// **Status after Issue #2 single-dispatch fix:** no production path
+/// calls this function — the compositor's `dispatch_workspace_command`
+/// arm in `src/compositor.rs` owns the canonical whitelist re-check.
+/// Kept as `pub(super)` for tests (`test_known_workspace_actions`) and
+/// future code paths that need to validate workspace actions
+/// outside the IPC handler's gate.
+#[allow(dead_code)]
 fn is_known_workspace_action(action: &str) -> bool {
     KNOWN_WORKSPACE_ACTIONS.contains(&action)
 }
@@ -106,6 +114,13 @@ fn is_known_workspace_action(action: &str) -> bool {
 /// `Some(radius)` on success and `None` for non-finite or out-of-range
 /// values. The compositor side of the IPC mirror in `process_messages`
 /// can rely on this having been called before applying the change.
+///
+/// **Status after Issue #2 single-dispatch fix:** no production path
+/// calls this — rate-validation is now deferred entirely to
+/// `EffectsEngine::apply_live_effects_control` which re-validates inline
+/// as defense in depth. Kept as `pub(super)` for tests
+/// (`test_validate_blur_radius`) and any future direct callers.
+#[allow(dead_code)]
 fn validate_blur_radius(radius: f32) -> Option<f32> {
     if radius.is_finite() && (0.0..=MAX_EFFECTS_BLUR_RADIUS_PX).contains(&radius) {
         Some(radius)
@@ -116,6 +131,13 @@ fn validate_blur_radius(radius: f32) -> Option<f32> {
 
 /// Validates a `LazyUIMessage::EffectsControl.animation_speed`. Returns
 /// `Some(speed)` on success and `None` otherwise.
+///
+/// **Status after Issue #2 single-dispatch fix:** no production path
+/// calls this — animation-speed validation is deferred to
+/// `EffectsEngine::apply_live_effects_control` which re-validates inline
+/// as defense in depth. Kept as `pub(super)` for tests
+/// (`test_validate_animation_speed`) and any future direct callers.
+#[allow(dead_code)]
 fn validate_animation_speed(speed: f32) -> Option<f32> {
     if speed.is_finite() && (0.0..=MAX_EFFECTS_ANIMATION_SPEED).contains(&speed) {
         Some(speed)
@@ -328,12 +350,20 @@ impl AxiomIPCServer {
     }
 
     /// Build the WorkspaceCommand ACK UserEvent for the per-client handler.
-    /// Schema owned here (Issue #2 single source of truth) so the
+    /// Schema owned here (single source of truth) so the
     /// `test_workspace_command_ack_schema_includes_status` regression test
     /// exercises the actual production constructor. A pure helper that does
     /// not take `&self` so call sites are both `Self::` (from inside the
     /// impl) and `AxiomIPCServer::` (from the test mod) without forcing a
     /// `new()` plumbing for each call.
+    ///
+    /// **Status after Issue #2 single-dispatch fix:** the per-client
+    /// handler no longer constructs WorkspaceCommand ACKs inline (it
+    /// forwards to `cmd_tx` and the compositor's dispatch arm owns the
+    /// lifecycle). This constructor remains available for tests and
+    /// any future code path that wants to emit a typed ACK without
+    /// going through the IPC channel.
+    #[allow(dead_code)]
     pub(super) fn build_workspace_command_ack(
         action: &str,
         accepted: bool,
@@ -358,12 +388,20 @@ impl AxiomIPCServer {
         }
     }
 
-    /// Build the EffectsControl ACK UserEvent (Issue #2 single source of
-    /// truth). `partially_queued` when at least one field failed range or
+    /// Build the EffectsControl ACK UserEvent (single source of truth).
+    /// `partially_queued` when at least one field failed range or
     /// finite-validation; `queued_for_execution` when all fields passed.
     /// Surface area mirrors WorkspaceCommand: a discriminator field that
     /// disambiguates VALIDATION-time ACK from EXECUTION-time ACK, plus the
     /// existing `accepted`/`rejected` arrays for per-field diagnostics.
+    ///
+    /// **Status after Issue #2 single-dispatch fix:** the per-client
+    /// handler no longer constructs EffectsControl ACKs inline (it
+    /// forwards to `cmd_tx` and the compositor's dispatch arm owns the
+    /// lifecycle). This constructor remains available for tests and
+    /// any future code path that wants to emit a typed ACK without
+    /// going through the IPC channel.
+    #[allow(dead_code)]
     pub(super) fn build_effects_control_ack(
         accepted: Vec<String>,
         rejected: Vec<(String, String)>,
@@ -632,17 +670,243 @@ impl AxiomIPCServer {
                     }                        debug!("📨 Received IPC message: {}", trimmed);
                         match serde_json::from_str::<LazyUIMessage>(trimmed) {
                             Ok(message) => {
-                                // Forward command to compositor via channel
-                                let _ = cmd_tx.send(message.clone());
-                                // Snapshot the live config (if wired) so the per-client
-                                // handler can resolve GetConfig queries without
-                                // holding locks across await points.
-                                let cfg_snapshot = config_handle
-                                    .as_ref()
-                                    .map(|h| h.read().clone());
-                                // Also process inline for immediate response
-                                if let Err(e) = Self::process_lazy_ui_message(message, &mut writer, cfg_snapshot.as_ref(), metrics_handle.as_ref()).await {
-                                    warn!("⚠️ Error processing message: {}", e);
+                                // Issue #2 real fix (not the cosmetic ACK-schema
+                                // patch from prior session): command-type messages
+                                // (WorkspaceCommand, EffectsControl) follow a
+                                // SINGLE-DISPATCH path. The IPC layer forwards
+                                // them to the compositor via `cmd_tx` and emits
+                                // a minimal `*Queued` ACK. The compositor's
+                                // `process_messages` drain loop in
+                                // `AxiomCompositor::process_events` owns both
+                                // validation (whitelist + range checks) AND
+                                // actual state mutation via
+                                // `dispatch_workspace_command` /
+                                // `dispatch_effects_control`.
+                                //
+                                // Pre-fix behaviour ran the same message through
+                                // TWO paths:
+                                //   1. `cmd_tx.send(message.clone())` — compositor
+                                //      drains + dispatches (real mutation).
+                                //   2. `process_lazy_ui_message(message, ...)` —
+                                //      emitted an ACK with `accepted:<bool>` /
+                                //      `rejected:[(field,reason)]` based on
+                                //      validation alone. No actual mutation in
+                                //      this path.
+                                //
+                                // The duplicate-validation path is what
+                                // monitoring tooling observed as "executed
+                                // twice": the ACK claimed fields were
+                                // accepted based on a stale whitelist state,
+                                // then the compositor's dispatch arm
+                                // re-validated on possibly-different rules.
+                                // Single dispatch through cmd_tx + a
+                                // compositor-owned dispatch arm makes
+                                // validation the single source of truth
+                                // before mutation occurs.
+                                //
+                                // All other message types
+                                // (OptimizeConfig / SetConfig that mutate
+                                // config-owned fields via
+                                // `process_messages`, GetConfig /
+                                // HealthCheck / GetPerformanceReport that are
+                                // query-only) keep the dual-path because
+                                // their ACK shape is synchronous
+                                // request-response and doesn't drive state
+                                // mutation through the workspace /
+                                // effects engine path.
+                                let is_command_type = matches!(
+                                    message,
+                                    LazyUIMessage::WorkspaceCommand { .. }
+                                        | LazyUIMessage::EffectsControl { .. }
+                                );
+                                if is_command_type {
+                                    // SINGLE DISPATCH (Issue #2 real fix):
+                                    // WorkspaceCommand + EffectsControl
+                                    // messages are forwarded to the compositor
+                                    // via `cmd_tx` ONLY — no inline ACK from
+                                    // `process_lazy_ui_message` — so the
+                                    // compositor's `process_messages` drain
+                                    // + `dispatch_workspace_command` /
+                                    // `dispatch_effects_control` arms own the
+                                    // full mutation lifecycle. This collapses
+                                    // the pre-fix duplicate-validation path
+                                    // that monitoring tooling observed as
+                                    // "executed twice".
+                                    //
+                                    // Per-reviewer Q2: capture `cmd_tx.send`
+                                    // result so a closed channel (compositor
+                                    // shutdown) returns a `delivery_failed`
+                                    // ACK instead of a misleading `queued`
+                                    // status.
+                                    //
+                                    // Per-reviewer Q3: keep the original
+                                    // `WorkspaceCommandAck` /
+                                    // `EffectsControlAck` `event_type`
+                                    // discriminator for backward compat with
+                                    // IPC clients (lazy_ui_client.py matched
+                                    // on these strings). The new
+                                    // `status: queued_for_compositor_dispatch`
+                                    // discriminator is additive — old clients
+                                    // matching on `event_type` still work.
+                                    //
+                                    // Per-reviewer Q6: build `details` via
+                                    // `serde_json::json!` macro directly per
+                                    // match arm — no
+                                    // `serde_json::Value::Object(ref mut
+                                    // map)` mutation after the fact.
+                                    let cmd_event_type: &'static str;
+                                    let cmd_details: serde_json::Value;
+                                    match &message {
+                                        LazyUIMessage::WorkspaceCommand { action, .. } => {
+                                            cmd_event_type = "WorkspaceCommandAck";
+                                            cmd_details = serde_json::json!({
+                                                "action": action,
+                                                "status": "queued_for_compositor_dispatch",
+                                                "executor": "process_messages",
+                                                // Compat shim: prior cosmetic
+                                                // ACK schema exposed `accepted`
+                                                // and `dispatched_via_mpsc`
+                                                // as bool. Old IPC consumers
+                                                // (lazy_ui_client.py pattern
+                                                // matches, external dashboard
+                                                // tooling reading the JSON
+                                                // stream) silently break if
+                                                // we drop them. We always
+                                                // forward (single dispatch →
+                                                // cmd_tx), so `accepted=true`
+                                                // is honest.
+                                                "accepted": true,
+                                                "dispatched_via_mpsc": true,
+                                            });
+                                        }
+                                        LazyUIMessage::EffectsControl { .. } => {
+                                            cmd_event_type = "EffectsControlAck";
+                                            cmd_details = serde_json::json!({
+                                                "status": "queued_for_compositor_dispatch",
+                                                "executor": "process_messages",
+                                                "note": "per-field diagnostics dropped — compositor owns validation",
+                                                "accepted": true,
+                                                "dispatched_via_mpsc": true,
+                                            });
+                                        }
+                                        // `is_command_type` already gated the
+                                        // WorkspaceCommand + EffectsControl
+                                        // branch above; the remaining 5
+                                        // variants (OptimizeConfig / GetConfig
+                                        // / SetConfig / HealthCheck /
+                                        // GetPerformanceReport) flow into
+                                        // the wildcard catch-all below as a
+                                        // defensive no-op so the match is
+                                        // exhaustive over `LazyUIMessage`.
+                                        // `unreachable!()` is statically
+                                        // reachable (5 variants flow into
+                                        // `_`) so no `unreachable_patterns`
+                                        // lint fires, but the runtime is
+                                        // guaranteed never to enter this arm
+                                        // because the outer `is_command_type`
+                                        // predicate already returned `true`.
+                                        _ => unreachable!(
+                                            "is_command_type gated WorkspaceCommand / EffectsControl"
+                                        ),
+                                    }
+                                    // Q2: capture the send result; build the
+                                    // ACK BEFORE the borrow on `message`
+                                    // expires (we're about to move `message`
+                                    // into `cmd_tx.send`).
+                                    let send_result = cmd_tx.send(message);
+                                    let ack_event_type: &'static str;
+                                    let ack_details: serde_json::Value;
+                                    // Q2 fix (compile error E0382 — partial move of
+                                    // `send_result`): pattern-bind via `ref e` so
+                                    // `send_result` remains accessible for the
+                                    // downstream `if send_result.is_err()` check.
+                                    // The original `Err(e) =>` form moved the
+                                    // `SendError<LazyUIMessage>` out of
+                                    // `send_result`, after which Rust can't
+                                    // re-borrow the binding.
+                                    match &send_result {
+                                        Ok(()) => {
+                                            ack_event_type = cmd_event_type;
+                                            ack_details = cmd_details;
+                                        }
+                                        Err(e) => {
+                                            ack_event_type = match cmd_event_type {
+                                                "WorkspaceCommandAck" => "WorkspaceCommandAckFailed",
+                                                "EffectsControlAck" => "EffectsControlAckFailed",
+                                                _ => unreachable!(
+                                                    "cmd_event_type is one of the two command-type acks"
+                                                ),
+                                            };
+                                            let reason = format!(
+                                                "compositor cmd_tx receiver dropped during shutdown: {}",
+                                                e
+                                            );
+                                            ack_details = serde_json::json!({
+                                                "status": "delivery_failed",
+                                                "reason": reason,
+                                            });
+                                            warn!(
+                                                "⚠️ cmd_tx.send failed for command-type message \
+                                                 (likely compositor shutdown); emitting delivery_failed ACK"
+                                            );
+                                        }
+                                    }
+                                    let ack = AxiomMessage::UserEvent {
+                                        timestamp: SystemTime::now()
+                                            .duration_since(UNIX_EPOCH)
+                                            .expect(
+                                                "system clock before UNIX_EPOCH — \
+                                                 compositor hardware fault",
+                                            )
+                                            .as_secs(),
+                                        event_type: ack_event_type.into(),
+                                        details: ack_details,
+                                    };
+                                    if let Err(e) =
+                                        Self::send_message(&mut writer, &ack).await
+                                    {
+                                        if send_result.is_err() {
+                                            warn!(
+                                                "⚠️ delivery_failed ACK could not be sent \
+                                                 (likely peer already disconnected): {}",
+                                                e
+                                            );
+                                        } else {
+                                            warn!(
+                                                "⚠️ Failed sending command-type queued ACK: {}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    // Dual-path retained for non-command
+                                    // types (config mutation + queries).
+                                    // cmd_tx.send forwards to the
+                                    // compositor's `process_messages`
+                                    // drain (which mutates
+                                    // config-owned fields for
+                                    // OptimizeConfig / SetConfig and drops
+                                    // the rest). The inline handler
+                                    // takes care of validation + ACK
+                                    // generation synchronously.
+                                    let _ = cmd_tx.send(message.clone());
+                                    let cfg_snapshot = config_handle
+                                        .as_ref()
+                                        .map(|h| h.read().clone());
+                                    if let Err(e) =
+                                        Self::process_lazy_ui_message(
+                                            message,
+                                            &mut writer,
+                                            cfg_snapshot.as_ref(),
+                                            metrics_handle.as_ref(),
+                                        )
+                                        .await
+                                    {
+                                        warn!(
+                                            "⚠️ Error processing message: {}",
+                                            e
+                                        );
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -765,81 +1029,31 @@ impl AxiomIPCServer {
                 Self::send_message(writer, &ack).await?;
             }
 
-            LazyUIMessage::WorkspaceCommand { action, parameters } => {
-                // Whitelist validation: only known actions are accepted, otherwise
-                // we respond with status `unknown_action` so the caller can
-                // distinguish a typo from a future-supported action. The existing
-                // cmd_tx forward in `handle_client` already routes the message into
-                // the compositor's `process_messages` queue, so `dispatched` is
-                // honest (`executor_pending` is true until a compositor-side
-                // dispatch arm is wired up).
-                let accepted = is_known_workspace_action(&action);
-                info!(
-                    "🖥️ Workspace command: {} (accepted: {}, params: {:?})",
-                    action, accepted, parameters
+            // Command-type messages (WorkspaceCommand, EffectsControl) are
+            // gated upstream in `handle_client`'s single-dispatch branch
+            // (Issue #2 real fix). They are forwarded to the compositor
+            // via `cmd_tx` ONLY — no inline ACK — so the compositor's
+            // `process_messages` drain + dispatch arm is the single
+            // mutation path. The arms below are kept (with debug logging)
+            // so a future drift between the upstream gate and this match
+            // surfaces as a `debug!` log rather than a panic or compile
+            // error. `build_workspace_command_ack` /
+            // `build_effects_control_ack` remain available as
+            // `pub(super)` constructors for tests and any future caller
+            // that needs the typed ACK shape.
+            LazyUIMessage::WorkspaceCommand { action, .. } => {
+                debug!(
+                    "⚠️ WorkspaceCommand({action}) reached process_lazy_ui_message \
+                     — upstream gate in handle_client should have dispatched \
+                     it via cmd_tx only"
                 );
-                // Schema (single source of truth) lives in
-                // `Self::build_workspace_command_ack` so the regression test
-                // `test_workspace_command_ack_schema_includes_status` exercises
-                // the actual production constructor rather than a hand-written
-                // fixture that could drift out of sync with this call site.
-                let ack = Self::build_workspace_command_ack(&action, accepted);
-                Self::send_message(writer, &ack).await?;
             }
-
-            LazyUIMessage::EffectsControl {
-                enabled,
-                blur_radius,
-                animation_speed,
-            } => {
-                // Per-field range validation. `enabled` is a bool (always valid).
-                // `blur_radius` and `animation_speed` are bounded floats. Invalid
-                // values are reported back in `rejected` so callers can retry.
-                let mut accepted: Vec<String> = Vec::new();
-                let mut rejected: Vec<(String, String)> = Vec::new();
-                if let Some(e) = enabled {
-                    accepted.push(format!("enabled={}", e));
-                }
-                if let Some(r) = blur_radius {
-                    match validate_blur_radius(r) {
-                        Some(_) => accepted.push(format!("blur_radius={}", r)),
-                        None => rejected.push((
-                            "blur_radius".into(),
-                            format!("out_of_range_0..={}px", MAX_EFFECTS_BLUR_RADIUS_PX),
-                        )),
-                    }
-                }
-                if let Some(s) = animation_speed {
-                    match validate_animation_speed(s) {
-                        Some(_) => accepted.push(format!("animation_speed={}", s)),
-                        None => rejected.push((
-                            "animation_speed".into(),
-                            format!("out_of_range_0..={}", MAX_EFFECTS_ANIMATION_SPEED),
-                        )),
-                    }
-                }
-                info!(
-                    "✨ Effects control — accepted: {}, rejected: {}",
-                    accepted.len(),
-                    rejected.len()
+            LazyUIMessage::EffectsControl { .. } => {
+                debug!(
+                    "⚠️ EffectsControl reached process_lazy_ui_message \
+                     — upstream gate in handle_client should have dispatched \
+                     it via cmd_tx only"
                 );
-                // Compositor-side application: route via mpsc to `process_messages`
-                // and dispatched on the compositor's tick via
-                // `dispatch_effects_control` -> `effects_engine.write().apply_live_effects_control()`.
-                // The ACK is VALIDATION-time only — the field-value changes
-                // happen later, asynchronously, on the compositor thread.
-                // Status semantics mirror WorkspaceCommandAck:
-                // - "queued_for_execution": per-field validation passed; the
-                //   compositor will apply the changes on its next tick.
-                // - "rejected": at least one field failed validation (out-of-range,
-                //   non-finite, etc.); the compositor will NOT apply the rejected
-                //   sub-fields but will apply accepted ones.
-                // Schema (single source of truth) lives in
-                // `Self::build_effects_control_ack` so the regression test
-                // `test_effects_control_ack_schema_distinguishes_partial`
-                // exercises the actual production constructor.
-                let ack = Self::build_effects_control_ack(accepted, rejected);
-                Self::send_message(writer, &ack).await?;
             }
 
             LazyUIMessage::HealthCheck => {
