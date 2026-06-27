@@ -202,6 +202,16 @@ impl WindowManager {
         }
     }
 
+    /// Total number of managed windows (includes minimized).
+    /// Used by the compositor tick to feed `LiveMetrics.active_windows`
+    /// so monitoring clients (HealthCheck / GetPerformanceReport) see
+    /// real values instead of zeros. Includes minimized windows so the
+    /// count matches the IPC-level "registered with the compositor"
+    /// definition; layout-visible filtering happens downstream.
+    pub fn window_count(&self) -> u32 {
+        self.windows.len() as u32
+    }
+
     /// Borrow a window by ID. Returns `None` if no window with that ID exists.
     pub fn get_window(&self, id: u64) -> Option<&AxiomWindow> {
         self.windows.get(&id)

@@ -470,6 +470,82 @@ pub(super) fn collect_pending_uploads(
     pending
 }
 
+/// Persistent GL upload texture cache — one entry per viewport size.
+///
+/// Stores the GLuint handle alongside its last-uploaded (width, height)
+/// so subsequent uploads can use `glTexSubImage2D` (no realloc) when
+/// the size is unchanged. Closes Design 15 — audit-era code did
+/// GenTextures + TexImage2D + DeleteTextures on every frame, costing
+/// ~60 GPU texture allocations per second at 60 Hz.
+///
+/// # Safety
+/// Caller must ensure a GL context is current. `cache`'s handle slot
+/// starts at `(0, 0, 0)` on first call which forces a TexImage2D
+/// (allocate) path; subsequent calls at the same `(w, h)` use
+/// TexSubImage2D (no-allocate).
+pub(super) fn update_persistent_texture(
+    cache: &mut Option<(gl::types::GLuint, u32, u32)>,
+    width: u32,
+    height: u32,
+    data: &[u8],
+) -> gl::types::GLuint {
+    // SAFETY: GL context is current (caller invariant).
+    unsafe {
+        if cache.is_none() {
+            let mut t: gl::types::GLuint = 0;
+            gl::GenTextures(1, &mut t);
+            gl::BindTexture(gl::TEXTURE_2D, t);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+            gl::BindTexture(gl::TEXTURE_2D, 0);
+            // Initialize with (0, 0) dims so the first upload forces
+            // TexImage2D allocation, not TexSubImage2D into a 0-sized tex.
+            *cache = Some((t, 0, 0));
+        }
+
+        let (tex, old_w, old_h) = cache.as_mut().expect("just initialized");
+
+        gl::BindTexture(gl::TEXTURE_2D, *tex);
+        if *old_w == width && *old_h == height {
+            // Same size as the previous frame: update in place via
+            // TexSubImage2D — no GPU allocation. This is the hot path
+            // for steady-state 60fps rendering.
+            gl::TexSubImage2D(
+                gl::TEXTURE_2D,
+                0,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                gl::RGBA,
+                gl::UNSIGNED_BYTE,
+                data.as_ptr() as *const std::ffi::c_void,
+            );
+        } else {
+            // Viewport resized (or first allocation): TexImage2D
+            // reallocates the GPU texture. Drops the old storage
+            // implicitly (driver-managed, no manual delete needed).
+            gl::TexImage2D(
+                gl::TEXTURE_2D,
+                0,
+                gl::RGBA as i32,
+                width as i32,
+                height as i32,
+                0,
+                gl::RGBA,
+                gl::UNSIGNED_BYTE,
+                data.as_ptr() as *const std::ffi::c_void,
+            );
+            *old_w = width;
+            *old_h = height;
+        }
+        gl::BindTexture(gl::TEXTURE_2D, 0);
+        *tex
+    }
+}
+
 /// Delete a list of stale GL texture handles that were queued for
 /// deferred cleanup (from surfaces whose clients disconnected).
 ///

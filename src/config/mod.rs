@@ -641,9 +641,24 @@ impl AxiomConfig {
         if self.effects.shadows.blur_radius > 512 {
             anyhow::bail!("shadows.blur_radius must be <= 512");
         }
-        // Validate shadow.color is a valid 6-char hex string
-        if !self.effects.shadows.color.starts_with('#') || self.effects.shadows.color.len() != 7 {
-            anyhow::bail!("shadows.color must be a #RRGGBB hex string");
+        // Validate shadow.color is a valid 6-char hex string.
+        // The previous check was format-only (`#` prefix + length 7),
+        // which accepted strings like `"#GGGGGG"` that contain
+        // non-hex characters; downstream code that feeds this into a
+        // GPU fragment shader would silently produce wrong colors
+        // (or NaN-style integer overflow on hardware color conversion).
+        // `is_ascii_hexdigit` covers A-F, a-f, and 0-9 — the same
+        // character set the proptest regex generator in
+        // `property_tests.rs` uses to produce valid inputs.
+        let color = &self.effects.shadows.color;
+        if !color.starts_with('#')
+            || color.len() != 7
+            || !color[1..].chars().all(|c| c.is_ascii_hexdigit())
+        {
+            anyhow::bail!(
+                "shadows.color must be a #RRGGBB hex string (got {:?})",
+                color
+            );
         }
 
         // --- window ---
@@ -696,8 +711,22 @@ impl AxiomConfig {
     /// Writes to a temp file in the same directory and renames, so a
     /// mid-write crash leaves either the old file or the new one
     /// intact. File permissions are set to 0600 to avoid leaking config.
+    ///
+    /// **Validates first.** `save()` runs `self.validate()?` before
+    /// serialization so a corrupt configuration (e.g. `scroll_speed =
+    /// -5.0`, an out-of-range `border_width`, or a malformed shadow
+    /// color) never reaches disk — without this guard, the next
+    /// `load()` would crash on the persisted file. The error is
+    /// surfaced via `anyhow::Result` so callers (CLI, IPC, GUI) can
+    /// tell the user *why* save refused.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let path = path.as_ref();
+        // Reject invalid configs before touching the filesystem so
+        // we never leave a half-written tmp behind. The atomic rename
+        // in the happy path keeps the on-disk file either entirely
+        // old or entirely new; this check keeps it from being either
+        // and the new one breaking load().
+        self.validate().context("Refusing to save invalid configuration")?;
         let contents = toml::to_string_pretty(self).context("Failed to serialize configuration")?;
 
         let tmp_path = path.with_extension("tmp");

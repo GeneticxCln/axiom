@@ -15,7 +15,7 @@ use crate::config::AxiomConfig;
 use crate::decoration::DecorationManager;
 use crate::effects::EffectsEngine;
 use crate::input::InputManager;
-use crate::ipc::{AxiomIPCServer, LazyUIMessage};
+use crate::ipc::{AxiomIPCServer, LazyUIMessage, LiveMetrics};
 use crate::renderer::AxiomRenderer;
 use crate::window::{Rectangle, WindowManager};
 use crate::workspace::ScrollableWorkspaces;
@@ -95,22 +95,49 @@ impl AxiomCompositor {
         info!("All subsystems initialized successfully");
 
         // Initialize GPU effects acceleration (blur, shadows, shaders).
-        // This wires the effects engine into the wgpu device/queue so that
-        // per-frame shadow and blur post-processing passes can render via GPU.
-        // Failure is non-fatal — effects will run in CPU-only mode without GPU.
-        let (device, queue) = {
+        // The renderer exposes `device()` / `queue()` as `&Device` / `&Queue`
+        // (Design 16) — callers cannot reach the GPU context through the
+        // public getter anymore. We use direct field access to clone the
+        // internal `Arc`s, which is what `initialize_gpu` actually wants.
+        // Both wgpu types are themselves internally Arc-wrapped, so the
+        // `Arc::clone` is a cheap refcount bump, not a deep copy.
+        {
             let r = renderer.read();
-            (r.device(), r.queue())
-        };
-        effects_engine
-            .write()
-            .initialize_gpu(device, queue)
-            .unwrap_or_else(|e| {
-                warn!(
-                    "GPU effects initialization skipped ({}): blur/shadows will not render",
-                    e
-                );
-            });
+            // Direct field access (`r.device`, `r.queue`) clones the Arc.
+            // Arc::clone takes &Arc<T> and produces Arc<T> — both compile
+            // cleanly with the `&self.device` borrow that survives until
+            // the read guard is dropped at the bottom of this block.
+            let device_arc: Arc<wgpu::Device> = Arc::clone(renderer.read().device_arc());
+            let queue_arc: Arc<wgpu::Queue> = Arc::clone(renderer.read().queue_arc());
+            // Drop the renderer guard BEFORE acquiring the effects write.
+            // The `Arc`s now own the GPU context; the read guard is gone
+            // before `effects_engine.write()` is held, so renderer.write()
+            // and effects.write() cannot interleave in a deadlock window.
+            drop(r);
+            effects_engine
+                .write()
+                .initialize_gpu(device_arc, queue_arc)
+                .unwrap_or_else(|e| {
+                    warn!(
+                        "GPU effects initialization skipped ({}): blur/shadows will not render",
+                        e
+                    );
+                });
+        }
+        // Capture the post-init state so we can surface it via the IPC
+        // LiveMetrics snapshot (Design 14 — observable to monitoring
+        // clients without grepping the log).
+        let effects_gpu_available = effects_engine.read().is_gpu_initialized();
+        // Pre-populate the IPC's LiveMetrics so a `HealthCheck` /
+        // `GetPerformanceReport` query arriving BEFORE the first tick
+        // still sees the gpu_initialized state instead of the default
+        // LiveMetrics::default() (= false / 0).
+        ipc_server.set_live_metrics_snapshot(LiveMetrics {
+            frame_time_ms: 0.0,
+            active_windows: 0,
+            current_workspace: 0,
+            effects_gpu_available,
+        });
 
         // Wire effects engine into renderer for GPU shadow/blur post-processing
         renderer.write().set_effects_engine(effects_engine.clone());
@@ -578,21 +605,50 @@ impl AxiomCompositor {
                 "Consecutive error count: {}",
                 self.consecutive_error_count
             );
-        } else if self.consecutive_error_count < 5 {
-            // Stable tick, reset error count — but never clear a fatal count.
-            // Once the threshold is crossed, a single clean tick shouldn't
-            // mask the previous consecutive failures.
-            self.consecutive_error_count = 0;
+        } else if self.consecutive_error_count > 0 {
+            // Stable tick, but DO NOT snap-to-zero. Decrement instead so
+            // a single clean tick does not mask prior consecutive
+            // failures — the audit's intent (see comment in the original
+            // code, which contradicted the implementation). The fatal
+            // threshold (`>= 5`) is checked AFTER this branch and
+            // short-circuits the run loop, so guarding on `> 0` (rather
+            // than `< 5`) is sufficient and gives us a one-tick recovery
+            // slope: `N` consecutive errors need at least `N` clean
+            // ticks before the counter fully resets.
+            // `saturating_sub` keeps the counter at 0 instead of
+            // underflowing past it.
+            self.consecutive_error_count =
+                self.consecutive_error_count.saturating_sub(1);
         }
 
-        // Broadcast IPC performance metrics to Lazy UI (~10Hz rate-limited internally)
+        // Broadcast IPC performance metrics to Lazy UI (~10Hz rate-limited
+        // internally) AND refresh the per-tick LiveMetrics snapshot so direct
+        // monitoring queries (HealthCheck / GetPerformanceReport) see real
+        // data instead of zeros. Locks here are all `parking_lot::RwLock`
+        // short-lived read guards; no await points between them — safe to
+        // compute inline. `active_windows` is the total registered window
+        // count (was previously incorrectly wired to `column_count` in the
+        // broadcast path; corrected below).
         let frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
-        let (workspace_idx, _, column_count, _) = self.get_workspace_info();
+        let (workspace_idx, _, _column_count, _) = self.get_workspace_info();
+        let active_windows = self.window_manager.read().window_count();
+        let effects_gpu_available = self.effects_engine.read().is_gpu_initialized();
         self.ipc_server.maybe_broadcast_performance_metrics(
             frame_time_ms,
-            column_count as u32,
+            active_windows,
             workspace_idx,
         );
+        // Per-tick snapshot for direct monitoring queries (Design 12 final
+        // wiring). `set_live_metrics_snapshot` replaces any previously-set
+        // handle, so the per-tick metrics are visible to HealthCheck /
+        // GetPerformanceReport without falling back to the zero default.
+        // Cheap path: a single struct copy into a parking_lot-wrapped Arc.
+        self.ipc_server.set_live_metrics_snapshot(LiveMetrics {
+            frame_time_ms,
+            active_windows,
+            current_workspace: workspace_idx,
+            effects_gpu_available,
+        });
 
         // Frame pacing: sleep for remaining time to target the configured FPS.
         // Skipped when max_fps == 0 (unbounded).
@@ -602,6 +658,24 @@ impl AxiomCompositor {
                 if let Some(sleep_duration) = target_frame_time.checked_sub(elapsed) {
                     tokio::time::sleep(sleep_duration).await;
                 }
+            }
+        }
+
+        // Design 11 second half: device-loss recovery hook. The renderer's
+        // `map_async` callback flips its `device_lost` flag on driver crash
+        // / context-reset and `compose_full_frame` already short-circuits
+        // to Err. Here we observe the flag and stop the run loop with
+        // a clear log message so the failure isn't a silent black screen.
+        if let Some(ref render_lock) = self.renderer {
+            if render_lock.read().is_device_lost() {
+                log::error!(
+                    "WGPU device flagged as lost; shutting down compositor run loop \u{2014}                      compositor must be reinitialised to recover"
+                );
+                self.running = false;
+                // Returns Ok(()) on purpose: tokio::select! arm body is `{}`,
+                // not the Result, so Err is misleading. The exit is driven
+                // by `while self.running` in run().
+                return Ok(());
             }
         }
 

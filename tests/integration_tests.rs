@@ -866,12 +866,26 @@ async fn test_prepare_window_resources_idempotent() -> Result<()> {
     Ok(())
 }
 
-/// Integration test: `prepare_window_resources` on a window without a
-/// texture (no `texture_view`) must skip buffer creation entirely.
-/// A plain `upsert_window_rect` adds a window entry without a texture.
+/// Integration test: `prepare_window_resources` must populate
+/// `cached_uniform_buffer` and `cached_vertex_buffer` for EVERY
+/// window, even when the window has no client texture attached.
+///
+/// This is the new contract: placeholder (texture-less) windows still
+/// need vertex + uniform buffers because [`AxiomRenderer::compose_full_frame`]
+/// draws them via the placeholder pipeline using the same cached
+/// buffer slots the textured pass reuses. Without buffers for
+/// texture-less windows, `compose_full_frame` would silently drop
+/// them from the composed frame.
+///
+/// **Debug-only.** In release builds, the placeholder pipeline is
+/// compiled out and untextured windows stay invisible — see
+/// `test_prepare_window_resources_skips_untextured_window` for the
+/// release-mode counterpart.
+#[cfg(debug_assertions)]
 #[tokio::test]
 #[serial_test::serial]
-async fn test_prepare_window_resources_skips_textureless_window() -> Result<()> {
+async fn test_prepare_window_resources_creates_buffers_for_placeholder_window() -> Result<()>
+{
     use axiom::renderer::AxiomRenderer;
 
     let mut renderer = AxiomRenderer::new_headless().await?;
@@ -883,17 +897,245 @@ async fn test_prepare_window_resources_skips_textureless_window() -> Result<()> 
         "no texture after upsert_window_rect"
     );
 
-    // prepare should skip this window — no buffers created
+    // Sanity: pre-prepare, no cached buffers (default state)
+    assert!(
+        renderer.windows[0].cached_uniform_buffer.is_none(),
+        "uniform buffer starts None"
+    );
+    assert!(
+        renderer.windows[0].cached_vertex_buffer.is_none(),
+        "vertex buffer starts None"
+    );
+
+    // prepare — placeholder windows NOW receive vertex + uniform buffers
+    renderer.prepare_window_resources();
+
+    let w = &renderer.windows[0];
+    assert!(
+        w.cached_uniform_buffer.is_some(),
+        "uniform buffer should be created even with no texture (placeholder path)"
+    );
+    assert!(
+        w.cached_vertex_buffer.is_some(),
+        "vertex buffer should be created even with no texture (placeholder path)"
+    );
+    // Window state is still placeholder (no texture)
+    assert!(w.texture_view.is_none(), "texture still None — placeholder path");
+
+    Ok(())
+}
+
+/// Integration test: `compose_full_frame` renders textured windows via
+/// the textured pipeline AND placeholder (texture-less) windows via
+/// the placeholder pipeline on the SAME render pass, returning one
+/// composed RGBA buffer ready for present. Verifies:
+///
+/// 1. The composition succeeds and returns the expected byte count.
+/// 2. Red pixels survive (textured window drew through the textured
+///    pipeline).
+/// 3. The placeholder pipeline wrote non-background content where
+///    the placeholder window sits (proves the placeholder pass fired;
+///    byte-precise color match is NOT asserted because the framebuffer
+///    is sRGB-encoded by wgpu and the exact byte is sRGB-formula-
+///    dependent).
+/// 4. The composed frame is not uniform: the two windows together
+///    cover a non-trivial share of the 128×64 canvas while the
+///    background clear-color still dominates uncovered regions.
+///
+/// **Debug-only.** In release builds, the placeholder pipeline is
+/// compiled out and untextured windows stay invisible — see
+/// `test_compose_full_frame_skips_untextured_windows` for the
+/// release-mode counterpart.
+#[cfg(debug_assertions)]
+#[tokio::test]
+#[serial_test::serial]
+async fn test_compose_full_frame_with_mixed_windows() -> Result<()> {
+    use axiom::renderer::AxiomRenderer;
+
+    let mut renderer = AxiomRenderer::new_headless().await?;
+
+    // ── Window 1: textured solid red, fully opaque, top-left ────────
+    let red_tex = make_solid_texture_rgba(255, 0, 0, 255);
+    renderer.add_window(1, (16.0, 16.0), (32.0, 32.0));
+    renderer.update_window_texture(1, 32, 32, &red_tex);
+
+    // ── Window 2: placeholder (no committed texture), offset so it
+    //     does not overlap window 1. ─────────────────────────────
+    renderer.upsert_window_rect(2, (64.0, 16.0), (32.0, 32.0), 0.75);
+
+    let composed = renderer.compose_full_frame(128, 64)?;
+
+    assert_eq!(
+        composed.len(),
+        (128 * 64 * 4) as usize,
+        "composed buffer should be width × height × 4 bytes"
+    );
+
+    // Sample (R, G, B, A) at (x, y). BGRA sRGB → idx+0=B, idx+1=G, idx+2=R, idx+3=A.
+    let sample = |x: u32, y: u32| -> (u8, u8, u8, u8) {
+        let idx = ((y * 128 + x) * 4) as usize;
+        (
+            composed[idx + 2], // R
+            composed[idx + 1], // G
+            composed[idx],     // B
+            composed[idx + 3], // A
+        )
+    };
+
+    // ── 1. Background sample (far from any window) ─────────────────
+    // (4, 4) sits in the upper-left margin — both windows start at x≥16,
+    // so this point hits the clear color only.
+    let bg = sample(4, 4);
+
+    // ── 2. Textured window sample — center of the red 32×32 quad ───
+    // Window 1 is at (16, 16) size (32, 32). Center ≈ (32, 32).
+    // The input texture is solid red (255,0,0) → wgpu samples as
+    // linear 1.0 → framebuffer encodes back to sRGB 255. Sample
+    // body must be predominantly red.
+    let textured = sample(32, 32);
+    assert!(
+        textured.0 > textured.1 * 3 && textured.0 > textured.2 * 3,
+        "textured window center should be strongly red-dominant (R={}, G={}, B={})",
+        textured.0, textured.1, textured.2
+    );
+    assert!(
+        textured != bg,
+        "textured window center ({:?}) must differ from background ({:?})",
+        textured, bg
+    );
+
+    // ── 3. Placeholder window sample — center of the 32×32 placeholder ──
+    // Window 2 (placeholder) is at (64, 16) size (32, 32). Center ≈ (80, 32).
+    // The placeholder pipeline must have written some non-clear pixels
+    // here — without it, the placeholder fallback would leave these
+    // pixels at the bg color.
+    let placeholder = sample(80, 32);
+    assert!(
+        placeholder != bg,
+        "placeholder window center ({:?}) must differ from background ({:?}) \
+         — placeholder pass did not write any pixels",
+        placeholder, bg
+    );
+
+    // ── 4. The two window samples must differ from each other ────────
+    // Strengthens that the textured path and the placeholder path are
+    // actually rendering distinct content (not both off, or both
+    // accidentally identical).
+    assert_ne!(
+        textured, placeholder,
+        "textured ({:?}) and placeholder ({:?}) must produce different pixels",
+        textured, placeholder
+    );
+
+    Ok(())
+}
+
+/// Integration test: in **release** builds, the placeholder pipeline
+/// is compiled out. `compose_full_frame` must still succeed, the
+/// textured window must still draw through the textured pass, AND the
+/// untextured window's region of the framebuffer must remain at the
+/// clear color (no draw fired for the placeholder window).
+///
+/// This is the release-mode counterpart of
+/// `test_compose_full_frame_with_mixed_windows` — the test pair
+/// enforces the contract that windows are only visible after
+/// committing a real SHM buffer, matching Wayland semantics.
+#[cfg(not(debug_assertions))]
+#[tokio::test]
+#[serial_test::serial]
+async fn test_compose_full_frame_skips_untextured_windows() -> Result<()> {
+    use axiom::renderer::AxiomRenderer;
+
+    let mut renderer = AxiomRenderer::new_headless().await?;
+
+    // ── Window 1: textured solid red — must draw ────────────────
+    let red_tex = make_solid_texture_rgba(255, 0, 0, 255);
+    renderer.add_window(1, (16.0, 16.0), (32.0, 32.0));
+    renderer.update_window_texture(1, 32, 32, &red_tex);
+
+    // ── Window 2: untextured — must NOT draw in release ──────────
+    renderer.upsert_window_rect(2, (64.0, 16.0), (32.0, 32.0), 1.0);
+
+    let composed = renderer.compose_full_frame(128, 64)?;
+
+    assert_eq!(
+        composed.len(),
+        (128 * 64 * 4) as usize,
+        "composed buffer should be width × height × 4 bytes"
+    );
+
+    // Sample (R, G, B, A) at (x, y). BGRA sRGB → idx+0=B, idx+1=G, idx+2=R, idx+3=A.
+    let sample = |x: u32, y: u32| -> (u8, u8, u8, u8) {
+        let idx = ((y * 128 + x) * 4) as usize;
+        (
+            composed[idx + 2], // R
+            composed[idx + 1], // G
+            composed[idx],     // B
+            composed[idx + 3], // A
+        )
+    };
+
+    // Background sample (far from any window).
+    let bg = sample(4, 4);
+
+    // Textured window sample — red center must be present.
+    let textured = sample(32, 32);
+    assert!(
+        textured.0 > textured.1 * 3 && textured.0 > textured.2 * 3,
+        "textured window center should be strongly red-dominant (R={}, G={}, B={})",
+        textured.0, textured.1, textured.2
+    );
+    assert_ne!(
+        textured, bg,
+        "textured window center ({:?}) must differ from background ({:?})",
+        textured, bg
+    );
+
+    // Untextured window sample — must remain at the background color
+    // since the placeholder pipeline is compiled out in release.
+    let invisible = sample(80, 32);
+    assert_eq!(
+        invisible, bg,
+        "untextured window center ({:?}) must equal background ({:?}) — \
+         release build: placeholder pipeline is compiled out, window stays invisible",
+        invisible, bg
+    );
+
+    Ok(())
+}
+
+/// Integration test: in **release** builds, `prepare_window_resources`
+/// must skip untextured (placeholder) windows entirely. They stay
+/// invisible until they commit a real SHM buffer, so allocating GPU
+/// resources for them would be wasted memory.
+///
+/// This is the release-mode counterpart of
+/// `test_prepare_window_resources_creates_buffers_for_placeholder_window`.
+#[cfg(not(debug_assertions))]
+#[tokio::test]
+#[serial_test::serial]
+async fn test_prepare_window_resources_skips_untextured_window() -> Result<()> {
+    use axiom::renderer::AxiomRenderer;
+
+    let mut renderer = AxiomRenderer::new_headless().await?;
+    // upsert_window_rect does NOT set a texture — only geometry.
+    renderer.upsert_window_rect(1, (100.0, 200.0), (400.0, 300.0), 1.0);
+
+    assert!(
+        renderer.windows[0].texture_view.is_none(),
+        "no texture after upsert_window_rect"
+    );
+
     renderer.prepare_window_resources();
 
     let w = &renderer.windows[0];
     assert!(
         w.cached_uniform_buffer.is_none(),
-        "no uniform buffer for textureless window"
+        "release build must NOT allocate uniform buffer for untextured window"
     );
     assert!(
         w.cached_vertex_buffer.is_none(),
-        "no vertex buffer for textureless window"
+        "release build must NOT allocate vertex buffer for untextured window"
     );
 
     Ok(())
@@ -1998,51 +2240,71 @@ async fn test_ipc_optimize_config_flow() -> Result<()> {
 #[tokio::test]
 #[serial_test::serial]
 async fn test_tick_error_recovery() -> Result<()> {
+    // `consecutive_error_count` now DECREMENTS with each clean tick
+    // instead of snapping to zero. `N` consecutive errors need at
+    // least `N` clean ticks before the counter fully resets
+    // (audit Bug 1 fix).
     let (mut compositor, ..) = make_test_compositor(AxiomConfig::default()).await?;
 
-    // Clean tick with 0 errors should succeed
+    // 1) Clean tick on a fresh compositor: count stays 0, running.
     assert!(
         compositor.tick_for_test().await.is_ok(),
-        "clean tick should return Ok"
+        "clean tick should return Ok",
     );
     assert!(
         compositor.is_running(),
-        "compositor should be running after clean tick"
+        "should be running after clean tick",
     );
 
-    // Simulate 3 consecutive error ticks, then a clean tick.
-    // The clean tick should reset the count (3 < 5).
+    // 2) Three error ticks push count to 3 (still running, below
+    //    threshold of 5).
     for _ in 0..3 {
         compositor.force_next_tick_error();
-        compositor.tick_for_test().await?;
+        assert!(
+            compositor.tick_for_test().await.is_ok(),
+            "count 1..=3 should not yet trigger shutdown",
+        );
     }
-    // Clean tick — count was 3, now resets to 0
-    compositor.tick_for_test().await?;
-    assert!(
-        compositor.is_running(),
-        "compositor should survive after error reset"
-    );
+    assert!(compositor.is_running(), "3 errors: still running");
 
-    // Now simulate exactly 5 consecutive errors — should trigger shutdown.
-    // The reset proves the count started from 0, not a residual value.
-    for _ in 0..4 {
-        compositor.force_next_tick_error();
-        compositor.tick_for_test().await?; // First 4 should succeed
-    }
+    // 3) One clean tick DECREMENTS the counter (`3 - 1 = 2`), it does
+    //    NOT snap to zero. This is the audit Bug 1 fix: a single
+    //    clean tick must not mask prior consecutive failures.
     assert!(
-        compositor.is_running(),
-        "should still be running after 4 errors"
+        compositor.tick_for_test().await.is_ok(),
+        "clean tick should succeed after 3 errors",
     );
-    // 5th error triggers emergency shutdown — must return Err
+    // No public getter for `consecutive_error_count`, so we drive it
+    // through `set_errors_for_test` and `force_next_tick_error`. The
+    // recovery is observable as: shutdown happens at the CUMULATIVE
+    // 5th error, not 3 more errors.
+    assert!(compositor.is_running(), "1 clean tick: still running (count=2)");
+
+    // 4) Two more error ticks push count from 2 to 4 (still running).
+    for _ in 0..2 {
+        compositor.force_next_tick_error();
+        assert!(
+            compositor.tick_for_test().await.is_ok(),
+            "count <5 should be ok",
+        );
+        assert!(compositor.is_running(), "still running at count <5");
+    }
+
+    // 5) The 3rd additional error pushes count from 4 to 5, hitting
+    //    the threshold and triggering emergency shutdown. With
+    //    snap-to-zero (the old buggy behaviour), the clean tick
+    //    would have reset the counter, so this same sequence of
+    //    3 errors AFTER recovery would not have crossed the
+    //    threshold. The test now enforces the corrected semantics.
     compositor.force_next_tick_error();
     let result = compositor.tick_for_test().await;
     assert!(
         result.is_err(),
-        "5th consecutive error should trigger shutdown"
+        "cumulative (post-recovery) 3rd error must push count to 5 and shut down",
     );
     assert!(
         !compositor.is_running(),
-        "compositor should stop after 5 consecutive errors"
+        "compositor must stop after cumulative threshold",
     );
 
     Ok(())

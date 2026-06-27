@@ -737,6 +737,16 @@ pub struct AxiomSmithayBackendReal {
     /// (Smithay's display.dispatch_clients polls it internally)
     #[allow(dead_code)]
     listener: Option<ListeningSocket>,
+    /// Persistent GL upload texture for the WGPU-composed frame.
+    ///
+    /// `(handle, width, height)` — the size tuple drives the
+    /// TexSubImage2D-when-same vs TexImage2D-when-resized choice in
+    /// `shm_upload::update_persistent_texture`. Replaces the
+    /// per-frame `GenTextures + TexImage2D + DeleteTextures` trinity
+    /// (60 allocs/sec at 60Hz) the audit flagged as Design 15. Lazily
+    /// allocated on first compose; recompiled when viewport changes;
+    /// freed in `shutdown()` while the GL context is still bound.
+    compose_upload_texture: Option<(gl::types::GLuint, u32, u32)>,
 }
 
 impl AxiomSmithayBackendReal {
@@ -814,6 +824,7 @@ impl AxiomSmithayBackendReal {
             clients: Vec::new(),
             shader_program: None,
             listener: None,
+            compose_upload_texture: None,
         })
     }
 
@@ -911,6 +922,7 @@ impl AxiomSmithayBackendReal {
             clients: Vec::new(),
             shader_program: None,
             listener: Some(listener),
+            compose_upload_texture: None,
         })
     }
 
@@ -1547,59 +1559,29 @@ impl AxiomSmithayBackendReal {
             let gl_pixels = shm_upload::read_gl_framebuffer(ww, wh);
             match renderer.write().drain_post_process(ww, wh, gl_pixels) {
                 Ok(Some(processed)) => {
-                    // Upload processed pixels to a temporary GL texture and
-                    // draw a fullscreen quad to replace the framebuffer.
-                    let mut tex: gl::types::GLuint = 0;
-                    // SAFETY: GL context is current. GenTextures + TexImage2D
-                    // are called with a fresh tex name and valid RGBA pixel
-                    // data from wgpu's staging readback. The texture is bound
-                    // exclusively within this block and unbound on cleanup.
-                    unsafe {
-                        gl::GenTextures(1, &mut tex);
-                        gl::BindTexture(gl::TEXTURE_2D, tex);
-                        gl::TexParameteri(
-                            gl::TEXTURE_2D,
-                            gl::TEXTURE_MIN_FILTER,
-                            gl::LINEAR as i32,
-                        );
-                        gl::TexParameteri(
-                            gl::TEXTURE_2D,
-                            gl::TEXTURE_MAG_FILTER,
-                            gl::LINEAR as i32,
-                        );
-                        gl::TexParameteri(
-                            gl::TEXTURE_2D,
-                            gl::TEXTURE_WRAP_S,
-                            gl::CLAMP_TO_EDGE as i32,
-                        );
-                        gl::TexParameteri(
-                            gl::TEXTURE_2D,
-                            gl::TEXTURE_WRAP_T,
-                            gl::CLAMP_TO_EDGE as i32,
-                        );
-                        gl::TexImage2D(
-                            gl::TEXTURE_2D,
-                            0,
-                            gl::RGBA as i32,
-                            ww as i32,
-                            wh as i32,
-                            0,
-                            gl::RGBA,
-                            gl::UNSIGNED_BYTE,
-                            processed.as_ptr() as *const std::ffi::c_void,
-                        );
-                    }
-                    shm_upload::gl_check_error("effects upload");
+                    // Design 15: persistent GL upload texture. Same
+                    // (w, h) -> `glTexSubImage2D` (no GPU alloc); viewport-
+                    // resized -> `glTexImage2D` (one alloc). Replaces the
+                    // per-frame `GenTextures + TexImage2D + DeleteTextures`
+                    // trinity (~60 GPU allocations per second at 60Hz).
+                    //
+                    // SAFETY: GL context is current (`backend.bind()`
+                    // succeeded at the top of `render()`), and the cache
+                    // field owned on `self.compose_upload_texture` outlives
+                    // this match arm so the texture survives until
+                    // `shutdown()` clears it.
+                    let tex = shm_upload::update_persistent_texture(
+                        &mut self.compose_upload_texture,
+                        ww,
+                        wh,
+                        &processed,
+                    );
+                    shm_upload::gl_check_error("persistent upload");
 
-                    // Overwrite the framebuffer by drawing a fullscreen quad.
-                    // This replaces the GL-rendered content with the
-                    // WGPU-composited result (shadows, blurs on top).
+                    // Blit the persistent texture over the GL framebuffer
+                    // via a single fullscreen quad.
                     shm_upload::draw_fullscreen_quad(shader_prog, tex);
-                    shm_upload::gl_check_error("effects fullscreen quad");
-
-                    unsafe {
-                        gl::DeleteTextures(1, &tex);
-                    }
+                    shm_upload::gl_check_error("persistent blit");
                 }
                 Ok(None) => {
                     // No effects queued this frame — `drain_post_process` already
@@ -1666,6 +1648,19 @@ impl AxiomSmithayBackendReal {
     pub fn shutdown(&mut self) -> Result<()> {
         info!("🛑 Shutting down Smithay backend");
         self.state.running = false;
+
+        // Design 15 cleanup: free the persistent upload texture while
+        // the GL context is still bound. Idempotent when no compose
+        // ever happened (cache still None).
+        if let Some(backend) = self.winit_backend.as_mut() {
+            // Try rebinding; failure during shutdown is non-fatal.
+            if backend.bind().is_ok() {
+                if let Some((tex, _, _)) = self.compose_upload_texture.take() {
+                    // SAFETY: GL context is current after the rebind above.
+                    unsafe { gl::DeleteTextures(1, &tex); }
+                }
+            }
+        }
         Ok(())
     }
 }

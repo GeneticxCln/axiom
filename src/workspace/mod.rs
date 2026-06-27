@@ -8,7 +8,6 @@
 //! - [`ScrollableWorkspaces`]: Manager that holds multiple tapes.
 
 use log::{debug, info, warn};
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -374,11 +373,55 @@ impl WorkspaceTape {
         self.move_window_to_column(window_id, target_column)
     }
 
-    /// Get all windows in the currently focused column
+    /// Get all windows in the currently focused column. During scroll
+    /// animations or momentum scrolling this returns the windows in
+    /// the column the user is *visually* looking at — i.e. the
+    /// column whose position contains `current_position` — rather
+    /// than the animation's logical destination (`focused_column`).
+    /// This fix addresses the audit: callers like the GL backend's
+    /// click-target lookup and effect-engine passes were returning
+    /// the wrong column's windows during fast back-and-forth scroll,
+    /// because `focused_column` was updated instantly in
+    /// `scroll_to_column()` while the actual visual position was
+    /// still mid-animation.
     pub fn get_focused_column_windows(&self) -> Vec<u64> {
-        self.get_focused_column()
+        self.columns
+            .get(&self.visual_focused_column_index())
             .map(|column| column.windows.clone())
             .unwrap_or_default()
+    }
+
+    /// The column index that the user is currently looking at.
+    /// Returns `focused_column` once scrolling has settled, and the
+    /// column whose center contains `current_position` while a
+    /// scroll or momentum animation is in flight. Safe against a
+    /// zero workspace-width (returns `focused_column`); safe against
+    /// a mid-animation column map that has not yet created the
+    /// target column (falls back to the closest populated column
+    /// via `get_focused_column()` semantics upstream).
+    fn visual_focused_column_index(&self) -> i32 {
+        if matches!(
+            self.scroll_state,
+            ScrollState::Scrolling { .. } | ScrollState::Momentum { .. }
+        ) {
+            let width = self.config.workspace_width as f64;
+            if width > 0.0 {
+                let raw = (self.current_position / width).round() as i32;
+                // If the in-flight column hasn't been instantiated
+                // yet (rare — happens during very fast multi-column
+                // scrolls), prefer `focused_column` so we don't
+                // return an empty window list.
+                if self.columns.contains_key(&raw) {
+                    raw
+                } else {
+                    self.focused_column
+                }
+            } else {
+                self.focused_column
+            }
+        } else {
+            self.focused_column
+        }
     }
 
     /// Get all visible columns based on current viewport
@@ -548,9 +591,18 @@ pub struct ScrollableWorkspaces {
     /// Cached layout map from `calculate_workspace_layouts`, invalidated
     /// whenever the scroll position changes. This avoids recomputing all
     /// window rectangles on every pointer motion (the hot path for
-    /// `element_under`). Uses `RefCell` for interior mutability since
-    /// the method is called from a read lock context.
-    cached_layouts: RefCell<Option<(f64, HashMap<u64, Rectangle>)>>,
+    /// `element_under`).
+    ///
+    /// Uses `parking_lot::Mutex` rather than `RefCell` because the
+    /// outer `Arc<parking_lot::RwLock<ScrollableWorkspaces>>` is held
+    /// under a *read* guard by multiple backend/pointer paths in
+    /// parallel (e.g. `backend::render` and `process_events` both
+    /// acquire the workspace_manager read lock). With `RefCell`,
+    /// `borrow_mut()` would panic when two readers competed. The
+    /// mutex serialises correctly — and since both call sites
+    /// (`calculate_workspace_layouts` and `update_animations`) do
+    /// not recurse, there is no risk of self-deadlock.
+    cached_layouts: parking_lot::Mutex<Option<(f64, HashMap<u64, Rectangle>)>>,
 
     /// Set of window IDs that are currently minimized (hidden). Such
     /// windows are still owned (the compositor can restore them) but
@@ -583,7 +635,7 @@ impl ScrollableWorkspaces {
             config: config.clone(),
             tapes: HashMap::new(),
             focused_output: "default".to_string(),
-            cached_layouts: RefCell::new(None),
+            cached_layouts: parking_lot::Mutex::new(None),
             minimized_windows: HashSet::new(),
             originating_column: HashMap::new(),
         };
@@ -634,7 +686,7 @@ impl ScrollableWorkspaces {
         // built lazily), still mark it minimized so a future layout
         // query that DOES see it will filter accordingly.
         self.minimized_windows.insert(window_id);
-        *self.cached_layouts.borrow_mut() = None;
+        *self.cached_layouts.lock() = None;
         debug!(
             "📦 Workspace: minimized window {} (removed_from_column={}, origin={:?})",
             window_id, removed_anywhere, last_column
@@ -669,7 +721,7 @@ impl ScrollableWorkspaces {
             let tape = self.active_tape_mut();
             tape.add_window_to_column(window_id, target_column);
         }
-        *self.cached_layouts.borrow_mut() = None;
+        *self.cached_layouts.lock() = None;
         debug!(
             "📦 Workspace: restored window {} to column {} (focused = {})",
             window_id,
@@ -756,7 +808,7 @@ impl ScrollableWorkspaces {
         self.active_tape_mut().set_viewport_size(width, height);
         // Viewport resize invalidates every cached layout — the new
         // dimensions change column widths and window tiling.
-        *self.cached_layouts.borrow_mut() = None;
+        *self.cached_layouts.lock() = None;
     }
 
     /// Add a window to a specific column on the active tape.
@@ -828,14 +880,17 @@ impl ScrollableWorkspaces {
             tape.update_animations();
         }
         // Invalidate layout cache since scroll positions may have changed
-        *self.cached_layouts.borrow_mut() = None;
+        *self.cached_layouts.lock() = None;
     }
 
     /// Calculate layout rectangles for all visible windows across all tapes.
     pub fn calculate_workspace_layouts(&self) -> HashMap<u64, Rectangle> {
-        // Return cached layouts if still valid
+        // Return cached layouts if still valid. `parking_lot::Mutex::lock`
+        // returns a guard that derefs to the inner value via the `Deref`
+        // target — couple it with the deref-coerce pattern to keep the
+        // single-read cost down.
         let tape = self.active_tape();
-        if let Some((cached_pos, ref cached)) = *self.cached_layouts.borrow() {
+        if let Some((cached_pos, ref cached)) = *self.cached_layouts.lock() {
             if (cached_pos - tape.current_position).abs() < f64::EPSILON {
                 return cached.clone();
             }
@@ -900,7 +955,7 @@ impl ScrollableWorkspaces {
             }
         }
 
-        *self.cached_layouts.borrow_mut() = Some((tape.current_position, layouts.clone()));
+        *self.cached_layouts.lock() = Some((tape.current_position, layouts.clone()));
         layouts
     }
 
@@ -968,7 +1023,7 @@ impl ScrollableWorkspaces {
         self.tapes.clear();
         self.minimized_windows.clear();
         self.originating_column.clear();
-        *self.cached_layouts.borrow_mut() = None;
+        *self.cached_layouts.lock() = None;
     }
 }
 

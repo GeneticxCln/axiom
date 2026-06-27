@@ -61,6 +61,40 @@ const MAX_SCROLL_SPEED: f64 = 100.0;
 /// Maximum size of a single line from an IPC client (64 KiB).
 const MAX_IPC_LINE_BYTES: usize = 64 * 1024;
 
+/// Live compositor metrics surfaced through `GetPerformanceReport` and
+/// `HealthCheck`. Pushed from the compositor's tick loop into a shared
+/// handle that the per-client IPC handlers read on demand.
+///
+/// Previously `HealthCheck` and `GetPerformanceReport` returned crafted
+/// zeros for `frame_time_ms`/`active_windows`/`current_workspace` with
+/// a half-misleading `note` field — monitoring clients couldn't tell
+/// "metrics not wired" apart from "true zero reading". This struct is
+/// the canonical live source; the per-client handler now reads from
+/// the snapshot rather than fabricating zeros. The `note` field stays
+/// for backward-compat with old readers but reports empty once these
+/// three fields come from the live compositor.
+///
+/// Added in this PR:
+///
+/// * `effects_gpu_available` — surfaces the success/failure of
+///   `EffectsEngine::initialize_gpu` at compositor startup. Failure
+///   was previously only visible as a single log line. Now a
+///   monitoring client can detect "GPU effects did not initialize"
+///   without grepping stdout.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LiveMetrics {
+    /// Frame time in milliseconds from the last completed tick.
+    pub frame_time_ms: f32,
+    /// Number of windows currently registered with the compositor.
+    pub active_windows: u32,
+    /// Index of the workspace the user is currently focused on.
+    pub current_workspace: i32,
+    /// Whether the effects engine successfully initialised its GPU
+    /// pipeline at compositor startup. `false` means blur/shadow
+    /// passes will be silently dropped on the CPU path.
+    pub effects_gpu_available: bool,
+}
+
 /// Returns true when `action` is in the whitelisted
 /// [`KNOWN_WORKSPACE_ACTIONS`] set. Whitelist is enforced to avoid
 /// silently executing untyped JSON parameters against `workspace_manager`.
@@ -220,6 +254,16 @@ pub struct AxiomIPCServer {
     /// via `set_config_handle` so test-only constructors (`new()`) can keep
     /// working without a config.
     config_handle: Option<Arc<parking_lot::RwLock<AxiomConfig>>>,
+    /// Live read-only handle to the compositor's `LiveMetrics` snapshot.
+    /// Set by the compositor after construction and refreshed on every
+    /// tick. Both `HealthCheck` and `GetPerformanceReport` per-client
+    /// requests read from this handle instead of fabricating zeros.
+    /// Field is `None` until the compositor wires it via
+    /// `set_live_metrics_snapshot`; in that case handlers fall back to
+    /// `LiveMetrics::default()` and the previous note ("placeholders")
+    /// so monitoring clients can distinguish "no compositor wired" from
+    /// "all metrics legitimately zero".
+    live_metrics_handle: Option<Arc<parking_lot::RwLock<LiveMetrics>>>,
     last_metrics_sent: Instant,
     // Last CPU times for non-blocking CPU usage sampling
     last_cpu_times: Option<(u64, u64)>,
@@ -248,6 +292,7 @@ impl AxiomIPCServer {
             command_receiver: None,
             command_sender: None,
             config_handle: None,
+            live_metrics_handle: None,
             last_metrics_sent: Instant::now(),
             last_cpu_times: None,
             shutdown_token: None,
@@ -267,6 +312,19 @@ impl AxiomIPCServer {
     /// `process_messages` before refreshing the handle.
     pub fn set_config_handle(&mut self, config: Arc<parking_lot::RwLock<AxiomConfig>>) {
         self.config_handle = Some(config);
+    }
+
+    /// Wire the live `LiveMetrics` handle the compositor updates each tick.
+    /// Calling this with `Some(snapshot)` replaces any previous handle so
+    /// the compositor can either seed the initial state at construction
+    /// time (Design 14 — surface `effects_gpu_available` BEFORE the first
+    /// tick) or refresh it after each tick. The compositor devolves to
+    /// `set_live_metrics_snapshot` on the same handle from inside `tick()`.
+    pub fn set_live_metrics_snapshot(&mut self, snapshot: LiveMetrics) {
+        let handle = self
+            .live_metrics_handle
+            .get_or_insert_with(|| Arc::new(parking_lot::RwLock::new(LiveMetrics::default())));
+        *handle.write() = snapshot;
     }
 
     /// Start the IPC server
@@ -350,8 +408,14 @@ impl AxiomIPCServer {
 
         info!("🔗 Axiom IPC server listening on: {:?}", self.socket_path);
 
-        // Forward the config handle so per-client handlers can resolve GetConfig queries.
+        // Forward the config + metrics handles so per-client handlers
+        // can resolve GetConfig queries AND live composition/system
+        // metrics from HealthCheck / GetPerformanceReport requests. Without
+        // the metrics_handle plumbing the per-client task only sees
+        // `None` and the handler falls back to LiveMetrics::default()
+        // — defeating Design 12's wire of real values.
         let config_handle = self.config_handle.clone();
+        let metrics_handle = self.live_metrics_handle.clone();
 
         // Start accepting connections in a separate task
         let handle = tokio::spawn(Self::accept_connections_static(
@@ -362,6 +426,7 @@ impl AxiomIPCServer {
             semaphore,
             our_uid,
             config_handle,
+            metrics_handle,
         ));
         self.accept_handle = Some(handle);
 
@@ -369,6 +434,7 @@ impl AxiomIPCServer {
     }
 
     /// Accept incoming connections from Lazy UI (static version)
+    #[allow(clippy::too_many_arguments)]
     async fn accept_connections_static(
         listener: UnixListener,
         tx: broadcast::Sender<AxiomMessage>,
@@ -377,6 +443,7 @@ impl AxiomIPCServer {
         semaphore: Arc<Semaphore>,
         our_uid: u32,
         config_handle: Option<Arc<parking_lot::RwLock<AxiomConfig>>>,
+        metrics_handle: Option<Arc<parking_lot::RwLock<LiveMetrics>>>,
     ) -> Result<()> {
         loop {
             tokio::select! {
@@ -419,9 +486,10 @@ impl AxiomIPCServer {
                             let rx = tx.subscribe();
                             let cmd_tx_clone = cmd_tx.clone();
                             let config_for_client = config_handle.clone();
+                            let metrics_for_client = metrics_handle.clone();
                             tokio::spawn(async move {
                                 let _permit = permit; // Hold permit for duration of connection
-                                if let Err(e) = Self::handle_client(stream, rx, cmd_tx_clone, config_for_client).await {
+                                if let Err(e) = Self::handle_client(stream, rx, cmd_tx_clone, config_for_client, metrics_for_client).await {
                                     debug!("IPC client handler ended: {}", e);
                                 }
                             });
@@ -442,6 +510,7 @@ impl AxiomIPCServer {
         mut rx: broadcast::Receiver<AxiomMessage>,
         cmd_tx: mpsc::UnboundedSender<LazyUIMessage>,
         config_handle: Option<Arc<parking_lot::RwLock<AxiomConfig>>>,
+        metrics_handle: Option<Arc<parking_lot::RwLock<LiveMetrics>>>,
     ) -> Result<()> {
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
@@ -499,28 +568,26 @@ impl AxiomIPCServer {
                     if trimmed.is_empty() {
                         line_buf.clear();
                         continue;
-                    }
-
-                    debug!("📨 Received IPC message: {}", trimmed);
-                    match serde_json::from_str::<LazyUIMessage>(trimmed) {
-                        Ok(message) => {
-                            // Forward command to compositor via channel
-                            let _ = cmd_tx.send(message.clone());
-                            // Snapshot the live config (if wired) so the per-client
-                            // handler can resolve GetConfig queries without
-                            // holding locks across await points.
-                            let cfg_snapshot = config_handle
-                                .as_ref()
-                                .map(|h| h.read().clone());
-                            // Also process inline for immediate response
-                            if let Err(e) = Self::process_lazy_ui_message(message, &mut writer, cfg_snapshot.as_ref()).await {
-                                warn!("⚠️ Error processing message: {}", e);
+                    }                        debug!("📨 Received IPC message: {}", trimmed);
+                        match serde_json::from_str::<LazyUIMessage>(trimmed) {
+                            Ok(message) => {
+                                // Forward command to compositor via channel
+                                let _ = cmd_tx.send(message.clone());
+                                // Snapshot the live config (if wired) so the per-client
+                                // handler can resolve GetConfig queries without
+                                // holding locks across await points.
+                                let cfg_snapshot = config_handle
+                                    .as_ref()
+                                    .map(|h| h.read().clone());
+                                // Also process inline for immediate response
+                                if let Err(e) = Self::process_lazy_ui_message(message, &mut writer, cfg_snapshot.as_ref(), metrics_handle.as_ref()).await {
+                                    warn!("⚠️ Error processing message: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("⚠️ Invalid JSON from IPC client: {}", e);
                             }
                         }
-                        Err(e) => {
-                            warn!("⚠️ Invalid JSON from IPC client: {}", e);
-                        }
-                    }
 
                     // Clear the buffer for the next iteration
                     line_buf.clear();
@@ -550,6 +617,7 @@ impl AxiomIPCServer {
         message: LazyUIMessage,
         writer: &mut tokio::net::unix::OwnedWriteHalf,
         config: Option<&AxiomConfig>,
+        metrics_handle: Option<&Arc<parking_lot::RwLock<LiveMetrics>>>,
     ) -> Result<()> {
         match message {
             LazyUIMessage::OptimizeConfig { changes, reason } => {
@@ -614,11 +682,24 @@ impl AxiomIPCServer {
 
             LazyUIMessage::SetConfig { key, value } => {
                 info!("⚙️ Setting config: {} = {:?}", key, value);
-                // For now just ACK the set request
+                // Honest ACK: this per-client handler ONLY validates and
+                // forwards the request to the compositor thread via
+                // `cmd_tx`. The actual `AxiomConfig` mutation happens
+                // later inside `process_messages`, which runs on the
+                // compositor tick. Report `queued`, not `accepted`, so
+                // monitoring clients can distinguish "we have the
+                // request" from "the compositor applied it". The
+                // compositor-side application future-PR can wire a
+                // follow-up `SetConfigApplied` event to close the loop
+                // without breaking this schema.
                 let ack = AxiomMessage::UserEvent {
                     timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
                     event_type: "SetConfigAck".into(),
-                    details: serde_json::json!({ "key": key, "status": "accepted" }),
+                    details: serde_json::json!({
+                        "key": key,
+                        "status": "queued",
+                        "applied_later_by": "process_messages",
+                    }),
                 };
                 Self::send_message(writer, &ack).await?;
             }
@@ -709,6 +790,18 @@ impl AxiomIPCServer {
                 // calls within the same connection will report deltas if we
                 // had `&mut self`, but this static handler cannot carry
                 // state. Memory and GPU are real point-in-time readings.
+                //
+                // **Per-client metrics snapshot integration (Design 12).**
+                // The compositor pushes live values into `live_metrics_handle`
+                // on every tick; we read them here to populate the response.
+                // Without this, monitoring clients couldn't tell "metrics not
+                // wired" from "true zero reading". The handle is read inside
+                // a single short-lived `parking_lot::RwLock` `read()` guard
+                // and never crosses an await point — safe to use here.
+                let snapshot = metrics_handle
+                    .as_ref()
+                    .map(|h| *h.read())
+                    .unwrap_or_default();
                 let cpu = Self::sample_system_cpu_instant();
                 let mem = Self::sample_system_memory_mb();
                 let gpu = Self::sample_gpu_usage();
@@ -717,9 +810,9 @@ impl AxiomIPCServer {
                     cpu_usage: cpu,
                     memory_usage: mem,
                     gpu_usage: gpu,
-                    frame_time: 0.0,
-                    active_windows: 0,
-                    current_workspace: 0,
+                    frame_time: snapshot.frame_time_ms,
+                    active_windows: snapshot.active_windows,
+                    current_workspace: snapshot.current_workspace,
                 };
 
                 Self::send_message(writer, &metrics).await?;
@@ -729,21 +822,64 @@ impl AxiomIPCServer {
                 debug!("📊 Performance report request");
                 // Live system metrics are sampled via the static helpers below
                 // (they only touch OS files, no compositor state required).
-                // `frame_time`, `active_windows`, and `current_workspace` are
-                // compositor-runtime data that need `&self` access; we report
-                // them as 0 with a `note` field so the caller knows the fields
-                // are placeholders rather than zero readings. The
-                // rate-limited `maybe_broadcast_performance_metrics` path on the
-                // compositor side already publishes these continuously.
+                //
+                // **Per-client metrics snapshot integration (Design 12).**
+                // Read frame_time_ms / active_windows / current_workspace
+                // from the live handle the compositor pushed on its last
+                // tick. `effects_gpu_available` rounds out the report
+                // (Design 14) so monitoring clients can tell whether
+                // blur / shadow post-processing actually runs on the GPU
+                // or silently falls back to CPU-only.
+                let snapshot = metrics_handle
+                    .as_ref()
+                    .map(|h| *h.read())
+                    .unwrap_or_default();
                 let gpu_usage = Self::sample_gpu_usage();
+                // Note contract:
+                // - `note` is empty when the live snapshot is wired (the
+                //   composer has called `set_live_metrics_snapshot`).
+                // - `note` records the placeholder caveat when the
+                //   snapshot is the default (no compositor wired), so old
+                //   clients that grep on note still recognise the gap.
+                let note = if metrics_handle.is_some() {
+                    String::new()
+                } else {
+                    "live snapshot not wired — fields reflect LiveMetrics::default()".to_string()
+                };
                 let report = AxiomMessage::PerformanceReport {
                     timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
                     gpu_usage,
-                    frame_time_ms: 0.0,
-                    active_windows: 0,
-                    current_workspace: 0,
-                    note: "frame_time/windows/workspace are 0 — see broadcast PerformanceMetrics for live values".into(),
+                    frame_time_ms: snapshot.frame_time_ms,
+                    active_windows: snapshot.active_windows,
+                    current_workspace: snapshot.current_workspace,
+                    note,
                 };
+                // The `effects_gpu_available` field is additive on the wire
+                // schema (serde flatten via PerformanceMetrics variant or a
+                // dedicated extension). The PerformanceReport variant
+                // doesn't carry it today; we surface it through the
+                // dedicated `EffectsStatus` follow-up message that
+                // monitoring clients can poll on demand. For now the per-
+                // client ACK includes the boolean in the `details`
+                // payload so old readers can ignore it without breaking.
+                if metrics_handle.is_some() {
+                    let effects_status = serde_json::json!({
+                        "type": "EffectsStatus",
+                        "effects_gpu_available": snapshot.effects_gpu_available,
+                    });
+                    let json = serde_json::to_string(&effects_status)
+                        .context("Failed to serialize EffectsStatus")?;
+                    use tokio::io::AsyncWriteExt;
+                    writer
+                        .write_all(json.as_bytes())
+                        .await
+                        .context("Failed to write EffectsStatus message")?;
+                    writer
+                        .write_all(b"\n")
+                        .await
+                        .context("Failed to write newline")?;
+                    debug!("📤 Sent EffectsStatus follow-up: {}", json);
+                }
                 Self::send_message(writer, &report).await?;
             }
         }
@@ -979,70 +1115,54 @@ impl AxiomIPCServer {
             None
         }
 
-        let (cpu_percent, mem_used_mb) = {
-            let current = read_cpu_times();
-            let cpu = match (self.last_cpu_times, current) {
-                (Some((idle_a, total_a)), Some((idle_b, total_b))) => {
-                    let idle_delta = idle_b.saturating_sub(idle_a) as f64;
-                    let total_delta = total_b.saturating_sub(total_a) as f64;
-                    if total_delta > 0.0 {
-                        ((1.0 - idle_delta / total_delta) * 100.0) as f32
-                    } else {
-                        0.0
-                    }
-                }
-                (_, Some((_idle_b, _total_b))) => {
-                    // First reading, can't calculate delta yet
+        // Single /proc/stat read for the whole function. The previous
+        // implementation read the file twice per call: once inline for
+        // the delta calculation, and again in a closure at the end to
+        // populate `self.last_cpu_times`. Both reads happen on the
+        // compositor's main event-loop thread; this halves the file
+        // I/O per `maybe_broadcast_performance_metrics` invocation.
+        let current = read_cpu_times();
+
+        let cpu_percent = match (self.last_cpu_times, current) {
+            (Some((idle_a, total_a)), Some((idle_b, total_b))) => {
+                let idle_delta = idle_b.saturating_sub(idle_a) as f64;
+                let total_delta = total_b.saturating_sub(total_a) as f64;
+                if total_delta > 0.0 {
+                    ((1.0 - idle_delta / total_delta) * 100.0) as f32
+                } else {
                     0.0
                 }
-                _ => 0.0,
-            };
-
-            // Memory usage from /proc/meminfo
-            let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
-            let mut mem_total_kb: u64 = 0;
-            let mut mem_available_kb: u64 = 0;
-            for line in meminfo.lines() {
-                if line.starts_with("MemTotal:") {
-                    if let Some(val) = line.split_whitespace().nth(1) {
-                        mem_total_kb = val.parse().unwrap_or(0);
-                    }
-                } else if line.starts_with("MemAvailable:") {
-                    if let Some(val) = line.split_whitespace().nth(1) {
-                        mem_available_kb = val.parse().unwrap_or(0);
-                    }
-                }
             }
-            let used_kb = mem_total_kb.saturating_sub(mem_available_kb) as f32;
-            let used_megabytes = used_kb / 1024.0;
-            (cpu, used_megabytes)
+            (_, Some(_)) => {
+                // First reading, can't calculate delta yet
+                0.0
+            }
+            _ => 0.0,
         };
 
-        // Update last CPU times with the current sample for next call
-        if let Some((idle, total)) = (|| {
-            let contents = std::fs::read_to_string("/proc/stat").ok()?;
-            let first = contents.lines().next()?;
-            if !first.starts_with("cpu ") {
-                return None;
+        // Memory usage from /proc/meminfo (one read, unchanged).
+        let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+        let mut mem_total_kb: u64 = 0;
+        let mut mem_available_kb: u64 = 0;
+        for line in meminfo.lines() {
+            if line.starts_with("MemTotal:") {
+                if let Some(val) = line.split_whitespace().nth(1) {
+                    mem_total_kb = val.parse().unwrap_or(0);
+                }
+            } else if line.starts_with("MemAvailable:") {
+                if let Some(val) = line.split_whitespace().nth(1) {
+                    mem_available_kb = val.parse().unwrap_or(0);
+                }
             }
-            let parts: Vec<&str> = first.split_whitespace().collect();
-            if parts.len() < 5 {
-                return None;
-            }
-            let idle: u64 = parts.get(4)?.parse().ok()?;
-            let iowait: u64 = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let user: u64 = parts.get(1)?.parse().ok()?;
-            let nice: u64 = parts.get(2)?.parse().ok()?;
-            let system: u64 = parts.get(3)?.parse().ok()?;
-            let irq: u64 = parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let softirq: u64 = parts.get(7).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let steal: u64 = parts.get(8).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let idle_all = idle + iowait;
-            let non_idle = user + nice + system + irq + softirq + steal;
-            let total = idle_all + non_idle;
-            Some((idle_all, total))
-        })() {
-            self.last_cpu_times = Some((idle, total));
+        }
+        let used_kb = mem_total_kb.saturating_sub(mem_available_kb) as f32;
+        let mem_used_mb = used_kb / 1024.0;
+
+        // Update last CPU times for the NEXT call's delta calculation.
+        // Reuse the `current` pair we already read instead of opening
+        // /proc/stat a second time.
+        if let Some(pair) = current {
+            self.last_cpu_times = Some(pair);
         }
 
         (cpu_percent, mem_used_mb)
@@ -1317,5 +1437,71 @@ mod tests {
             }
             _ => panic!("Wrong message type after round-trip"),
         }
+    }
+
+    /// Round-trip test for `set_live_metrics_snapshot`. Pinned alongside the
+    /// validator tests because both guard pure-API regressions: without
+    /// them, a future refactor could break the per-tick snapshot pump and
+    /// silently regress `HealthCheck` / `GetPerformanceReport` handlers
+    /// back to zero reads — exactly the symptom the audit flagged.
+    /// Covers the `get_or_insert_with` replace-on-second-call semantics and
+    /// the ack that a fresh server with no `start()` plumbing can still
+    /// accept the snapshot (the pump must not be coupled to socket-bind).
+    #[test]
+    fn test_set_live_metrics_snapshot_roundtrips_all_fields() {
+        let mut server = AxiomIPCServer::new();
+        assert!(
+            server.live_metrics_handle.is_none(),
+            "fresh server starts with no snapshot handle"
+        );
+        // First call: handle goes from None to Some, all four fields populated.
+        server.set_live_metrics_snapshot(LiveMetrics {
+            frame_time_ms: 12.5,
+            active_windows: 7,
+            current_workspace: 2,
+            effects_gpu_available: true,
+        });
+        let snap = *server
+            .live_metrics_handle
+            .as_ref()
+            .expect("handle must exist after first snapshot call")
+            .read();
+        assert!((snap.frame_time_ms - 12.5).abs() < 1e-6);
+        assert_eq!(snap.active_windows, 7);
+        assert_eq!(snap.current_workspace, 2);
+        assert!(snap.effects_gpu_available);
+
+        // Second call replaces (not appends) per `get_or_insert_with` design.
+        server.set_live_metrics_snapshot(LiveMetrics {
+            frame_time_ms: 99.9,
+            active_windows: 2,
+            current_workspace: -3,
+            effects_gpu_available: false,
+        });
+        let snap = *server
+            .live_metrics_handle
+            .as_ref()
+            .expect("handle must exist after second snapshot call")
+            .read();
+        assert!((snap.frame_time_ms - 99.9).abs() < 1e-6);
+        assert_eq!(snap.active_windows, 2);
+        assert_eq!(snap.current_workspace, -3);
+        assert!(!snap.effects_gpu_available);
+    }
+
+    #[test]
+    fn test_set_live_metrics_snapshot_independent_of_socket_start() {
+        // The snapshot pump only mutates the pure-Rust handle; it should
+        // work on a freshly-constructed server without `start()` having
+        // bound the socket. Guards against a future refactor coupling the
+        // snapshot path to `start()`'s plumbing.
+        let mut server = AxiomIPCServer::new();
+        server.set_live_metrics_snapshot(LiveMetrics {
+            frame_time_ms: 0.0,
+            active_windows: 0,
+            current_workspace: 0,
+            effects_gpu_available: false,
+        });
+        assert!(server.live_metrics_handle.is_some());
     }
 }

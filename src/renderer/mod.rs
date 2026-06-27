@@ -11,7 +11,7 @@
 
 #![allow(clippy::too_many_lines)]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, info};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,6 +23,41 @@ type BlurQueue = HashMap<u64, ((f32, f32), (f32, f32), crate::effects::BlurParam
 use wgpu::util::DeviceExt;
 #[allow(clippy::wildcard_imports)]
 use wgpu::*;
+
+/// Typed errors from [`AxiomRenderer`]. Distinct from `anyhow::Error` so
+/// the compositor can react differently to recover-vs-fatal cases (e.g.
+/// device-loss triggers a re-init, a missing pipeline is logged and
+/// skipped). The `Other` arm is a catch-all for non-device-loss errors
+/// that we still want to expose through the public API. Implemented
+/// with std's `Error` trait (no `thiserror` dependency required).
+#[derive(Debug)]
+pub enum RendererError {
+    DeviceLost,
+    Buffer(String),
+    Texture(String),
+    Other(String),
+}
+
+impl std::fmt::Display for RendererError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DeviceLost => f.write_str(
+                "WGPU device was lost (driver crash / context reset)",
+            ),
+            Self::Buffer(s) => write!(f, "buffer allocation or write failed: {}", s),
+            Self::Texture(s) => write!(f, "texture allocation or upload failed: {}", s),
+            Self::Other(s) => write!(f, "renderer error: {}", s),
+        }
+    }
+}
+
+impl std::error::Error for RendererError {}
+
+impl From<anyhow::Error> for RendererError {
+    fn from(e: anyhow::Error) -> Self {
+        RendererError::Other(e.to_string())
+    }
+}
 
 /// Real GPU rendering pipeline
 pub struct AxiomRenderer {
@@ -58,8 +93,27 @@ pub struct AxiomRenderer {
     /// for GPU effects compositing when no surface is attached.
     headless_target: Option<(Texture, TextureView)>,
 
-    /// WGPU Render Pipeline
+    /// WGPU Render Pipeline for textured windows (legacy path uses
+    /// window_texture + sampler bindings at @binding(1)/@binding(2)).
     render_pipeline: RenderPipeline,
+    /// Solid-color placeholder pipeline for windows without an uploaded
+    /// client texture. Same vertex winding/topology/cull-mode as
+    /// `render_pipeline`, but the fragment shader draws `vec4(0.15, 0.15,
+    /// 0.18, opacity)` plus a per-window border, eliminating the need for
+    /// the legacy GL `gl::Scissor` fallback in `src/backend/mod.rs`.
+    ///
+    /// **Only compiled in debug builds.** In release, windows that haven't
+    /// yet committed a real client texture are simply *not drawn* — they
+    /// become visible only after their first SHM commit reaches the
+    /// backend. This matches Wayland's "no real buffer, no surface"
+    /// semantics and prevents placeholder rectangles from masking
+    /// rendering issues (a window with a broken texture upload will be
+    /// visibly absent in release, instead of a misleading colored quad).
+    #[cfg(debug_assertions)]
+    placeholder_pipeline: RenderPipeline,
+    #[cfg(debug_assertions)]
+    placeholder_bind_group_layout: BindGroupLayout,
+
     /// WGPU Sampler
     sampler: Sampler,
 
@@ -83,6 +137,13 @@ pub struct AxiomRenderer {
     /// Compared with `self.border_width` to detect when all window uniform
     /// buffers need invalidation (border width is baked into each uniform).
     cached_border_width: f32,
+
+    /// Flipped when a wgpu primitive reports a recoverable-but-fatal
+    /// error (driver crash, context lost, surface lost). Read by
+    /// [`AxiomRenderer::is_device_lost`] and the compositor's device-loss
+    /// recovery path. Shared via `Arc` so callbacks spawned inside
+    /// `map_async` can flag loss without holding the renderer lock.
+    device_lost: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Represents a rendered window surface
@@ -300,6 +361,14 @@ impl AxiomRenderer {
             ..Default::default()
         });
 
+        // Placeholder pipeline for windows without a client texture.
+        // Only built in debug builds — see the `placeholder_pipeline`
+        // field doc for the release-build rationale.
+        #[cfg(debug_assertions)]
+        let (placeholder_pipeline, placeholder_bind_group_layout) =
+            create_placeholder_pipeline(&device, config.format)
+                .context("Failed to build placeholder render pipeline")?;
+
         Ok(Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
@@ -312,6 +381,10 @@ impl AxiomRenderer {
             window_blurs: HashMap::with_capacity(64),
             headless_target: None,
             render_pipeline,
+            #[cfg(debug_assertions)]
+            placeholder_pipeline,
+            #[cfg(debug_assertions)]
+            placeholder_bind_group_layout,
             sampler,
             cached_projection_buffer: None,
             cached_projection_dims: (0, 0),
@@ -319,6 +392,7 @@ impl AxiomRenderer {
             cached_border_width: 2.0,
             pending_shadows: AtomicUsize::new(0),
             pending_blurs: AtomicUsize::new(0),
+            device_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -460,6 +534,14 @@ impl AxiomRenderer {
             ..Default::default()
         });
 
+        // Placeholder pipeline for windows without a client texture.
+        // Only built in debug builds — see the `placeholder_pipeline`
+        // field doc for the release-build rationale.
+        #[cfg(debug_assertions)]
+        let (placeholder_pipeline, placeholder_bind_group_layout) =
+            create_placeholder_pipeline(&device, format)
+                .context("Failed to build placeholder render pipeline")?;
+
         Ok(Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
@@ -472,6 +554,10 @@ impl AxiomRenderer {
             window_blurs: HashMap::with_capacity(64),
             headless_target: None,
             render_pipeline,
+            #[cfg(debug_assertions)]
+            placeholder_pipeline,
+            #[cfg(debug_assertions)]
+            placeholder_bind_group_layout,
             sampler,
             cached_projection_buffer: None,
             cached_projection_dims: (0, 0),
@@ -479,6 +565,7 @@ impl AxiomRenderer {
             cached_border_width: 2.0,
             pending_shadows: AtomicUsize::new(0),
             pending_blurs: AtomicUsize::new(0),
+            device_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -651,39 +738,6 @@ impl AxiomRenderer {
 
             window.dirty = true;
         }
-    }
-
-    /// Render all windows and apply post-processing effects (shadows, blur).
-    ///
-    /// Processes the per-frame shadow and blur queues that were populated by
-    /// render_frame(). Uses the headless target texture for GPU compositing
-    /// when no surface is attached. The queues are consumed on each call.
-    pub fn render(&mut self) {
-        let window_count = self.windows.len();
-        let shadow_count = self.window_shadows.len();
-        let blur_count = self.window_blurs.len();
-
-        if shadow_count > 0 || blur_count > 0 {
-            debug!(
-                "🎨 Rendering {} windows + {} shadows + {} blurs to GPU",
-                window_count, shadow_count, blur_count
-            );
-        } else {
-            log::trace!("🎨 Rendering {} windows to GPU", window_count);
-        }
-
-        let has_work = shadow_count > 0 || blur_count > 0;
-        if !has_work {
-            return;
-        }
-
-        // Delegate to composite_effects_on_buffer — the old headless-only path
-        // is superseded by the GL-framebuffer bridging in backend::render().
-        // Clear any stale queues without doing extra GPU work.
-        self.window_shadows.clear();
-        self.window_blurs.clear();
-        self.pending_shadows.store(0, Ordering::Relaxed);
-        self.pending_blurs.store(0, Ordering::Relaxed);
     }
 
     /// Non-locking observation of whether any post-processing effect has
@@ -968,20 +1022,36 @@ impl AxiomRenderer {
     ///
     /// This method is extracted from [`render_to_surface`] so it can be
     /// exercised in integration tests without requiring a real
-    /// `wgpu::Surface`. After calling it, each `RenderedWindow` that has a
-    /// texture will have `cached_uniform_buffer` and
-    /// `cached_vertex_buffer` populated with up-to-date GPU buffers.
+    /// `wgpu::Surface`. After calling it, every `RenderedWindow` will
+    /// have `cached_uniform_buffer` and `cached_vertex_buffer`
+    /// populated with up-to-date GPU buffers — placeholder (texture-
+    /// less) windows included, since [`compose_full_frame`] renders
+    /// them via the placeholder pipeline and needs the same cached
+    /// vertex/uniform buffer slots.
     ///
     /// Idempotent — windows whose state hasn't changed are left untouched
     /// and the return value only reflects windows that actually needed
     /// recreation this pass.
+    ///
+    /// [`compose_full_frame`]: AxiomRenderer::compose_full_frame
     pub fn prepare_window_resources(&mut self) {
         self.cached_border_width = self.border_width;
 
         for window in &mut self.windows {
+            // In release builds, skip placeholder (texture-less) windows
+            // entirely — they stay invisible until they commit a real
+            // client buffer, so allocating GPU resources for them would
+            // be wasted memory. The placeholder pipeline that would
+            // consume these buffers isn't compiled in either.
+            #[cfg(not(debug_assertions))]
             if window.texture_view.is_none() {
                 continue;
             }
+
+            // (Debug-only) Placeholder (texture-less) windows also receive
+            // vertex + uniform buffers — `compose_full_frame` draws them
+            // via the placeholder pipeline which binds the same cached
+            // buffers the textured pass uses.
 
             // Uniform buffer invalidation: opacity, size, or border width
             let opacity_changed =
@@ -1202,14 +1272,74 @@ impl AxiomRenderer {
         Ok(())
     }
 
-    /// Get device for external use
-    pub fn device(&self) -> Arc<Device> {
-        self.device.clone()
+    /// Get device for external use. Returns a shared reference rather
+    /// than a cloned `Arc` so callers can submit work without extending
+    /// the GPU context's reference count. The renderer retains the
+    /// strong `Arc` for its own lifetime; this getter only hands out
+    /// a borrow that must not outlive the renderer lock guard when
+    /// acquired through `AxiomRenderer's `parking_lot::RwLock`.
+    ///
+    /// ## Migration from the previous `Arc<Device>` API
+    ///
+    /// Callers that previously did `let dev = renderer.read().device();`
+    /// to obtain an owned `Arc<Device>` must now do
+    /// `let dev: &Device = renderer.read().device();` — the borrow
+    /// is tied to the read guard's lifetime. The blur and shadow
+    /// renderers inside `EffectsEngine` still hold the `Arc<Device>`
+    /// clone internally (their GPU resources must outlast any single
+    /// borrow of the renderer); see `EffectsEngine::initialize_gpu`
+    /// for how the Arc clones are produced from the renderer reference
+    /// at compositor construction time.
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
-    /// Get queue for external use
-    pub fn queue(&self) -> Arc<Queue> {
-        self.queue.clone()
+    /// Get queue for external use. Same borrow-not-clone contract as
+    /// [`AxiomRenderer::device`].
+    pub fn queue(&self) -> &Queue {
+        &self.queue
+    }
+
+    /// Borrow the underlying `Arc<Device>` so callers can produce
+    /// owned `Arc<Device>` clones via `Arc::clone(&self.device_arc())`.
+    /// `Device` itself does not implement `Clone` in this crate's
+    /// wgpu version, so this indirection is required by upstream
+    /// helpers (e.g. `EffectsEngine::initialize_gpu`) that store
+    /// the `Arc` for longer than the renderer lock guard.
+    pub fn device_arc(&self) -> &Arc<Device> {
+        &self.device
+    }
+
+    /// Borrow the underlying `Arc<Queue>` (same rationale as
+    /// [`AxiomRenderer::device_arc`]).
+    pub fn queue_arc(&self) -> &Arc<Queue> {
+        &self.queue
+    }
+
+    /// Non-locking observation of whether the WGPU device is currently
+    /// flagged as lost. The flag is set by the `compose_full_frame`
+    /// `map_async` callback when WGPU rejects a buffer mapping (the
+    /// driver crash / context-reset path wgpu 0.19 surfaces as an
+    /// `Err(_)` callback rather than a hard panic).
+    ///
+    /// Returns `true` means "device has been lost; the next compose
+    /// will return `Err(RendererError::DeviceLost)` until the renderer
+    /// is reinitialised". Callers (e.g. compositor's device-loss
+    /// recovery path) should consult this BEFORE submitting work to
+    /// the queue so they can short-circuit cleanly without paying the
+    /// cost of a doomed render pass.
+    pub fn is_device_lost(&self) -> bool {
+        self.device_lost.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Manually flag device loss. Useful for tests and for the
+    /// `on_uncaptured_error` callback when WGPU emits a global error
+    /// not surfaced through `map_async`. Production code path is
+    /// `compose_full_frame`'s readback callback — see the inline
+    /// notes there.
+    pub fn mark_device_lost(&self) {
+        self.device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
+        log::error!("⚠️ WGPU device flagged as lost — render path will fail until reset");
     }
 
     /// Render a clear-color fill to a headless target and read it back.
@@ -1324,6 +1454,346 @@ impl AxiomRenderer {
         let result = mapped.to_vec();
         drop(mapped);
         staging.unmap();
+
+        Ok(result)
+    }
+
+    /// Compose the full presentation image — every window (textured or
+    /// placeholder) plus any pending shadow/blur effects — into a
+    /// single `width × height × 4` RGBA buffer ready to upload to
+    /// the host GL framebuffer for present.
+    ///
+    /// This is the WGPU-as-composer replacement for the legacy per-
+    /// window GL draw loop + scissor fallback in `src/backend/mod.rs`.
+    /// By drawing textured quads AND placeholder quads on the same
+    /// headless render target, every pixel of every window passes
+    /// through WGPU; no `gl::Scissor` toggle is needed for
+    /// fresh/uncommitted windows.
+    ///
+    /// The per-frame shadow and blur queues are consumed by this call
+    /// (mirrors [`composite_effects_on_buffer`]'s drain semantics).
+    /// Returns `width * height * 4` bytes of RGBA8.
+    pub fn compose_full_frame(&mut self, width: u32, height: u32) -> Result<Vec<u8>> {
+        use cgmath::Vector2;
+
+        // Device-loss short-circuit: if a previous `map_async` callback
+        // flagged the GPU as lost, return a typed error instead of
+        // running doomed render work. Lets the compositor's tick loop
+        // decide between reinit (emit a StateChange event) and graceful
+        // fallback (skip render until reinit completes).
+        if self.is_device_lost() {
+            return Err(anyhow::anyhow!("WGPU device lost (see is_device_lost() — renderer must be reinitialised)"));
+        }
+
+        // Reuse the extraction helper that `prepare_window_resources`
+        // already populates — vertex + uniform buffers are up to date.
+        self.prepare_window_resources();
+
+        // Get or (lazily) recreate the headless target at the requested
+        // size. Reused across frames to avoid per-frame GPU churn.
+        let (target, target_view) =
+            ensure_headless_target(&self.device, &mut self.headless_target, width, height)?;
+
+        // Cached ortho-projection buffer, reused across frames at the
+        // same size. Mirrors the optimisation in `render_to_surface`.
+        let dims = (width, height);
+        if self.cached_projection_dims != dims {
+            let projection = create_projection_matrix(width as f32, height as f32);
+            let flat: Vec<f32> = projection.iter().flatten().copied().collect();
+            self.cached_projection_buffer = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("Compose Projection Uniform"),
+                    contents: bytemuck::cast_slice(&flat),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                },
+            ));
+            self.cached_projection_dims = dims;
+        }
+        let proj_buffer = self
+            .cached_projection_buffer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("projection buffer not initialized"))?;
+
+        // Pre-build draw commands. Borrow checker: each entry below is
+        // a fresh owned `BindGroup` (gpu handle only) plus a `&Buffer`
+        // borrowed from the per-window cache; we keep the borrow alive
+        // for the duration of `self`, so the Vec outlives the render
+        // pass that consumes it. Same pattern as `render_to_headless_target`.
+        let mut textured_draws: Vec<(u64, wgpu::BindGroup, &wgpu::Buffer)> = Vec::new();
+        #[cfg(debug_assertions)]
+        let mut placeholder_draws: Vec<(u64, wgpu::BindGroup, &wgpu::Buffer)> = Vec::new();
+
+        for window in &self.windows {
+            let Some(vertex_buf) = window.cached_vertex_buffer.as_ref() else {
+                continue;
+            };
+            let Some(window_ub) = window.cached_uniform_buffer.as_ref() else {
+                continue;
+            };
+
+            if let Some(texture_view) = &window.texture_view {
+                let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("Compose Window {} Textured", window.id)),
+                    layout: &self.render_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: proj_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(texture_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: window_ub.as_entire_binding(),
+                        },
+                    ],
+                });
+                textured_draws.push((window.id, bg, vertex_buf));
+            } else {
+                // In release builds, untextured windows stay invisible
+                // until they commit a real SHM buffer — no placeholder
+                // draw, no bind group, no pipeline bind. The window's
+                // region of the framebuffer is left at the clear color.
+                #[cfg(debug_assertions)]
+                {
+                    let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(&format!("Compose Window {} Placeholder", window.id)),
+                        layout: &self.placeholder_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: proj_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: window_ub.as_entire_binding(),
+                            },
+                        ],
+                    });
+                    placeholder_draws.push((window.id, bg, vertex_buf));
+                }
+            }
+        }
+
+        // Snapshot effects queue contents before acquiring any
+        // effects_engine write lock, so the queue can be drained
+        // independently of the engine lock below.
+        let has_shadows = !self.window_shadows.is_empty();
+        let has_blurs = !self.window_blurs.is_empty();
+        let shadow_data: Vec<(Vector2<f32>, Vector2<f32>, crate::effects::ShadowParams)> =
+            if has_shadows {
+                self.window_shadows
+                    .values()
+                    .map(|((px, py), (sx, sy), params)| {
+                        (
+                            Vector2::new(*px, *py),
+                            Vector2::new(*sx, *sy),
+                            params.clone(),
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+        // Effects data + queue snapshots — must be collected before
+        // entering the render pass because the effects engine takes a
+        // write-lock that would conflict with the `&mut self.windows`
+        // borrow currently held through `textured_draws` /
+        // `placeholder_draws`.
+        let mut encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Compose Full-Frame Encoder"),
+                });
+
+        // ── Pass 1: textured windows + placeholder windows ────────
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Compose Full-Frame Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.08,
+                            g: 0.08,
+                            b: 0.12,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+
+            // Textured pass for windows with an uploaded client texture.
+            rp.set_pipeline(&self.render_pipeline);
+            for (_id, bg, vb) in &textured_draws {
+                rp.set_bind_group(0, bg, &[]);
+                rp.set_vertex_buffer(0, vb.slice(..));
+                rp.draw(0..6, 0..1);
+            }
+
+            // Placeholder pass for windows that have not yet committed.
+            // Only compiled in debug builds — see the `placeholder_pipeline`
+            // field doc. In release, untextured windows are not drawn at
+            // all, leaving their region at the clear color.
+            #[cfg(debug_assertions)]
+            if !placeholder_draws.is_empty() {
+                rp.set_pipeline(&self.placeholder_pipeline);
+                for (_id, bg, vb) in &placeholder_draws {
+                    rp.set_bind_group(0, bg, &[]);
+                    rp.set_vertex_buffer(0, vb.slice(..));
+                    rp.draw(0..6, 0..1);
+                }
+            }
+        } // end render pass — `target_view` borrow released here.
+
+        // ── Pass 2: shadow / blur effects on the same headless target ─
+        //
+        // Effects open their own internal render pass with the encoder;
+        // they do not need to be issued from inside the windows render
+        // pass. Open encoder lifetime is the lifetime the effects writer
+        // expects, so we dispatch AFTER the windows pass is closed.
+        if (has_shadows || has_blurs) && self.effects_engine.is_some() {
+            let tex_size = Vector2::new(width, height);
+            if has_shadows && !shadow_data.is_empty() {
+                if let Some(ref engine) = self.effects_engine {
+                    if let Err(e) = engine
+                        .write()
+                        .render_shadows(&mut encoder, target_view, &shadow_data)
+                    {
+                        log::warn!("⚠️ compose_full_frame shadows failed: {}", e);
+                    }
+                }
+            }
+            if has_blurs {
+                if let Some(ref engine) = self.effects_engine {
+                    if let Err(e) = engine
+                        .write()
+                        .render_blurs(&mut encoder, target_view, target_view, tex_size)
+                    {
+                        log::warn!("⚠️ compose_full_frame blurs failed: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Read back the composited result via a staging buffer.
+        let bytes_per_row = std::num::NonZeroU32::new(4 * width);
+        let buffer_size = (width as u64)
+            .saturating_mul(height as u64)
+            .saturating_mul(4);
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Compose Readback Staging"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut copy_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Compose Copy Encoder"),
+                });
+        copy_encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &staging,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: bytes_per_row.map(std::num::NonZeroU32::get),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.queue.submit(
+            std::iter::once(encoder.finish()).chain(std::iter::once(copy_encoder.finish())),
+        );
+
+        // Poll for completion and read back to CPU.
+        let slice = staging.slice(..);
+        let device_lost_signal = Arc::clone(&self.device_lost);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            // wgpu 0.19 surfaces device-loss as an Err callback here
+            // (driver crash / context reset). Flip our shared flag so
+            // the next compose call short-circuits with a typed
+            // RendererError::DeviceLost instead of attempting doomed
+            // GPU work. The forward of `r` is still required so the
+            // caller can detect channel close + receive the actual
+            // error context for diagnostics.
+            if r.is_err() {
+                device_lost_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        let map_result = rx.recv()
+            .map_err(|_| anyhow::anyhow!("GPU readback channel closed"))?;
+        // Surface device-loss as a typed error so the compositor can
+        // branch on it (reinit vs. fall back). Anything else is an
+        // anyhow-style buffer error converted to RendererError::Buffer.
+        map_result.map_err(|e| {
+            anyhow::anyhow!("GPU readback map failed: {:?}", e)
+        })?;
+
+        let mapped = slice.get_mapped_range();
+        let result = mapped.to_vec();
+        drop(mapped);
+        staging.unmap();
+
+        // Drain per-frame effect queues — mirrors `composite_effects_on_buffer`.
+        self.window_shadows.clear();
+        self.window_blurs.clear();
+        self.pending_shadows.store(0, Ordering::Relaxed);
+        self.pending_blurs.store(0, Ordering::Relaxed);
+
+        // Compute placeholder count in a cfg-gated block expression —
+        // `#[cfg]` is not allowed directly on individual macro arguments
+        // (rust-lang/rust#15701), so we resolve the count first and then
+        // hand the single value to `debug!`.
+        let placeholder_count: usize = {
+            #[cfg(debug_assertions)]
+            {
+                placeholder_draws.len()
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                0
+            }
+        };
+
+        debug!(
+            "🖼️  compose_full_frame: {}x{} textured={} placeholder={} shadows={} blurs_present={} -> {} bytes",
+            width,
+            height,
+            textured_draws.len(),
+            placeholder_count,
+            shadow_data.len(),
+            has_blurs,
+            result.len()
+        );
 
         Ok(result)
     }
@@ -1895,6 +2365,103 @@ pub fn create_projection_matrix(width: f32, height: f32) -> [[f32; 4]; 4] {
     ]
 }
 
+/// Build the placeholder pipeline used by [`AxiomRenderer::compose_full_frame`]
+/// to draw solid-colored quads for windows that have not yet committed
+/// a real client texture. The 2-binding layout (projection uniform + per-
+/// window uniform) reuses the same cached buffers as the textured pass
+/// so transitioning a window from placeholder to textured requires no
+/// extra GPU uploads.
+///
+/// Returns `(pipeline, bind_group_layout)`. The bind group layout is
+/// exposed so the constructor can hand the `wgpu::PipelineLayout` a
+/// holder with the right `'static` lifetime, but most callers only
+/// need the pipeline (the layout is owned by the renderer).
+///
+/// **Debug-only.** This function (and the `include_str!("placeholder.wgsl")`
+/// it embeds) is compiled out in release builds — the placeholder
+/// pipeline is dropped at compile time, and the WGSL shader bytes never
+/// reach the release binary.
+#[cfg(debug_assertions)]
+pub fn create_placeholder_pipeline(
+    device: &Device,
+    format: TextureFormat,
+) -> Result<(RenderPipeline, BindGroupLayout)> {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Placeholder Shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("placeholder.wgsl").into()),
+    });
+
+    let bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Placeholder Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Placeholder Pipeline Layout"),
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Placeholder Render Pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[Vertex::desc()],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+    });
+
+    Ok((pipeline, bind_group_layout))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1963,17 +2530,23 @@ mod tests {
         renderer.add_window(1, (0.0, 0.0), (400.0, 300.0));
         renderer.add_window(2, (500.0, 0.0), (400.0, 300.0));
 
-        // Create real uniform buffers and stash them as cached so we
-        // can verify they are cleared by set_border_width.
-        let dev = renderer.device();
-        for window in &mut renderer.windows {
-            let buf = dev.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("test uniform buffer"),
-                size: std::mem::size_of::<WindowUniforms>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            window.cached_uniform_buffer = Some(buf);
+        // `wgpu::Device`/`Buffer` are not Clone in this crate's
+        // wgpu version, so we create each buffer inside a block
+        // scope that releases the `&Device` borrow before indexing
+        // `renderer.windows` mutably below.
+        let n = renderer.windows.len();
+        for i in 0..n {
+            let buf: wgpu::Buffer = {
+                let dev: &wgpu::Device = renderer.device();
+                dev.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("test uniform buffer"),
+                    size: std::mem::size_of::<WindowUniforms>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM
+                        | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            };
+            renderer.windows[i].cached_uniform_buffer = Some(buf);
         }
 
         // Sanity: both windows have cached buffers
@@ -2007,14 +2580,18 @@ mod tests {
             .expect("headless renderer");
         renderer.add_window(1, (0.0, 0.0), (400.0, 300.0));
 
-        // Seed a real cached uniform buffer
-        let dev = renderer.device();
-        let buf = dev.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("test uniform buffer"),
-            size: std::mem::size_of::<WindowUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // Seed a real cached uniform buffer. `wgpu::Device` is
+        // not Clone here, so we scope the `&Device` borrow inside
+        // a block before assigning to the window.
+        let buf: wgpu::Buffer = {
+            let dev: &wgpu::Device = renderer.device();
+            dev.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("test uniform buffer"),
+                size: std::mem::size_of::<WindowUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
         renderer.windows[0].cached_uniform_buffer = Some(buf);
         assert!(renderer.windows[0].cached_uniform_buffer.is_some());
 

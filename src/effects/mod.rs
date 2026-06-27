@@ -165,9 +165,19 @@ pub struct EffectsEngine {
     effects_quality: f32, // 0.0 to 1.0
     adaptive_quality: bool,
 
-    /// GPU context (when available)
+    /// GPU context (when available). Stored as `Arc` because the internal
+    /// blur / shadow renderers take `Arc<Device>` and `Arc<Queue>` at
+    /// construction and must outlast any single borrow of the wgpu
+    /// renderer the compositor hands to `initialize_gpu`.
     gpu_device: Option<Arc<Device>>,
     gpu_queue: Option<Arc<Queue>>,
+    /// Whether [`EffectsEngine::initialize_gpu`] completed successfully.
+    /// Surfaces in `LiveMetrics::effects_gpu_available` so monitoring
+    /// clients can detect "GPU effects did not initialize" without
+    /// grepping the compositor log. Set to `true` at the successful
+    /// end of `initialize_gpu`, `false` on entry (initial state) and
+    /// on error (the function returns early without mutating `self`).
+    gpu_initialized: bool,
 }
 
 impl Default for WindowEffectState {
@@ -281,6 +291,7 @@ impl EffectsEngine {
             adaptive_quality: true,
             gpu_device: None,
             gpu_queue: None,
+            gpu_initialized: false,
         })
     }
 
@@ -794,15 +805,33 @@ impl EffectsEngine {
         self.config = config;
     }
 
-    /// Initialize GPU context for hardware-accelerated effects
+    /// Initialize GPU context for hardware-accelerated effects.
+    ///
+    /// Takes owned `Arc<Device>` and `Arc<Queue>` so the effects engine
+    /// can retain long-lived arcs in its blur/shadow renderers. The
+    /// compositor constructs these arcs by `Arc::clone(&renderer.device)`
+    /// / `Arc::clone(&renderer.queue)` from inside its `renderer.read()`
+    /// guard — a refcount bump, not a deep copy. The renderer's public
+    /// `device()` and `queue()` getters return `&Device` / `&Queue`
+    /// (`Design 16`) so external callers cannot reach the GPU context
+    /// through the renderer; this method is the narrow channel through
+    /// which the effects engine gets its retainable handle.
+    ///
+    /// On success the `gpu_initialized` flag is set to `true` so
+    /// monitoring clients can read [`EffectsEngine::is_gpu_initialized`].
+    /// Early-return on error leaves the flag at its previous value
+    /// (typically `false` for a fresh engine), so a failed init is
+    /// observable from IPC.
     pub fn initialize_gpu(&mut self, device: Arc<Device>, queue: Arc<Queue>) -> Result<()> {
         info!("🚀 Initializing GPU acceleration for effects...");
 
-        // Store GPU context
+        // Store GPU context (clone arcs for blur/shadow renderer feeds).
         self.gpu_device = Some(device.clone());
         self.gpu_queue = Some(queue.clone());
 
-        // Initialize shader manager (compiled once, shared by blur and shadow renderers)
+        // Initialize shader manager (compiled once, shared by blur and shadow renderers).
+        // shader_manager stores Arc<Device> internally; pass the Arc clone
+        // so its lifetime covers both blur and shadow renderers below.
         let mut sm = shaders::ShaderManager::new(device.clone());
         sm.compile_all_shaders()?;
         let shader_manager = Arc::new(sm);
@@ -833,8 +862,8 @@ impl EffectsEngine {
         // Initialize shadow renderer using the shared shader manager
         if self.default_shadow.enabled {
             self.shadow_renderer = Some(shadow::ShadowRenderer::new(
-                device.clone(),
-                queue.clone(),
+                device,
+                queue,
                 shader_manager.clone(),
                 self.default_shadow.clone(),
                 shadow::ShadowQuality::High,
@@ -842,6 +871,12 @@ impl EffectsEngine {
             info!("🌟 GPU shadow renderer initialized");
         }
 
+        // Mark GPU as initialised so IPC handlers can read a live status.
+        // Honest signal — reaching this point means blur + shadow pipeline
+        // paths are seeded (the previous code stored None on either path
+        // being disabled, which left observers guessing between
+        // "config disabled" and "GPU init failed").
+        self.gpu_initialized = true;
         info!("✅ GPU effects acceleration ready");
         Ok(())
     }
@@ -854,6 +889,17 @@ impl EffectsEngine {
     /// Check if GPU acceleration is available
     pub fn has_gpu_acceleration(&self) -> bool {
         self.gpu_device.is_some() && self.gpu_queue.is_some()
+    }
+
+    /// Whether `initialize_gpu` completed successfully. Distinct from
+    /// `has_gpu_acceleration()`: the latter only reports whether we
+    /// _hold_ a device/queue reference, which can be true even when
+    /// the blur / shadow renderers failed to build (e.g. shader
+    /// compile errors). The IPC `LiveMetrics::effects_gpu_available`
+    /// surfaces this flag — set on successful init return, reset on
+    /// each subsequent `initialize_gpu` call (typically never).
+    pub fn is_gpu_initialized(&self) -> bool {
+        self.gpu_initialized
     }
 
     /// Render drop shadows for all visible windows via the GPU shadow renderer.
