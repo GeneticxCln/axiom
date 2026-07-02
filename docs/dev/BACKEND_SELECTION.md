@@ -23,11 +23,11 @@ Runs the compositor nested inside another Wayland/X11 session using `winit`. Use
 -   **Flag**: `--windowed` (or `--backend=winit`)
 -   **Usage**: `cargo run -- --windowed`
 
-### 3. DRM / KMS Session-Compositor (Skeleton)
-The production path that drives the GPU directly via DRM/KMS, libinput, and udev hotplug. **Currently scaffolding only** — the architecture and feature gates are wired in ([`src/backend/drm.rs`](../../src/backend/drm.rs), [`BackendKind::Drm`](../../src/backend/drm.rs)), but real `LibSeatSession` probing + the calloop thread are deferred to a follow-up PR (see the module docs for the full list).
+### 3. DRM / KMS Session-Compositor (Probe + Scaffolding)
+The production path that drives the GPU directly via DRM/KMS, libinput, and udev hotplug. The `BackendKind` enum and `from_config_str` parser are implemented in [`src/backend/drm.rs`](../../src/backend/drm.rs). The DRM device probe checks `/dev/dri/card*` for availability. The full `LibSeatSession` + calloop integration is deferred to a follow-up PR.
 
 -   **Flag**: `--backend=drm`
--   **Status**: Logs a "DRM backend compiled in; runtime probe is a TODO" line on start-up and the Rust-side tick is a no-op (with a visible warning). The compositor process binds the Wayland socket but no GL/KMS framing occurs until the calloop integration lands.
+-   **Status**: `BackendKind::from_config_str` maps `"drm"`, `"kms"`, `"session"`, `"tty"` to `BackendKind::Drm`. `DrmBackend::new()` probes DRM device nodes. `initialize_drm()` logs intent and registers a keyboard seat. The event loop tick (`run_one_cycle_drm`) is a no-op awaiting calloop wiring. The compositor binds the Wayland socket but no KMS modesetting or page-flip occurs until calloop lands.
 
 ### 4. Headless Test Backend
 A test-only backend that skips Wayland socket bind and display creation, so the CI can construct a compositor (`AxiomCompositor::new_for_test` + `AxiomSmithayBackendReal::new_for_test`) without real system resources. Used by the 79 unit tests in `cargo test --lib`.
@@ -62,7 +62,7 @@ Aliases accepted via TOML (`backend.kind`) and CLI: `windowed`/`dev` → winit, 
 
 ## Picking a Backend at Runtime
 
-The CLI flag `--backend=<winit|drm|noop>` overrides any TOML value at the `config.backend.kind` slot. The resulting kind is then derived in `AxiomSmithayBackendReal::new` via [`BackendKind::from_config_str`](../../src/backend/drm.rs), and `initialize()` dispatches to either `initialize_winit()` (preserving the original semantics) or `initialize_drm()` (currently a stub). For CI, no special flag is needed — `cargo test --lib` exercises every subsystem through the `Noop` path.
+The CLI flag `--backend=<winit|drm|noop>` overrides any TOML value at the `config.backend.kind` slot. The resulting kind is then derived in `AxiomSmithayBackendReal::new` via [`BackendKind::from_config_str`](../../src/backend/drm.rs), and `initialize()` dispatches to either `initialize_winit()` or `initialize_drm()` (both implemented; DRM is a stub awaiting calloop). For CI, no special flag is needed — `cargo test --lib` exercises every subsystem through the `Noop` path.
 
 ## Minimized Feature Surface (Scope Decision)
 

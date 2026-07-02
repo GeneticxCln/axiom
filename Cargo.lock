@@ -186,13 +186,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "calloop 0.13.0",
  "cgmath",
  "chrono",
  "clap",
  "criterion",
+ "drm",
+ "drm-fourcc",
  "env_logger 0.10.2",
  "futures-test",
+ "gbm",
  "gl",
+ "input",
  "libc",
  "log",
  "mockall",
@@ -208,6 +213,7 @@ dependencies = [
  "tokio-test",
  "tokio-util",
  "toml",
+ "udev 0.8.0",
  "wayland-protocols",
  "wayland-server",
  "wgpu",
@@ -967,6 +973,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "gbm"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce852e998d3ca5e4a97014fb31c940dc5ef344ec7d364984525fd11e8a547e6a"
+dependencies = [
+ "bitflags 2.13.0",
+ "drm",
+ "drm-fourcc",
+ "gbm-sys",
+ "libc",
+ "wayland-backend",
+ "wayland-server",
+]
+
+[[package]]
+name = "gbm-sys"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c13a5f2acc785d8fb6bf6b7ab6bfb0ef5dad4f4d97e8e70bb8e470722312f76f"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1218,7 +1248,8 @@ dependencies = [
  "bitflags 2.13.0",
  "input-sys",
  "libc",
- "udev",
+ "log",
+ "udev 0.9.3",
 ]
 
 [[package]]
@@ -1475,6 +1506,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
 ]
 
 [[package]]
@@ -2514,6 +2554,7 @@ dependencies = [
  "atomic_float",
  "bitflags 2.13.0",
  "calloop 0.14.4",
+ "cc",
  "cgmath",
  "cursor-icon",
  "downcast-rs",
@@ -2522,11 +2563,13 @@ dependencies = [
  "drm-fourcc",
  "encoding_rs",
  "errno",
+ "gbm",
  "gl_generator",
  "indexmap",
  "input",
  "libc",
  "libloading 0.8.9",
+ "pkg-config",
  "profiling",
  "rand 0.9.4",
  "rustix 1.1.4",
@@ -2536,7 +2579,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
- "udev",
+ "udev 0.9.3",
  "wayland-client",
  "wayland-cursor",
  "wayland-egl",
@@ -2889,6 +2932,18 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "udev"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50051c6e22be28ee6f217d50014f3bc29e81c20dc66ff7ca0d5c5226e1dcc5a1"
+dependencies = [
+ "io-lifetimes",
+ "libc",
+ "libudev-sys",
+ "pkg-config",
+]
+
+[[package]]
+name = "udev"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af4e37e9ea4401fc841ff54b9ddfc9be1079b1e89434c1a6a865dd68980f7e9f"
@@ -3172,7 +3227,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8eab23fefc9e41f8e841df4a9c707e8a8c4ed26e944ef69297184de2785e3be"
 dependencies = [
  "dlib",
+ "libc",
  "log",
+ "memoffset",
  "once_cell",
  "pkg-config",
 ]

@@ -45,6 +45,9 @@ const KNOWN_WORKSPACE_ACTIONS: &[&str] = &[
     "move_focus_left",
     "move_focus_right",
     "toggle_floating",
+    "minimize_window",
+    "restore_window",
+    "toggle_fullscreen",
 ];
 
 /// Maximum accepted blur radius in **pixels**. Anything above this is
@@ -93,6 +96,12 @@ pub struct LiveMetrics {
     /// pipeline at compositor startup. `false` means blur/shadow
     /// passes will be silently dropped on the CPU path.
     pub effects_gpu_available: bool,
+    /// Whether the effects engine is currently enabled (runtime toggle).
+    pub effects_enabled: bool,
+    /// Whether blur is enabled in the config.
+    pub blur_enabled: bool,
+    /// Current global blur radius in pixels.
+    pub blur_radius: f32,
 }
 
 /// Returns true when `action` is in the whitelisted
@@ -215,6 +224,22 @@ pub enum AxiomMessage {
         current_workspace: i32,
         note: String,
     },
+
+    /// Effects engine status, pushed after each `PerformanceReport` (and
+    /// on any effects configuration change via `EffectsControl`). Tells
+    /// monitoring clients whether GPU-accelerated post-processing (blur,
+    /// shadow, rounded corners) is available and currently enabled.
+    EffectsStatus {
+        timestamp: u64,
+        /// Whether the GPU pipeline initialised successfully at startup.
+        effects_gpu_available: bool,
+        /// Whether effects are currently enabled (runtime toggle).
+        effects_enabled: bool,
+        /// Whether blur is enabled in the config (read-only gate).
+        blur_enabled: bool,
+        /// Current blur radius in pixels (global, live value).
+        blur_radius: f32,
+    },
 }
 
 /// Messages sent from Lazy UI to Axiom (optimization commands)
@@ -255,6 +280,12 @@ pub enum LazyUIMessage {
         enabled: Option<bool>,
         blur_radius: Option<f32>,
         animation_speed: Option<f32>,
+    },
+
+    /// Per-window blur control. `radius` in pixels (0..=32); 0 disables blur.
+    SetWindowBlur {
+        window_id: u64,
+        radius: f32,
     },
 
     /// System health check request
@@ -718,6 +749,7 @@ impl AxiomIPCServer {
                                     message,
                                     LazyUIMessage::WorkspaceCommand { .. }
                                         | LazyUIMessage::EffectsControl { .. }
+                                        | LazyUIMessage::SetWindowBlur { .. }
                                 );
                                 if is_command_type {
                                     // SINGLE DISPATCH (Issue #2 real fix):
@@ -789,9 +821,19 @@ impl AxiomIPCServer {
                                                 "dispatched_via_mpsc": true,
                                             });
                                         }
+                                        LazyUIMessage::SetWindowBlur { window_id, radius } => {
+                                            cmd_event_type = "SetWindowBlurAck";
+                                            cmd_details = serde_json::json!({
+                                                "window_id": window_id,
+                                                "radius": radius,
+                                                "status": "queued_for_compositor_dispatch",
+                                                "accepted": true,
+                                                "dispatched_via_mpsc": true,
+                                            });
+                                        }
                                         // `is_command_type` already gated the
-                                        // WorkspaceCommand + EffectsControl
-                                        // branch above; the remaining 5
+                                        // WorkspaceCommand / EffectsControl /
+                                        // SetWindowBlur branch above; the remaining 5
                                         // variants (OptimizeConfig / GetConfig
                                         // / SetConfig / HealthCheck /
                                         // GetPerformanceReport) flow into
@@ -806,7 +848,7 @@ impl AxiomIPCServer {
                                         // because the outer `is_command_type`
                                         // predicate already returned `true`.
                                         _ => unreachable!(
-                                            "is_command_type gated WorkspaceCommand / EffectsControl"
+                                            "is_command_type gated WorkspaceCommand / EffectsControl / SetWindowBlur"
                                         ),
                                     }
                                     // Q2: capture the send result; build the
@@ -833,8 +875,9 @@ impl AxiomIPCServer {
                                             ack_event_type = match cmd_event_type {
                                                 "WorkspaceCommandAck" => "WorkspaceCommandAckFailed",
                                                 "EffectsControlAck" => "EffectsControlAckFailed",
+                                                "SetWindowBlurAck" => "SetWindowBlurAckFailed",
                                                 _ => unreachable!(
-                                                    "cmd_event_type is one of the two command-type acks"
+                                                    "cmd_event_type is one of the three command-type acks"
                                                 ),
                                             };
                                             let reason = format!(
@@ -1055,6 +1098,13 @@ impl AxiomIPCServer {
                      it via cmd_tx only"
                 );
             }
+            LazyUIMessage::SetWindowBlur { .. } => {
+                debug!(
+                    "⚠️ SetWindowBlur reached process_lazy_ui_message \
+                     — upstream gate in handle_client should have dispatched \
+                     it via cmd_tx only"
+                );
+            }
 
             LazyUIMessage::HealthCheck => {
                 debug!("🏥 Health check request");
@@ -1137,22 +1187,15 @@ impl AxiomIPCServer {
                 // client ACK includes the boolean in the `details`
                 // payload so old readers can ignore it without breaking.
                 if metrics_handle.is_some() {
-                    let effects_status = serde_json::json!({
-                        "type": "EffectsStatus",
-                        "effects_gpu_available": snapshot.effects_gpu_available,
-                    });
-                    let json = serde_json::to_string(&effects_status)
-                        .context("Failed to serialize EffectsStatus")?;
-                    use tokio::io::AsyncWriteExt;
-                    writer
-                        .write_all(json.as_bytes())
-                        .await
-                        .context("Failed to write EffectsStatus message")?;
-                    writer
-                        .write_all(b"\n")
-                        .await
-                        .context("Failed to write newline")?;
-                    debug!("📤 Sent EffectsStatus follow-up: {}", json);
+                    let effects_status = AxiomMessage::EffectsStatus {
+                        timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                        effects_gpu_available: snapshot.effects_gpu_available,
+                        effects_enabled: snapshot.effects_enabled,
+                        blur_enabled: snapshot.blur_enabled,
+                        blur_radius: snapshot.blur_radius,
+                    };
+                    Self::send_message(writer, &effects_status).await?;
+                    debug!("📤 Sent EffectsStatus follow-up");
                 }
                 Self::send_message(writer, &report).await?;
             }
@@ -1269,7 +1312,8 @@ impl AxiomIPCServer {
                     // Sub-system-bound actions: validated upstream, dispatched
                     // by the compositor in `AxiomCompositor::process_events`.
                     LazyUIMessage::WorkspaceCommand { .. }
-                    | LazyUIMessage::EffectsControl { .. } => {
+                    | LazyUIMessage::EffectsControl { .. }
+                    | LazyUIMessage::SetWindowBlur { .. } => {
                         pending_actions.push(message);
                     }
                     _ => {
@@ -1314,6 +1358,32 @@ impl AxiomIPCServer {
                 frame_time,
                 active_windows,
                 current_workspace,
+            });
+        }
+        Ok(())
+    }
+
+    /// Broadcast a compositor state change to all connected IPC clients.
+    ///
+    /// `component` identifies the subsystem (e.g. `"workspace"`, `"window"`,
+    /// `"effects"`) and `new_state` / `old_state` describe the transition
+    /// (e.g. `"scrolled_right"`, `"minimized"`, `"fullscreen"`).  This is a
+    /// fire-and-forget broadcast — send failures (no connected clients) are
+    /// silently ignored.
+    pub fn broadcast_state_change(
+        &self,
+        component: &str,
+        old_state: &str,
+        new_state: &str,
+    ) -> Result<()> {
+        if let Some(tx) = &self.broadcast_tx {
+            let _ = tx.send(AxiomMessage::StateChange {
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs(),
+                component: component.to_owned(),
+                old_state: old_state.to_owned(),
+                new_state: new_state.to_owned(),
             });
         }
         Ok(())
@@ -1728,12 +1798,15 @@ mod tests {
             server.live_metrics_handle.is_none(),
             "fresh server starts with no snapshot handle"
         );
-        // First call: handle goes from None to Some, all four fields populated.
+        // First call: handle goes from None to Some, all fields populated.
         server.set_live_metrics_snapshot(LiveMetrics {
             frame_time_ms: 12.5,
             active_windows: 7,
             current_workspace: 2,
             effects_gpu_available: true,
+            effects_enabled: true,
+            blur_enabled: true,
+            blur_radius: 8.0,
         });
         let snap = *server
             .live_metrics_handle
@@ -1744,6 +1817,9 @@ mod tests {
         assert_eq!(snap.active_windows, 7);
         assert_eq!(snap.current_workspace, 2);
         assert!(snap.effects_gpu_available);
+        assert!(snap.effects_enabled);
+        assert!(snap.blur_enabled);
+        assert!((snap.blur_radius - 8.0).abs() < 1e-6);
 
         // Second call replaces (not appends) per `get_or_insert_with` design.
         server.set_live_metrics_snapshot(LiveMetrics {
@@ -1751,6 +1827,9 @@ mod tests {
             active_windows: 2,
             current_workspace: -3,
             effects_gpu_available: false,
+            effects_enabled: false,
+            blur_enabled: false,
+            blur_radius: 0.0,
         });
         let snap = *server
             .live_metrics_handle
@@ -1761,6 +1840,9 @@ mod tests {
         assert_eq!(snap.active_windows, 2);
         assert_eq!(snap.current_workspace, -3);
         assert!(!snap.effects_gpu_available);
+        assert!(!snap.effects_enabled);
+        assert!(!snap.blur_enabled);
+        assert!((snap.blur_radius - 0.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1775,6 +1857,9 @@ mod tests {
             active_windows: 0,
             current_workspace: 0,
             effects_gpu_available: false,
+            effects_enabled: false,
+            blur_enabled: false,
+            blur_radius: 0.0,
         });
         assert!(server.live_metrics_handle.is_some());
     }

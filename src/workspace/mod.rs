@@ -162,6 +162,12 @@ pub struct WorkspaceTape {
 
     /// Last time cleanup was performed
     last_cleanup: Instant,
+
+    /// Output DPI scale factor (e.g. 1.0 for normal, 2.0 for HiDPI).
+    /// Configured by the backend during output setup; used by
+    /// `calculate_workspace_layouts` to produce logical-space window
+    /// rectangles that HiDPI-aware clients can consume directly.
+    scale_factor: f64,
 }
 
 impl WorkspaceTape {
@@ -179,6 +185,7 @@ impl WorkspaceTape {
             viewport_height: DEFAULT_VIEWPORT_HEIGHT,
             last_update: Instant::now(),
             last_cleanup: Instant::now(),
+            scale_factor: 1.0,
         };
 
         // Create the initial workspace column
@@ -593,6 +600,19 @@ impl WorkspaceTape {
     pub fn current_position(&self) -> f64 {
         self.current_position
     }
+
+    /// Set the output DPI scale factor for this tape.
+    /// Clamped to [1.0, 4.0] since fractional scales between 1x and 4x
+    /// cover typical HiDPI hardware; extreme values are clamped.
+    pub fn set_scale_factor(&mut self, factor: f64) {
+        self.scale_factor = factor.clamp(1.0, 4.0);
+        debug!("Tape scale factor set to {:.1}x", self.scale_factor);
+    }
+
+    /// Get the output DPI scale factor for this tape.
+    pub fn scale_factor(&self) -> f64 {
+        self.scale_factor
+    }
 }
 
 /// Scrollable workspace manager (Top-level Multi-Monitor)
@@ -639,6 +659,11 @@ pub struct ScrollableWorkspaces {
     /// when this map has no entry (e.g. window was empty before
     /// minimize or a hot-reload cleared the in-memory map).
     pub originating_column: HashMap<u64, i32>,
+
+    /// Set of window IDs currently in floating mode. `calculate_workspace_layouts`
+    /// skips these windows so they are not auto-tiled. Must be kept in sync
+    /// with `WindowManager`'s `properties.floating` by the caller.
+    floating_windows: HashSet<u64>,
 }
 
 impl ScrollableWorkspaces {
@@ -656,6 +681,7 @@ impl ScrollableWorkspaces {
             cached_layouts: parking_lot::Mutex::new(None),
             minimized_windows: HashSet::new(),
             originating_column: HashMap::new(),
+            floating_windows: HashSet::new(),
         };
 
         // Create default tape
@@ -958,6 +984,11 @@ impl ScrollableWorkspaces {
                         if self.minimized_windows.contains(&window_id) {
                             continue;
                         }
+                        // Floating windows are manually positioned and must
+                        // not receive a tiled layout rect.
+                        if self.floating_windows.contains(&window_id) {
+                            continue;
+                        }
                         let y = gap + i as i32 * (window_height + gap);
                         let width = column_bounds.width.saturating_sub(2 * gap as u32).max(1);
                         let height = (window_height as u32).max(1);
@@ -977,9 +1008,30 @@ impl ScrollableWorkspaces {
         layouts
     }
 
-    /// Find the window under a given point (x, y) in viewport coordinates
-    /// Returns the window ID and the relative coordinates within the window
-    pub fn element_under(&self, x: f64, y: f64) -> Option<(u64, (f64, f64))> {
+    /// Find the window under a given point (x, y) in viewport coordinates.
+    /// Checks both tiled layouts and any extra window rects provided via
+    /// `floating_rects` (floating / manually-positioned windows whose
+    /// positions are stored in the window manager, not in workspace layouts).
+    /// Returns the window ID and the relative coordinates within the window.
+    pub fn element_under(
+        &self,
+        x: f64,
+        y: f64,
+        floating_rects: &[(u64, i32, i32, u32, u32)],
+    ) -> Option<(u64, (f64, f64))> {
+        // Check floating windows first (they render on top).
+        for &(window_id, fx, fy, fw, fh) in floating_rects {
+            if x >= fx as f64
+                && x < (fx + fw as i32) as f64
+                && y >= fy as f64
+                && y < (fy + fh as i32) as f64
+            {
+                let relative_x = x - fx as f64;
+                let relative_y = y - fy as f64;
+                return Some((window_id, (relative_x, relative_y)));
+            }
+        }
+        // Then check tiled layouts.
         let layouts = self.calculate_workspace_layouts();
         for (window_id, rect) in layouts {
             if x >= rect.x as f64
@@ -1020,6 +1072,11 @@ impl ScrollableWorkspaces {
         )
     }
 
+    /// Get the DPI scale factor of the active tape.
+    pub fn scale_factor(&self) -> f64 {
+        self.active_tape().scale_factor()
+    }
+
     /// Get the scroll progress (0.0 to 1.0) of the active tape.
     pub fn scroll_progress(&self) -> f64 {
         match self.active_tape().scroll_state {
@@ -1033,6 +1090,37 @@ impl ScrollableWorkspaces {
             }
             _ => 0.0,
         }
+    }
+
+    /// Set the floating state for a window. Floating windows are exempt
+    /// from auto-tiling in `calculate_workspace_layouts` — they must be
+    /// positioned and rendered by the caller (typically the backend during
+    /// an interactive move).
+    pub fn set_window_floating(&mut self, window_id: u64, floating: bool) {
+        if floating {
+            self.floating_windows.insert(window_id);
+        } else {
+            self.floating_windows.remove(&window_id);
+            // Invalidate cached layouts so the window re-enters tiling.
+            *self.cached_layouts.lock() = None;
+        }
+    }
+
+    /// Toggle the floating state for a window.
+    pub fn toggle_window_floating(&mut self, window_id: u64) -> bool {
+        let is_floating = self.floating_windows.contains(&window_id);
+        self.set_window_floating(window_id, !is_floating);
+        !is_floating
+    }
+
+    /// Check whether a window is in floating mode.
+    pub fn is_window_floating(&self, window_id: u64) -> bool {
+        self.floating_windows.contains(&window_id)
+    }
+
+    /// Return a snapshot of all floating window IDs.
+    pub fn floating_window_ids(&self) -> Vec<u64> {
+        self.floating_windows.iter().copied().collect()
     }
 
     /// Shut down all tapes and clear state.

@@ -40,7 +40,8 @@ wayland-protocols = { version = "0.32", features = ["server", "staging", "unstab
 smithay = { version = "0.7.0", default-features = false, features = [
     "backend_winit",
     "backend_drm",
-    "backend_libinput", 
+    "backend_gbm",
+    "backend_libinput",
     "backend_session",
     "backend_udev",
     "renderer_gl",
@@ -51,7 +52,6 @@ smithay = { version = "0.7.0", default-features = false, features = [
 
 # Graphics and input
 # glium   (removed v0.7.5 audit: unused — Smithay 0.7's GlesRenderer covers GL)
-# calloop (removed v0.7.5 audit: unused — Smithay 0.7 uses calloop internally)
 # drm     (removed v0.7.5 audit: unused — Smithay 0.7 backend_drm feature re-exports)
 # gbm     (removed v0.7.5 audit: unused — Smithay 0.7 backend_drm feature re-exports)
 # input   (removed v0.7.5 audit: unused as a first-party dep — smithay::reexports::input::Axis works)
@@ -67,6 +67,16 @@ gl = "0.14"  # OpenGL bindings for GLES 2.0 rendering pipeline (raw gl::* in bac
 
 # Graphics and rendering
 wgpu = "0.19"  # GPU compute and rendering (independent of Smithay's GLES renderer)
+
+# Event loop
+calloop = "0.13"  # Callback-based event loop for FD polling (DRM + libinput + udev)
+
+# DRM/KMS backend for production session-compositor mode
+drm = "0.14"     # Direct Rendering Manager — KMS modesetting, connectors, CRTCs, page-flip
+drm-fourcc = "2.2"  # DRM fourcc pixel format codes (re-exported by drm crate for create_dumb_buffer)
+gbm = "0.18"     # Generic Buffer Management — GPU-accelerated scanout buffers via GBM surface
+input = "0.9"    # libinput bindings — touchpad, keyboard, touch, gesture events
+udev = "0.8"     # udev device monitoring — DRM connector hotplug detection
 
 # IPC for Lazy UI integration
 serde_json = "1.0"

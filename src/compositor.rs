@@ -132,12 +132,17 @@ impl AxiomCompositor {
         // `GetPerformanceReport` query arriving BEFORE the first tick
         // still sees the gpu_initialized state instead of the default
         // LiveMetrics::default() (= false / 0).
+        let effects_initial = effects_engine.read();
         ipc_server.set_live_metrics_snapshot(LiveMetrics {
             frame_time_ms: 0.0,
             active_windows: 0,
             current_workspace: 0,
             effects_gpu_available,
+            effects_enabled: effects_initial.is_enabled(),
+            blur_enabled: effects_initial.is_blur_enabled(),
+            blur_radius: effects_initial.blur_params().radius,
         });
+        drop(effects_initial);
 
         // Wire effects engine into renderer for GPU shadow/blur post-processing
         renderer.write().set_effects_engine(effects_engine.clone());
@@ -255,9 +260,15 @@ impl AxiomCompositor {
                         } => {
                             self.dispatch_effects_control(enabled, blur_radius, animation_speed);
                         }
-                        // process_messages only forwards WorkspaceCommand and
-                        // EffectsControl into the actions vec; the catch-all
-                        // is here only to satisfy the exhaustive match.
+                        LazyUIMessage::SetWindowBlur { window_id, radius } => {
+                            let clamped = radius.clamp(0.0, 32.0);
+                            self.effects_engine
+                                .write()
+                                .set_window_blur(window_id, clamped);
+                        }
+                        // process_messages only forwards WorkspaceCommand,
+                        // EffectsControl, and SetWindowBlur into the actions
+                        // vec; the catch-all is here to satisfy exhaustive match.
                         _ => {
                             warn!("Unexpected pending action variant from IPC queue");
                         }
@@ -321,6 +332,33 @@ impl AxiomCompositor {
                     None => debug!("WorkspaceCommand toggle_floating: no focused window, no-op"),
                 }
             }
+            "minimize_window" => match parameters.get("window_id").and_then(|v| v.as_u64()) {
+                Some(id) => {
+                    self.minimize_window(id);
+                }
+                None => {
+                    warn!("WorkspaceCommand minimize_window missing 'window_id' parameter — no-op")
+                }
+            },
+            "restore_window" => match parameters.get("window_id").and_then(|v| v.as_u64()) {
+                Some(id) => {
+                    self.restore_window(id);
+                }
+                None => {
+                    warn!("WorkspaceCommand restore_window missing 'window_id' parameter — no-op")
+                }
+            },
+            "toggle_fullscreen" => {
+                let focused_id = self.window_manager.read().focused_window_id();
+                match focused_id {
+                    Some(id) => {
+                        self.toggle_fullscreen(id);
+                    }
+                    None => {
+                        debug!("WorkspaceCommand toggle_fullscreen: no focused window, no-op")
+                    }
+                }
+            }
             // Defensive catch-all. The IPC layer's whitelist already rejects
             // unknown actions, so reaching here means a future handler or
             // schema change introduced a mismatch — surface it loudly.
@@ -345,9 +383,41 @@ impl AxiomCompositor {
             blur_radius,
             animation_speed,
         );
+
+        // Persist live values back to the config so a subsequent
+        // OptimizeConfig / SetConfig for unrelated keys won't overwrite
+        // the live runtime mutations via update_config.
+        if let Some(e) = enabled {
+            self.config.effects.enabled = e;
+        }
+        if let Some(r) = blur_radius {
+            if r.is_finite() && r >= 0.0 {
+                self.config.effects.blur.radius = r as u32;
+            }
+        }
+        if let Some(s) = animation_speed {
+            if s.is_finite() && s > 0.0 {
+                // Re-derive duration from the speed multiplier.
+                let base_ms = self.config.effects.animations.duration as f32;
+                let new_ms = (base_ms / s).max(1.0).round() as u32;
+                self.config.effects.animations.duration = new_ms;
+            }
+        }
+
         debug!(
             "Effects control dispatched — enabled: {:?}, blur: {:?}, animation: {:?}",
             enabled, blur_radius, animation_speed
+        );
+        // Broadcast state change so monitoring clients observe the live
+        // effects mutation through the StateChange stream.
+        let summary = format!(
+            "enabled:{:?} blur_radius:{:?} animation_speed:{:?}",
+            enabled, blur_radius, animation_speed
+        );
+        let _ = self.ipc_server.broadcast_state_change(
+            "effects",
+            "previous",
+            &summary,
         );
     }
 
@@ -531,6 +601,10 @@ impl AxiomCompositor {
             xwayland.write().await.shutdown().await?;
         }
 
+        // Broadcast shutdown state change before backend teardown so
+        // IPC clients can react before the broadcast channel closes.
+        let _ = self.ipc_server.broadcast_state_change("compositor", "running", "shutdown");
+
         // Clean up Smithay backend
         debug!("Shutting down Smithay backend...");
         self.smithay_backend.shutdown()?;
@@ -632,7 +706,12 @@ impl AxiomCompositor {
         let frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         let (workspace_idx, _, _column_count, _) = self.get_workspace_info();
         let active_windows = self.window_manager.read().window_count();
-        let effects_gpu_available = self.effects_engine.read().is_gpu_initialized();
+        let effects = self.effects_engine.read();
+        let effects_gpu_available = effects.is_gpu_initialized();
+        let effects_enabled = effects.is_enabled();
+        let blur_enabled = effects.is_blur_enabled();
+        let blur_radius = effects.blur_params().radius;
+        drop(effects);
         self.ipc_server.maybe_broadcast_performance_metrics(
             frame_time_ms,
             active_windows,
@@ -648,6 +727,9 @@ impl AxiomCompositor {
             active_windows,
             current_workspace: workspace_idx,
             effects_gpu_available,
+            effects_enabled,
+            blur_enabled,
+            blur_radius,
         });
 
         // Frame pacing: sleep for remaining time to target the configured FPS.
@@ -699,13 +781,25 @@ impl AxiomCompositor {
     /// Scroll workspace left (for input handling)
     pub fn scroll_workspace_left(&mut self) {
         info!("Scrolling workspace left");
+        let old_idx = self.workspace_manager.read().focused_column_index();
         self.workspace_manager.write().scroll_left();
+        let _ = self.ipc_server.broadcast_state_change(
+            "workspace",
+            &old_idx.to_string(),
+            &self.workspace_manager.read().focused_column_index().to_string(),
+        );
     }
 
     /// Scroll workspace right (for input handling)
     pub fn scroll_workspace_right(&mut self) {
         info!("Scrolling workspace right");
+        let old_idx = self.workspace_manager.read().focused_column_index();
         self.workspace_manager.write().scroll_right();
+        let _ = self.ipc_server.broadcast_state_change(
+            "workspace",
+            &old_idx.to_string(),
+            &self.workspace_manager.read().focused_column_index().to_string(),
+        );
     }
 
     /// Add a new window to the current workspace.
@@ -735,6 +829,7 @@ impl AxiomCompositor {
             "Added window '{}' (ID: {}) to current workspace",
             title, window_id
         );
+        let _ = self.ipc_server.broadcast_state_change("window", "none", &format!("added:{}", window_id));
         window_id
     }
 
@@ -759,6 +854,9 @@ impl AxiomCompositor {
         }
 
         self.window_manager.write().remove_window(window_id);
+        if removed {
+            let _ = self.ipc_server.broadcast_state_change("window", &format!("active:{}", window_id), "none");
+        }
 
         if let Some(ref renderer) = self.renderer {
             renderer.write().remove_window(window_id);
@@ -773,6 +871,7 @@ impl AxiomCompositor {
     pub fn move_window_left(&mut self, window_id: u64) {
         if self.workspace_manager.write().move_window_left(window_id) {
             info!("Moved window {} to left workspace", window_id);
+            let _ = self.ipc_server.broadcast_state_change("window", &format!("workspace:{}", window_id), "left");
         }
     }
 
@@ -780,7 +879,46 @@ impl AxiomCompositor {
     pub fn move_window_right(&mut self, window_id: u64) {
         if self.workspace_manager.write().move_window_right(window_id) {
             info!("Moved window {} to right workspace", window_id);
+            let _ = self.ipc_server.broadcast_state_change("window", &format!("workspace:{}", window_id), "right");
         }
+    }
+
+    /// Minimize a window (remove from workspace layout and mark as iconified).
+    /// Returns `true` if the window was found and minimized, `false` if the
+    /// window ID did not exist or was already minimized.
+    pub fn minimize_window(&mut self, window_id: u64) -> bool {
+        let workspace_ok = self.workspace_manager.write().minimize_window(window_id);
+        let wm_ok = self.window_manager.write().minimize_window(window_id);
+        if workspace_ok || wm_ok {
+            info!("Minimized window {}", window_id);
+            self.effects_engine
+                .write()
+                .animate_window_minimize(window_id);
+            let _ = self.ipc_server.broadcast_state_change("window", &format!("active:{}", window_id), "minimized");
+        }
+        workspace_ok || wm_ok
+    }
+
+    /// Restore a previously minimized window back to its originating column.
+    /// Returns `true` if the window was found and restored.
+    pub fn restore_window(&mut self, window_id: u64) -> bool {
+        let workspace_ok = self.workspace_manager.write().restore_window(window_id);
+        let wm_ok = self.window_manager.write().restore_window(window_id);
+        if workspace_ok || wm_ok {
+            info!("Restored window {}", window_id);
+            self.effects_engine
+                .write()
+                .animate_window_restore(window_id);
+            let _ = self.ipc_server.broadcast_state_change("window", "minimized", &format!("active:{}", window_id));
+        }
+        workspace_ok || wm_ok
+    }
+
+    /// Toggle fullscreen on a window.
+    pub fn toggle_fullscreen(&mut self, window_id: u64) {
+        self.window_manager.write().toggle_fullscreen(window_id);
+        info!("Toggled fullscreen for window {}", window_id);
+        let _ = self.ipc_server.broadcast_state_change("window", &format!("active:{}", window_id), "fullscreen_toggle");
     }
 
     /// Get current workspace information

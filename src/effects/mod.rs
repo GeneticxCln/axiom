@@ -519,6 +519,113 @@ impl EffectsEngine {
         info!("🎬 Started window close animation for window {}", window_id);
     }
 
+    /// Start a minimize animation for the given window.
+    /// Animates scale → 0 and opacity → 0 using spring physics so the
+    /// window smoothly shrinks and fades out before the workspace layout
+    /// skips it. Idempotent when already minimized.
+    pub fn animate_window_minimize(&mut self, window_id: u64) {
+        if !self.animations_enabled || !self.config.enabled {
+            return;
+        }
+
+        // Ensure effect state exists
+        self.window_effects.entry(window_id).or_default();
+
+        let current_scale = self
+            .window_effects
+            .get(&window_id)
+            .map(|e| e.scale)
+            .unwrap_or(1.0);
+        let current_opacity = self
+            .window_effects
+            .get(&window_id)
+            .map(|e| e.opacity)
+            .unwrap_or(1.0);
+
+        self.animation_controller.start_spring_animation(
+            window_id,
+            "scale".to_string(),
+            0.0,
+            Some(current_scale),
+            Some(animations::SpringParams {
+                stiffness: 250.0,
+                damping: 22.0,
+                mass: 1.0,
+                precision: 0.005,
+            }),
+        );
+        self.animation_controller.start_spring_animation(
+            window_id,
+            "opacity".to_string(),
+            0.0,
+            Some(current_opacity),
+            Some(animations::SpringParams {
+                stiffness: 250.0,
+                damping: 22.0,
+                mass: 1.0,
+                precision: 0.005,
+            }),
+        );
+
+        info!("🎬 Started minimize animation for window {}", window_id);
+    }
+
+    /// Start a restore animation for the given window.
+    /// Animates scale → 1 and opacity → 1 from whatever their current
+    /// (possibly minimized) values are. Idempotent when already visible.
+    pub fn animate_window_restore(&mut self, window_id: u64) {
+        if !self.animations_enabled || !self.config.enabled {
+            self.window_effects.entry(window_id).or_insert_with(|| {
+                WindowEffectState {
+                    scale: 1.0,
+                    opacity: 1.0,
+                    ..WindowEffectState::default()
+                }
+            });
+            return;
+        }
+
+        self.window_effects.entry(window_id).or_default();
+
+        let current_scale = self
+            .window_effects
+            .get(&window_id)
+            .map(|e| e.scale)
+            .unwrap_or(0.0);
+        let current_opacity = self
+            .window_effects
+            .get(&window_id)
+            .map(|e| e.opacity)
+            .unwrap_or(0.0);
+
+        self.animation_controller.start_spring_animation(
+            window_id,
+            "scale".to_string(),
+            1.0,
+            Some(current_scale),
+            Some(animations::SpringParams {
+                stiffness: 300.0,
+                damping: 25.0,
+                mass: 1.0,
+                precision: 0.005,
+            }),
+        );
+        self.animation_controller.start_spring_animation(
+            window_id,
+            "opacity".to_string(),
+            1.0,
+            Some(current_opacity),
+            Some(animations::SpringParams {
+                stiffness: 300.0,
+                damping: 25.0,
+                mass: 1.0,
+                precision: 0.005,
+            }),
+        );
+
+        info!("🎬 Started restore animation for window {}", window_id);
+    }
+
     /// Start a window movement animation (routed through AnimationController)
     pub fn animate_window_move(&mut self, window_id: u64, from: (f32, f32), to: (f32, f32)) {
         if !self.animations_enabled || !self.config.enabled {
@@ -668,6 +775,16 @@ impl EffectsEngine {
         self.config.enabled
     }
 
+    /// Whether blur is enabled in the current live config.
+    pub fn is_blur_enabled(&self) -> bool {
+        self.blur_params.enabled
+    }
+
+    /// Read access to the current blur parameters.
+    pub fn blur_params(&self) -> &BlurParams {
+        &self.blur_params
+    }
+
     /// Enable or disable animations
     pub fn set_animations_enabled(&mut self, enabled: bool) {
         self.animations_enabled = enabled;
@@ -700,9 +817,22 @@ impl EffectsEngine {
         self.config.enabled = !self.config.enabled;
     }
 
-    // Temporary no-op to satisfy benches that call this API. In future, wire to actual blur control per window.
-    pub fn set_window_blur(&mut self, _window_id: u64, _radius: f32) {
-        // Intentionally left as no-op for now.
+    /// Set per-window blur radius.  Radius ≤ 0 disables blur for this
+    /// window; values > [`MAX_EFFECTS_BLUR_RADIUS_PX`] are clamped.
+    /// The new blur is applied as a spring animation on the next
+    /// [`update()`](EffectsEngine::update) tick.
+    pub fn set_window_blur(&mut self, window_id: u64, radius: f32) {
+        const MAX_RADIUS: f32 = 32.0;
+        let clamped = radius.clamp(0.0, MAX_RADIUS);
+        let state = self
+            .window_effects
+            .entry(window_id)
+            .or_default();
+        state.blur_radius = clamped;
+        debug!(
+            "Per-window blur set — window {} radius {:.1}",
+            window_id, clamped
+        );
     }
 
     /// Apply a [`crate::ipc::LazyUIMessage::EffectsControl`] payload to
