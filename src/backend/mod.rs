@@ -63,8 +63,8 @@ use smithay::{
             decoration::{XdgDecorationHandler, XdgDecorationState},
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
         },
-shm::{with_buffer_contents, ShmHandler, ShmState},
-},
+        shm::{with_buffer_contents, ShmHandler, ShmState},
+    },
 };
 
 use wayland_server::{
@@ -76,7 +76,6 @@ use wayland_server::{
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
 
 pub mod drm;
-mod shm_upload;
 mod xwayland_dispatch;
 pub mod xwm;
 use self::xwm::AxiomXwm;
@@ -193,16 +192,10 @@ pub struct State {
     pub pointer_x: f64,
     pub pointer_y: f64,
 
-    // GL texture cache for client SHM buffers (surface_id → GL texture handle)
-    pub texture_cache: HashMap<u32, gl::types::GLuint>,
-
-    // Raw SHM buffer data cache for pending GL texture uploads
-    // (stored in commit handler, consumed in render() after backend.bind())
+    // Raw SHM buffer data cache for pending WGPU texture uploads
+    // (stored in commit handler, consumed in render() via renderer.upload_shm_to_wgpu)
     pub buffer_cache: HashMap<u32, Vec<u8>>,
     pub buffer_cache_dimensions: HashMap<u32, (i32, i32)>,
-
-    // GL texture handles pending deletion (cleaned up in render() with GL context)
-    pub dead_tex_handles: Vec<gl::types::GLuint>,
 
     /// Tracks whether we've sent the initial configure for a surface.
     /// Used to throttle redundant configure events when layout hasn't changed.
@@ -327,10 +320,7 @@ impl State {
 
         if let Some(data) = self.surfaces.remove(&surface_id) {
             if let Some(window_id) = data.window_id {
-                info!(
-                    "Destroying window {} (was: \"{}\")",
-                    window_id, data.title
-                );
+                info!("Destroying window {} (was: \"{}\")", window_id, data.title);
                 self.window_map.remove(&window_id);
                 self.window_manager.write().remove_window(window_id);
                 self.workspace_manager.write().remove_window(window_id);
@@ -358,10 +348,7 @@ impl State {
     /// Reads directly from the focused workspace tape to avoid a
     /// duplicate source of truth. Falls back to 1.0.
     pub fn focused_output_scale(&self) -> f64 {
-        self.workspace_manager
-            .read()
-            .active_tape()
-            .scale_factor()
+        self.workspace_manager.read().active_tape().scale_factor()
     }
 
     /// Prune surfaces and toplevels whose WlSurface is no longer alive
@@ -376,10 +363,6 @@ impl State {
 
         let count = dead_surface_ids.len();
         for surface_id in dead_surface_ids {
-            // Queue GL texture for deferred deletion (no GL context here)
-            if let Some(tex) = self.texture_cache.remove(&surface_id) {
-                self.dead_tex_handles.push(tex);
-            }
             // Drop cached buffer data
             self.buffer_cache.remove(&surface_id);
             self.buffer_cache_dimensions.remove(&surface_id);
@@ -555,11 +538,7 @@ impl SeatHandler for State {
         }
     }
 
-    fn cursor_image(
-        &mut self,
-        _seat: &Seat<Self>,
-        image: CursorImageStatus,
-    ) {
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
         match image {
             CursorImageStatus::Named(icon) => self.cursor_icon = Some(icon),
             _ => self.cursor_icon = None,
@@ -593,7 +572,8 @@ impl XdgShellHandler for State {
         surface.send_configure();
 
         // Track the initial configure so render() doesn't immediately re-configure
-        self.configured_sizes.insert(surface_id, (logical_w, logical_h));
+        self.configured_sizes
+            .insert(surface_id, (logical_w, logical_h));
         self.pending_configure.insert(surface_id);
 
         // Keep the ToplevelSurface alive — it is destroyed when dropped
@@ -770,7 +750,9 @@ impl XdgDecorationHandler for State {
                 Mode::ServerSide => crate::decoration::DecorationMode::ServerSide,
                 _ => return,
             };
-            self.decoration_manager.write().set_decoration_mode(window_id, dm_mode);
+            self.decoration_manager
+                .write()
+                .set_decoration_mode(window_id, dm_mode);
         }
     }
 
@@ -782,10 +764,9 @@ impl XdgDecorationHandler for State {
         toplevel.send_configure();
 
         if let Some(window_id) = self.window_id_for_surface(toplevel.wl_surface()) {
-            self.decoration_manager.write().set_decoration_mode(
-                window_id,
-                crate::decoration::DecorationMode::ServerSide,
-            );
+            self.decoration_manager
+                .write()
+                .set_decoration_mode(window_id, crate::decoration::DecorationMode::ServerSide);
         }
     }
 }
@@ -814,22 +795,15 @@ pub struct AxiomSmithayBackendReal {
     /// DRM backend state (scaffolding; `Some` only when `backend_kind == Drm`).
     pub drm_backend: Option<DrmBackend>,
     pub clients: Vec<Client>,
-    /// GLES 2.0 shader program for rendering client textures
-    pub shader_program: Option<gl::types::GLuint>,
+    /// GLES 2.0 shader program for the final fullscreen blit (only GL state kept).
+    blit_shader: Option<gl::types::GLuint>,
+    /// Persistent GL texture for uploading the WGPU-composed frame.
+    /// `(handle, width, height)` — reuses the same texture when dimensions unchanged.
+    blit_texture: Option<(gl::types::GLuint, u32, u32)>,
     /// Wayland listening socket — kept alive so clients can connect
     /// (Smithay's display.dispatch_clients polls it internally)
     #[allow(dead_code)]
     listener: Option<ListeningSocket>,
-    /// Persistent GL upload texture for the WGPU-composed frame.
-    ///
-    /// `(handle, width, height)` — the size tuple drives the
-    /// TexSubImage2D-when-same vs TexImage2D-when-resized choice in
-    /// `shm_upload::update_persistent_texture`. Replaces the
-    /// per-frame `GenTextures + TexImage2D + DeleteTextures` trinity
-    /// (60 allocs/sec at 60Hz) the audit flagged as Design 15. Lazily
-    /// allocated on first compose; recompiled when viewport changes;
-    /// freed in `shutdown()` while the GL context is still bound.
-    compose_upload_texture: Option<(gl::types::GLuint, u32, u32)>,
     /// Set to `true` when a decoration button press was consumed (e.g.
     /// close/minimize). The subsequent release event must be consumed too
     /// so Wayland clients don't receive mismatched button-release without
@@ -859,8 +833,6 @@ enum WindowInteraction {
         start_y: f64,
     },
 }
-
-
 
 impl AxiomSmithayBackendReal {
     /// Test-only constructor that skips Wayland socket bind and display creation.
@@ -918,10 +890,8 @@ impl AxiomSmithayBackendReal {
             window_height: 1080,
             pointer_x: 0.0,
             pointer_y: 0.0,
-            texture_cache: HashMap::new(),
             buffer_cache: HashMap::new(),
             buffer_cache_dimensions: HashMap::new(),
-            dead_tex_handles: Vec::new(),
             configured_sizes: HashMap::new(),
             pending_configure: HashSet::new(),
             popups: HashMap::new(),
@@ -940,9 +910,9 @@ impl AxiomSmithayBackendReal {
             winit_event_loop: None,
             drm_backend: None,
             clients: Vec::new(),
-            shader_program: None,
+            blit_shader: None,
+            blit_texture: None,
             listener: None,
-            compose_upload_texture: None,
             decoration_consumed_press: false,
             interaction: None,
         })
@@ -995,7 +965,12 @@ impl AxiomSmithayBackendReal {
             size: (1920, 1080).into(),
             refresh: 60_000,
         };
-        output.change_current_state(Some(mode), Some(Transform::Normal), Some(Scale::Integer(1)), None);
+        output.change_current_state(
+            Some(mode),
+            Some(Transform::Normal),
+            Some(Scale::Integer(1)),
+            None,
+        );
         output.create_global::<State>(&dh);
 
         let state = State {
@@ -1027,10 +1002,8 @@ impl AxiomSmithayBackendReal {
             window_height: 1080,
             pointer_x: 0.0,
             pointer_y: 0.0,
-            texture_cache: HashMap::new(),
             buffer_cache: HashMap::new(),
             buffer_cache_dimensions: HashMap::new(),
-            dead_tex_handles: Vec::new(),
             configured_sizes: HashMap::new(),
             pending_configure: HashSet::new(),
             popups: HashMap::new(),
@@ -1049,7 +1022,10 @@ impl AxiomSmithayBackendReal {
             BackendKind::Drm => {
                 let mut drm = DrmBackend::new();
                 let _ = drm.initialize().unwrap_or_else(|e| {
-                    warn!("DRM backend initialization failed: {} — proceeding with DRM stub", e);
+                    warn!(
+                        "DRM backend initialization failed: {} — proceeding with DRM stub",
+                        e
+                    );
                     0
                 });
                 Some(drm)
@@ -1066,9 +1042,9 @@ impl AxiomSmithayBackendReal {
             winit_event_loop: None,
             drm_backend,
             clients: Vec::new(),
-            shader_program: None,
+            blit_shader: None,
+            blit_texture: None,
             listener: Some(listener),
-            compose_upload_texture: None,
             decoration_consumed_press: false,
             interaction: None,
         })
@@ -1154,7 +1130,11 @@ impl AxiomSmithayBackendReal {
                     (physical_mm_width, physical_mm_height).into()
                 } else {
                     // Fallback for missing EDID: estimate from 96 DPI.
-                    ((kms_out.width as i32 * 254 / 960).max(1), (kms_out.height as i32 * 254 / 960).max(1)).into()
+                    (
+                        (kms_out.width as i32 * 254 / 960).max(1),
+                        (kms_out.height as i32 * 254 / 960).max(1),
+                    )
+                        .into()
                 };
 
                 let output = Output::new(
@@ -1171,7 +1151,12 @@ impl AxiomSmithayBackendReal {
                     refresh: kms_out.mode.vrefresh() as i32,
                 };
                 let scale_i32 = kms_out.scale_factor.round().max(1.0) as i32;
-                output.change_current_state(Some(mode), Some(Transform::Normal), Some(Scale::Integer(scale_i32)), None);
+                output.change_current_state(
+                    Some(mode),
+                    Some(Transform::Normal),
+                    Some(Scale::Integer(scale_i32)),
+                    None,
+                );
                 output.create_global::<State>(&dh);
 
                 self.state.outputs.push(output);
@@ -1218,10 +1203,7 @@ impl AxiomSmithayBackendReal {
                     } else {
                         first.name.clone()
                     };
-                    self.state
-                        .workspace_manager
-                        .write()
-                        .focused_output = first_name;
+                    self.state.workspace_manager.write().focused_output = first_name;
                 }
             }
         }
@@ -1261,7 +1243,9 @@ impl AxiomSmithayBackendReal {
     /// the current KMS state. This is simple and correct even when the
     /// display topology changes dramatically.
     fn call_drm_reenumerate_and_sync(&mut self) {
-        let Some(ref drm_backend) = self.drm_backend else { return };
+        let Some(ref drm_backend) = self.drm_backend else {
+            return;
+        };
 
         // Re-create compositor outputs from current KMS state.
         self.state.outputs.clear();
@@ -1270,20 +1254,27 @@ impl AxiomSmithayBackendReal {
         let dh = self.display.handle();
         let kms_outputs = drm_backend.kms_outputs();
         for (i, kms_out) in kms_outputs.iter().enumerate() {
-        let output_name = if kms_out.name.is_empty() {
+            let output_name = if kms_out.name.is_empty() {
                 format!("Axiom-Output-{}", i)
-        } else {
+            } else {
                 kms_out.name.clone()
-        };
+            };
 
-        let phys_size = if kms_out.physical_width_mm > 0 && kms_out.physical_height_mm > 0 {
-                (kms_out.physical_width_mm as i32, kms_out.physical_height_mm as i32).into()
-        } else {
-                ((kms_out.width as i32 * 254 / 960).max(1),
-                 (kms_out.height as i32 * 254 / 960).max(1)).into()
-        };
+            let phys_size = if kms_out.physical_width_mm > 0 && kms_out.physical_height_mm > 0 {
+                (
+                    kms_out.physical_width_mm as i32,
+                    kms_out.physical_height_mm as i32,
+                )
+                    .into()
+            } else {
+                (
+                    (kms_out.width as i32 * 254 / 960).max(1),
+                    (kms_out.height as i32 * 254 / 960).max(1),
+                )
+                    .into()
+            };
 
-        let output = Output::new(
+            let output = Output::new(
                 output_name.clone(),
                 PhysicalProperties {
                     size: phys_size,
@@ -1291,28 +1282,38 @@ impl AxiomSmithayBackendReal {
                     make: "Axiom".into(),
                     model: format!("Display-{}", i),
                 },
-        );
-        let mode = OutputMode {
+            );
+            let mode = OutputMode {
                 size: (kms_out.width as i32, kms_out.height as i32).into(),
                 refresh: kms_out.mode.vrefresh() as i32,
-        };
-        let scale_i32 = kms_out.scale_factor.round().max(1.0) as i32;
-        output.change_current_state(Some(mode), Some(Transform::Normal), Some(Scale::Integer(scale_i32)), None);
-        output.create_global::<State>(&dh);
+            };
+            let scale_i32 = kms_out.scale_factor.round().max(1.0) as i32;
+            output.change_current_state(
+                Some(mode),
+                Some(Transform::Normal),
+                Some(Scale::Integer(scale_i32)),
+                None,
+            );
+            output.create_global::<State>(&dh);
 
-        self.state.outputs.push(output);
-        self.state.output_scale_factors.insert(output_name.clone(), kms_out.scale_factor);
+            self.state.outputs.push(output);
+            self.state
+                .output_scale_factors
+                .insert(output_name.clone(), kms_out.scale_factor);
 
-        let mut wm = self.state.workspace_manager.write();
-        let tape = wm.ensure_tape(&output_name);
-        tape.set_scale_factor(kms_out.scale_factor);
+            let mut wm = self.state.workspace_manager.write();
+            let tape = wm.ensure_tape(&output_name);
+            tape.set_scale_factor(kms_out.scale_factor);
         }
 
         // Update primary viewport from first output.
         if let Some(first) = kms_outputs.first() {
-        self.state.window_width = first.width;
-        self.state.window_height = first.height;
-            self.state.workspace_manager.write().set_viewport_size(first.width as f64, first.height as f64);
+            self.state.window_width = first.width;
+            self.state.window_height = first.height;
+            self.state
+                .workspace_manager
+                .write()
+                .set_viewport_size(first.width as f64, first.height as f64);
 
             let first_name = if first.name.is_empty() {
                 "Axiom-Output-0".to_string()
@@ -1470,12 +1471,8 @@ impl AxiomSmithayBackendReal {
     /// events and Axiom InputManager actions.
     fn handle_libinput_event(&mut self, event: input::Event) {
         use input::event::{
-            pointer::PointerEventTrait as _,
-            keyboard::KeyboardEventTrait as _,
-            EventTrait as _,
-            DeviceEvent,
-            KeyboardEvent,
-            PointerEvent,
+            keyboard::KeyboardEventTrait as _, pointer::PointerEventTrait as _, DeviceEvent,
+            EventTrait as _, KeyboardEvent, PointerEvent,
         };
 
         match event {
@@ -1501,8 +1498,7 @@ impl AxiomSmithayBackendReal {
                     let pressed = key_ev.key_state() == input::event::keyboard::KeyState::Pressed;
 
                     let input_manager = self.state.input_manager.clone();
-                    let pending_actions =
-                        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                    let pending_actions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
                     let pending_clone = pending_actions.clone();
 
                     let smithay_state = if pressed {
@@ -1521,8 +1517,7 @@ impl AxiomSmithayBackendReal {
                             if pressed {
                                 let syms = handle.modified_syms();
                                 if let Some(keysym) = syms.first() {
-                                    let key_name =
-                                        xkbcommon::xkb::keysym_get_name(*keysym);
+                                    let key_name = xkbcommon::xkb::keysym_get_name(*keysym);
 
                                     let mut mod_names: Vec<String> = Vec::new();
                                     if modifiers.ctrl {
@@ -1550,14 +1545,15 @@ impl AxiomSmithayBackendReal {
                                         pressed: true,
                                     };
 
-                                    let actions = input_manager
-                                        .write()
-                                        .process_input_event(axiom_event);
+                                    let actions =
+                                        input_manager.write().process_input_event(axiom_event);
 
                                     if !actions.is_empty() {
                                         debug!("⌨️ DRM global shortcut: {}", key_combo);
                                         *pending_clone.borrow_mut() = actions;
-                                        return smithay::input::keyboard::FilterResult::Intercept(());
+                                        return smithay::input::keyboard::FilterResult::Intercept(
+                                            (),
+                                        );
                                     }
                                 }
                             }
@@ -1576,8 +1572,10 @@ impl AxiomSmithayBackendReal {
                 PointerEvent::Motion(motion) => {
                     let dx = motion.dx();
                     let dy = motion.dy();
-                    self.state.pointer_x = (self.state.pointer_x + dx).clamp(0.0, f64::from(self.state.window_width));
-                    self.state.pointer_y = (self.state.pointer_y + dy).clamp(0.0, f64::from(self.state.window_height));
+                    self.state.pointer_x =
+                        (self.state.pointer_x + dx).clamp(0.0, f64::from(self.state.window_width));
+                    self.state.pointer_y =
+                        (self.state.pointer_y + dy).clamp(0.0, f64::from(self.state.window_height));
 
                     // Interactive move/resize consumes the motion event.
                     if self.handle_interaction(self.state.pointer_x, self.state.pointer_y) {
@@ -1589,11 +1587,11 @@ impl AxiomSmithayBackendReal {
 
                     if let Some(pointer) = self.state.seat.get_pointer() {
                         let floating = self.floating_rects();
-                        let under = self
-                            .state
-                            .workspace_manager
-                            .read()
-                            .element_under(self.state.pointer_x, self.state.pointer_y, &floating);
+                        let under = self.state.workspace_manager.read().element_under(
+                            self.state.pointer_x,
+                            self.state.pointer_y,
+                            &floating,
+                        );
                         let focus = under.and_then(|(window_id, (sx, sy))| {
                             self.state
                                 .window_map
@@ -1730,14 +1728,22 @@ impl AxiomSmithayBackendReal {
                     // NOT be forwarded to Smithay (no unmatched button-release
                     // delivered to Wayland clients).
                     if pressed {
-                        if self.handle_decoration_button(self.state.pointer_x, self.state.pointer_y, true) {
+                        if self.handle_decoration_button(
+                            self.state.pointer_x,
+                            self.state.pointer_y,
+                            true,
+                        ) {
                             // Release the consumed state so the next
                             // unrelated button press starts clean.
                             self.decoration_consumed_press = false;
                             return;
                         }
                     } else if self.decoration_consumed_press {
-                        self.handle_decoration_button(self.state.pointer_x, self.state.pointer_y, false);
+                        self.handle_decoration_button(
+                            self.state.pointer_x,
+                            self.state.pointer_y,
+                            false,
+                        );
                         self.decoration_consumed_press = false;
                         return;
                     }
@@ -1764,20 +1770,15 @@ impl AxiomSmithayBackendReal {
                             let amount =
                                 scroll.scroll_value(input::event::pointer::Axis::Horizontal);
                             if amount.abs() > 0.0 {
-                                axis_frame = axis_frame.value(
-                                    smithay::backend::input::Axis::Horizontal,
-                                    amount,
-                                );
+                                axis_frame = axis_frame
+                                    .value(smithay::backend::input::Axis::Horizontal, amount);
                             }
                         }
                         if scroll.has_axis(input::event::pointer::Axis::Vertical) {
-                            let amount =
-                                scroll.scroll_value(input::event::pointer::Axis::Vertical);
+                            let amount = scroll.scroll_value(input::event::pointer::Axis::Vertical);
                             if amount.abs() > 0.0 {
-                                axis_frame = axis_frame.value(
-                                    smithay::backend::input::Axis::Vertical,
-                                    amount,
-                                );
+                                axis_frame = axis_frame
+                                    .value(smithay::backend::input::Axis::Vertical, amount);
                             }
                         }
 
@@ -1797,20 +1798,15 @@ impl AxiomSmithayBackendReal {
                             let amount =
                                 scroll.scroll_value(input::event::pointer::Axis::Horizontal);
                             if amount.abs() > 0.0 {
-                                axis_frame = axis_frame.value(
-                                    smithay::backend::input::Axis::Horizontal,
-                                    amount,
-                                );
+                                axis_frame = axis_frame
+                                    .value(smithay::backend::input::Axis::Horizontal, amount);
                             }
                         }
                         if scroll.has_axis(input::event::pointer::Axis::Vertical) {
-                            let amount =
-                                scroll.scroll_value(input::event::pointer::Axis::Vertical);
+                            let amount = scroll.scroll_value(input::event::pointer::Axis::Vertical);
                             if amount.abs() > 0.0 {
-                                axis_frame = axis_frame.value(
-                                    smithay::backend::input::Axis::Vertical,
-                                    amount,
-                                );
+                                axis_frame = axis_frame
+                                    .value(smithay::backend::input::Axis::Vertical, amount);
                             }
                         }
 
@@ -1830,20 +1826,15 @@ impl AxiomSmithayBackendReal {
                             let amount =
                                 scroll.scroll_value(input::event::pointer::Axis::Horizontal);
                             if amount.abs() > 0.0 {
-                                axis_frame = axis_frame.value(
-                                    smithay::backend::input::Axis::Horizontal,
-                                    amount,
-                                );
+                                axis_frame = axis_frame
+                                    .value(smithay::backend::input::Axis::Horizontal, amount);
                             }
                         }
                         if scroll.has_axis(input::event::pointer::Axis::Vertical) {
-                            let amount =
-                                scroll.scroll_value(input::event::pointer::Axis::Vertical);
+                            let amount = scroll.scroll_value(input::event::pointer::Axis::Vertical);
                             if amount.abs() > 0.0 {
-                                axis_frame = axis_frame.value(
-                                    smithay::backend::input::Axis::Vertical,
-                                    amount,
-                                );
+                                axis_frame = axis_frame
+                                    .value(smithay::backend::input::Axis::Vertical, amount);
                             }
                         }
 
@@ -1865,7 +1856,6 @@ impl AxiomSmithayBackendReal {
 
     /// Common post-event dispatch for all backends.
     fn run_one_cycle_common(&mut self) -> Result<()> {
-
         // Poll X11 events from XWayland (if XWM is wired).
         // The X11 selection/clipboard dispatch lives in xwayland_dispatch.rs.
         self::xwayland_dispatch::poll_and_dispatch_events(&mut self.state)?;
@@ -2085,12 +2075,20 @@ impl AxiomSmithayBackendReal {
                 // Decoration hit-testing: close/minimize/maximize buttons
                 // on server-side decorations.
                 if pressed {
-                    if self.handle_decoration_button(self.state.pointer_x, self.state.pointer_y, true) {
+                    if self.handle_decoration_button(
+                        self.state.pointer_x,
+                        self.state.pointer_y,
+                        true,
+                    ) {
                         self.decoration_consumed_press = false;
                         return;
                     }
                 } else if self.decoration_consumed_press {
-                    self.handle_decoration_button(self.state.pointer_x, self.state.pointer_y, false);
+                    self.handle_decoration_button(
+                        self.state.pointer_x,
+                        self.state.pointer_y,
+                        false,
+                    );
                     self.decoration_consumed_press = false;
                     return;
                 }
@@ -2147,7 +2145,10 @@ impl AxiomSmithayBackendReal {
                                 let speed = self.state.config.workspace.scroll_speed;
                                 let velocity = amount * speed * 8.0;
                                 if velocity.abs() > 0.0 {
-                                    self.state.workspace_manager.write().start_momentum_scroll(velocity);
+                                    self.state
+                                        .workspace_manager
+                                        .write()
+                                        .start_momentum_scroll(velocity);
                                     self.state.needs_redraw = true;
                                 }
                             }
@@ -2206,12 +2207,8 @@ impl AxiomSmithayBackendReal {
                 if let Some(w) = wm.get_window_mut(window_id) {
                     use crate::decoration::ResizeEdge;
                     let (new_x, new_y, new_w, new_h) = match edge {
-                        ResizeEdge::Right => {
-                            (ix, iy, (iw as i32 + dx).max(100) as u32, ih)
-                        }
-                        ResizeEdge::Bottom => {
-                            (ix, iy, iw, (ih as i32 + dy).max(100) as u32)
-                        }
+                        ResizeEdge::Right => (ix, iy, (iw as i32 + dx).max(100) as u32, ih),
+                        ResizeEdge::Bottom => (ix, iy, iw, (ih as i32 + dy).max(100) as u32),
                         ResizeEdge::BottomRight => {
                             let w = (iw as i32 + dx).max(100) as u32;
                             let h = (ih as i32 + dy).max(100) as u32;
@@ -2258,12 +2255,7 @@ impl AxiomSmithayBackendReal {
     /// `PointerHandle::button`. On release the decoration pressed states are
     /// cleared regardless, but the `decoration_consumed_press` flag is also
     /// consulted to decide whether to forward the release to Smithay.
-    fn handle_decoration_button(
-        &mut self,
-        pointer_x: f64,
-        pointer_y: f64,
-        pressed: bool,
-    ) -> bool {
+    fn handle_decoration_button(&mut self, pointer_x: f64, pointer_y: f64, pressed: bool) -> bool {
         if pressed {
             // Find the window under the cursor.
             let floating = self.floating_rects();
@@ -2306,13 +2298,25 @@ impl AxiomSmithayBackendReal {
                 Some(crate::decoration::DecorationAction::Minimize) => {
                     let is_minimized = self.state.window_manager.read().is_minimized(window_id);
                     if is_minimized {
-                        self.state.workspace_manager.write().restore_window(window_id);
+                        self.state
+                            .workspace_manager
+                            .write()
+                            .restore_window(window_id);
                         self.state.window_manager.write().restore_window(window_id);
-                        self.state.effects_engine.write().animate_window_restore(window_id);
+                        self.state
+                            .effects_engine
+                            .write()
+                            .animate_window_restore(window_id);
                     } else {
-                        self.state.workspace_manager.write().minimize_window(window_id);
+                        self.state
+                            .workspace_manager
+                            .write()
+                            .minimize_window(window_id);
                         self.state.window_manager.write().minimize_window(window_id);
-                        self.state.effects_engine.write().animate_window_minimize(window_id);
+                        self.state
+                            .effects_engine
+                            .write()
+                            .animate_window_minimize(window_id);
                     }
                     self.state.needs_redraw = true;
                     self.decoration_consumed_press = true;
@@ -2552,10 +2556,7 @@ impl AxiomSmithayBackendReal {
                 CompositorAction::ToggleFloating => {
                     let focused_id = self.state.window_manager.read().focused_window_id();
                     if let Some(window_id) = focused_id {
-                        self.state
-                            .window_manager
-                            .write()
-                            .toggle_floating(window_id);
+                        self.state.window_manager.write().toggle_floating(window_id);
                         self.state
                             .workspace_manager
                             .write()
@@ -2566,20 +2567,13 @@ impl AxiomSmithayBackendReal {
                 CompositorAction::ToggleMinimize => {
                     let focused_id = self.state.window_manager.read().focused_window_id();
                     if let Some(window_id) = focused_id {
-                        let is_minimized = self
-                            .state
-                            .window_manager
-                            .read()
-                            .is_minimized(window_id);
+                        let is_minimized = self.state.window_manager.read().is_minimized(window_id);
                         if is_minimized {
                             self.state
                                 .workspace_manager
                                 .write()
                                 .restore_window(window_id);
-                            self.state
-                                .window_manager
-                                .write()
-                                .restore_window(window_id);
+                            self.state.window_manager.write().restore_window(window_id);
                             self.state
                                 .effects_engine
                                 .write()
@@ -2590,10 +2584,7 @@ impl AxiomSmithayBackendReal {
                                 .workspace_manager
                                 .write()
                                 .minimize_window(window_id);
-                            self.state
-                                .window_manager
-                                .write()
-                                .minimize_window(window_id);
+                            self.state.window_manager.write().minimize_window(window_id);
                             self.state
                                 .effects_engine
                                 .write()
@@ -2621,7 +2612,10 @@ impl AxiomSmithayBackendReal {
                     let mut ee = self.state.effects_engine.write();
                     let new_enabled = !ee.is_enabled();
                     ee.apply_live_effects_control(Some(new_enabled), None, None);
-                    info!("✨ Toggle effects: {}", if new_enabled { "enabled" } else { "disabled" });
+                    info!(
+                        "✨ Toggle effects: {}",
+                        if new_enabled { "enabled" } else { "disabled" }
+                    );
                     self.state.needs_redraw = true;
                 }
                 CompositorAction::LaunchTerminal => {
@@ -2653,7 +2647,11 @@ impl AxiomSmithayBackendReal {
         }
     }
 
-    /// Render the current frame using GL scissor-based window placeholders
+    /// Render the current frame via WGPU compositing + single GL blit.
+    ///
+    /// All window compositing and effects happen on the GPU via WGPU's
+    /// `compose_full_frame`. The result is uploaded as a single GL texture
+    /// and blitted to the framebuffer with one fullscreen quad draw.
     fn render(&mut self) -> Result<()> {
         let Some(backend) = self.winit_backend.as_mut() else {
             return Ok(());
@@ -2732,278 +2730,169 @@ impl AxiomSmithayBackendReal {
             }
         }
 
-        // Bind OpenGL context
-        backend.bind()?;
+        // ── WGPU Compositing ────────────────────────────────────────────
+        // Drain the SHM buffer cache and upload each entry to the renderer
+        // as WGPU textures. This replaces the old GL texture upload path.
+        if let Some(ref renderer) = self.state.renderer {
+            let mut r = renderer.write();
 
-        // Delete any GPU textures queued for cleanup
-        // SAFETY: An active GL context is guaranteed by `backend.bind()` which
-        // is called above. Deleting texture handles that are no longer
-        // referenced is safe and idempotent once the context is current.
-        shm_upload::delete_textures(&mut self.state.dead_tex_handles);
+            // Build inverse map: surface_id → window_id for texture uploads.
+            let mut surface_to_window: HashMap<u32, u64> = HashMap::new();
+            for (&wid, &sid) in &self.state.window_map {
+                surface_to_window.insert(sid, wid);
+            }
 
-        // Lazily compile the GLES 2.0 shader program if not yet ready
-        let shader_prog = shm_upload::ensure_shader_program(&mut self.shader_program);
+            // Drain buffer_cache and upload to renderer as WGPU textures.
+            let pending: Vec<(u32, Vec<u8>, (i32, i32))> = {
+                let cache = &mut self.state.buffer_cache;
+                let dims = &mut self.state.buffer_cache_dimensions;
+                let pending: Vec<_> = cache
+                    .drain()
+                    .filter_map(|(sid, data)| {
+                        let d = dims.remove(&sid).unwrap_or((0, 0));
+                        if d.0 > 0 && d.1 > 0 {
+                            Some((sid, data, d))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                pending
+            };
 
-        // Drain the SHM buffer cache into a batched upload list, then upload
-        // each. Helper consolidates the filter + clone + clear logic that
-        // would otherwise re-clone the renderer/surface assumptions inline.
-        let pending_uploads = shm_upload::collect_pending_uploads(
-            &mut self.state.buffer_cache,
-            &mut self.state.buffer_cache_dimensions,
-            &self.state.texture_cache,
-        );
+            for (surface_id, data, (w, h)) in &pending {
+                if let Some(&window_id) = surface_to_window.get(surface_id) {
+                    r.update_window_texture(window_id, *w as u32, *h as u32, data);
+                }
+            }
 
-        for (surface_id, data, (w, h)) in &pending_uploads {
-            shm_upload::upload_gl_texture(&mut self.state.texture_cache, *surface_id, data, *w, *h);
-        }
-        if !pending_uploads.is_empty() {
-            shm_upload::gl_check_error("texture uploads");
-        }
-
-        // Render using GL
-        // SAFETY: GL context is current (backend.bind() succeeded above).
-        // ClearColor + Clear are always safe to call with a bound context.
-        unsafe {
-            gl::ClearColor(0.08, 0.08, 0.12, 1.0);
-            gl::Clear(gl::COLOR_BUFFER_BIT);
-        }
-        shm_upload::gl_check_error("render clear");
-
-        // SAFETY: GL context is current. All GL scissor/draw calls operate on
-        // the currently bound framebuffer which Smithay owns. `layouts` entries
-        // have been validated to be non-zero size before this block is entered.
-        unsafe {
+            // Sync window positions and sizes from layouts into the renderer.
+            // The compositor's prepare_frame_data() applies effects (scale,
+            // opacity, offset) and upserts rects, but the backend also needs
+            // to sync tiled layouts when the backend owns position updates.
             for (window_id, rect) in &layouts {
-                let w = (rect.width as i32).max(0);
-                let h = (rect.height as i32).max(0);
-                if w == 0 || h == 0 {
+                let x = rect.x as f32;
+                let y = rect.y as f32;
+                let w = rect.width as f32;
+                let h = rect.height as f32;
+                r.upsert_window_rect(*window_id, (x, y), (w, h), 1.0);
+            }
+
+            // Add floating windows to the renderer's window list.
+            {
+                let wm = self.state.window_manager.read();
+                for &window_id in self
+                    .state
+                    .workspace_manager
+                    .read()
+                    .floating_window_ids()
+                    .iter()
+                {
+                    if let Some(w) = wm.get_window(window_id) {
+                        let fx = w.window.position.0 as f32;
+                        let fy = w.window.position.1 as f32;
+                        let fw = w.window.size.0 as f32;
+                        let fh = w.window.size.1 as f32;
+                        r.upsert_window_rect(window_id, (fx, fy), (fw, fh), 1.0);
+                    }
+                }
+            }
+
+            // Add popups as temporary render entries (high IDs to avoid conflicts).
+            // Popups are drawn as textured quads like windows.
+            let popup_ids: Vec<u32> = self.state.popups.keys().copied().collect();
+            for popup_id in &popup_ids {
+                let popup = &self.state.popups[popup_id];
+                if !popup.committed {
                     continue;
                 }
-
-                // Flip Y for OpenGL (origin at bottom-left)
-                let y = (wh as i32)
-                    .saturating_sub(rect.y)
-                    .saturating_sub(rect.height as i32);
-                let y = y.max(0);
-
-                let surface_id = self.state.window_map.get(window_id).copied();
-                let tex = surface_id.and_then(|sid| self.state.texture_cache.get(&sid).copied());
-                let has_buffer = surface_id
-                    .and_then(|sid| self.state.surfaces.get(&sid))
-                    .map(|s| s.committed)
-                    .unwrap_or(false);
-
-                if let Some(tex_id) = tex {
-                    // Draw actual client texture using GLES 2.0 shader
-                    shm_upload::draw_textured_quad(
-                        shader_prog,
-                        tex_id,
-                        &shm_upload::TexQuadParams {
-                            x: rect.x,
-                            y,
-                            w,
-                            h,
-                            screen_w: ww,
-                            screen_h: wh,
-                            alpha: 1.0,
-                        },
-                    );
-                } else {
-                    // Scissor-based colored placeholder
-                    gl::Enable(gl::SCISSOR_TEST);
-                    gl::Scissor(rect.x, y, w, h);
-                    if has_buffer {
-                        gl::ClearColor(0.15, 0.15, 0.18, 1.0);
-                    } else {
-                        gl::ClearColor(0.12, 0.12, 0.15, 1.0);
-                    }
-                    gl::Clear(gl::COLOR_BUFFER_BIT);
-                    gl::Disable(gl::SCISSOR_TEST);
-                }
-            }
-        }
-        shm_upload::gl_check_error("tiled window rendering");
-
-        // Render floating windows (manually positioned) on top of tiled ones.
-        unsafe {
-            let wm = self.state.window_manager.read();
-            for &window_id in self.state.workspace_manager.read().floating_window_ids().iter() {
-                if let Some(w) = wm.get_window(window_id) {
-                    let fx = w.window.position.0;
-                    let fy = w.window.position.1;
-                    let fw = w.window.size.0 as i32;
-                    let fh = w.window.size.1 as i32;
-                    if fw <= 0 || fh <= 0 {
-                        continue;
-                    }
-                    // Flip Y for OpenGL.
-                    let y = (wh as i32).saturating_sub(fy).saturating_sub(fh).max(0);
-                    let surface_id = self.state.window_map.get(&window_id).copied();
-                    let tex = surface_id.and_then(|sid| self.state.texture_cache.get(&sid).copied());
-                    let has_buffer = surface_id
-                        .and_then(|sid| self.state.surfaces.get(&sid))
-                        .map(|s| s.committed)
-                        .unwrap_or(false);
-                    if let Some(tex_id) = tex {
-                        shm_upload::draw_textured_quad(
-                            shader_prog,
-                            tex_id,
-                            &shm_upload::TexQuadParams {
-                                x: fx,
-                                y,
-                                w: fw,
-                                h: fh,
-                                screen_w: ww,
-                                screen_h: wh,
-                                alpha: 1.0,
-                            },
-                        );
-                    } else {
-                        gl::Enable(gl::SCISSOR_TEST);
-                        gl::Scissor(fx, y, fw, fh);
-                        if has_buffer {
-                            gl::ClearColor(0.15, 0.15, 0.18, 1.0);
+                // Find parent window position for absolute popup placement
+                let (parent_x, parent_y) = self
+                    .state
+                    .window_map
+                    .iter()
+                    .find_map(|(&wid, &sid)| {
+                        if sid == popup.parent_surface_id {
+                            self.state
+                                .window_manager
+                                .read()
+                                .get_window(wid)
+                                .map(|w| (w.window.position.0, w.window.position.1))
                         } else {
-                            gl::ClearColor(0.12, 0.12, 0.15, 1.0);
+                            None
                         }
+                    })
+                    .unwrap_or((0, 0));
+
+                let popup_x = parent_x + popup.x;
+                let popup_y = parent_y + popup.y;
+                let popup_w = popup.width.max(1) as f32;
+                let popup_h = popup.height.max(1) as f32;
+                // Use a high ID offset to avoid conflicts with real window IDs.
+                let popup_render_id = 0x8000_0000 + *popup_id as u64;
+                r.upsert_window_rect(
+                    popup_render_id,
+                    (popup_x as f32, popup_y as f32),
+                    (popup_w, popup_h),
+                    1.0,
+                );
+                // Upload popup texture if available in the buffer cache.
+                // (Popup SHM data goes through the same commit handler as windows.)
+            }
+
+            // Compose the full frame via WGPU (windows + effects).
+            match r.compose_full_frame(ww, wh) {
+                Ok(composed) => {
+                    drop(r); // Release renderer lock before GL work
+
+                    // ── GL Blit: upload WGPU result and draw fullscreen quad ──
+                    // SAFETY: GL context is current (backend.bind() succeeded above).
+                    backend.bind()?; // Re-acquire GL context
+
+                    // Lazily compile the blit shader.
+                    let shader = unsafe { ensure_blit_shader(&mut self.blit_shader) };
+
+                    // Upload composed frame to persistent GL texture.
+                    let tex =
+                        unsafe { update_blit_texture(&mut self.blit_texture, ww, wh, &composed) };
+
+                    // Clear and blit.
+                    // SAFETY: GL context is current after backend.bind().
+                    unsafe {
+                        gl::ClearColor(0.08, 0.08, 0.12, 1.0);
                         gl::Clear(gl::COLOR_BUFFER_BIT);
-                        gl::Disable(gl::SCISSOR_TEST);
+                        draw_blit_quad(shader, tex);
                     }
-                }
-            }
-        } // Drop WM + workspace locks before popup render.
-        shm_upload::gl_check_error("floating window rendering");
 
-        // Render popups on top of windows
-        for (popup_id, popup) in &self.state.popups {
-            if !popup.committed {
-                continue;
-            }
-            // Find parent window position for absolute popup placement
-            let (parent_x, parent_y) = self
-                .state
-                .window_map
-                .iter()
-                .find_map(|(&wid, &sid)| {
-                    if sid == popup.parent_surface_id {
-                        self.state
-                            .window_manager
-                            .read()
-                            .get_window(wid)
-                            .map(|w| (w.window.position.0, w.window.position.1))
-                    } else {
-                        None
+                    // Remove temporary popup entries from renderer.
+                    if let Some(ref renderer) = self.state.renderer {
+                        let mut r = renderer.write();
+                        for popup_id in &popup_ids {
+                            let popup_render_id = 0x8000_0000 + *popup_id as u64;
+                            r.remove_window(popup_render_id);
+                        }
                     }
-                })
-                .unwrap_or((0, 0));
-
-            let popup_x = parent_x + popup.x;
-            let popup_y = parent_y + popup.y;
-            let popup_w = popup.width.max(1);
-            let popup_h = popup.height.max(1);
-
-            // Flip Y for OpenGL
-            let gl_y = (wh as i32)
-                .saturating_sub(popup_y)
-                .saturating_sub(popup_h)
-                .max(0);
-
-            let tex = self.state.texture_cache.get(popup_id).copied();
-
-            // SAFETY: GL context is current. `tex_id` is a valid GL texture
-            // handle obtained from `texture_cache`; scissor coordinates are
-            // bounds-checked above (popup_w/popup_h > 0). All state is
-            // restored (SCISSOR_TEST disabled) before the block ends.
-            unsafe {
-                if let Some(tex_id) = tex {
-                    shm_upload::draw_textured_quad(
-                        shader_prog,
-                        tex_id,
-                        &shm_upload::TexQuadParams {
-                            x: popup_x,
-                            y: gl_y,
-                            w: popup_w,
-                            h: popup_h,
-                            screen_w: ww,
-                            screen_h: wh,
-                            alpha: 1.0,
-                        },
-                    );
-                } else {
-                    gl::Enable(gl::SCISSOR_TEST);
-                    gl::Scissor(popup_x, gl_y, popup_w, popup_h);
-                    gl::ClearColor(0.2, 0.2, 0.25, 1.0);
-                    gl::Clear(gl::COLOR_BUFFER_BIT);
-                    gl::Disable(gl::SCISSOR_TEST);
-                }
-            }
-        }
-        shm_upload::gl_check_error("popup rendering");
-
-        // ── WGPU Post-Process: shadow / blur compositing ───────────────────
-        // Read the GL framebuffer, run GPU effects via the headless WGPU
-        // target, then blit the result back as a fullscreen GL quad.
-        // The per-frame effect queues were pre-populated by
-        // compositor::prepare_frame_data() before process_events().
-        //
-        // Uses `drain_post_process` (preferred over the deprecated
-        // `composite_effects_on_buffer`) — when no shadows/blurs are queued
-        // it returns `Ok(None)` and the GL framebuffer is left untouched,
-        // avoiding the GL→CPU readback allocation on every no-effects frame.
-        if let Some(ref renderer) = self.state.renderer {
-            let gl_pixels = shm_upload::read_gl_framebuffer(ww, wh);
-            match renderer.write().drain_post_process(ww, wh, gl_pixels) {
-                Ok(Some(processed)) => {
-                    // Design 15: persistent GL upload texture. Same
-                    // (w, h) -> `glTexSubImage2D` (no GPU alloc); viewport-
-                    // resized -> `glTexImage2D` (one alloc). Replaces the
-                    // per-frame `GenTextures + TexImage2D + DeleteTextures`
-                    // trinity (~60 GPU allocations per second at 60Hz).
-                    //
-                    // SAFETY: GL context is current (`backend.bind()`
-                    // succeeded at the top of `render()`), and the cache
-                    // field owned on `self.compose_upload_texture` outlives
-                    // this match arm so the texture survives until
-                    // `shutdown()` clears it.
-                    let tex = shm_upload::update_persistent_texture(
-                        &mut self.compose_upload_texture,
-                        ww,
-                        wh,
-                        &processed,
-                    );
-                    shm_upload::gl_check_error("persistent upload");
-
-                    // Blit the persistent texture over the GL framebuffer
-                    // via a single fullscreen quad.
-                    shm_upload::draw_fullscreen_quad(shader_prog, tex);
-                    shm_upload::gl_check_error("persistent blit");
-                }
-                Ok(None) => {
-                    // No effects queued this frame — `drain_post_process` already
-                    // cleared the per-frame queues and dropped the readback bytes;
-                    // the GL framebuffer we already drew is the final image.
-                    debug!(
-                        "🎨 No WGPU post-process this frame ({}x{}, no queued shadows/blurs)",
-                        ww, wh
-                    );
                 }
                 Err(e) => {
-                    warn!(
-                        "⚠️ WGPU effects composite failed: {} (showing unprocessed GL frame)",
-                        e
-                    );
+                    warn!("⚠️ WGPU compose failed: {}", e);
+                    drop(r);
+
+                    // Fallback: clear to dark background
+                    // SAFETY: GL context is current after backend.bind().
+                    backend.bind()?;
+                    unsafe {
+                        gl::ClearColor(0.08, 0.08, 0.12, 1.0);
+                        gl::Clear(gl::COLOR_BUFFER_BIT);
+                    }
                 }
             }
         }
-        // ── end WGPU post-process ─────────────────────────────────────────
 
         backend.submit(None)?;
 
-        let textured_count = self.state.texture_cache.len();
         debug!(
-            "🎨 Rendered {} windows ({} with GL textures) at {}x{}",
+            "🎨 Rendered {} windows at {}x{} (WGPU compositing)",
             layouts.len(),
-            textured_count,
             ww,
             wh
         );
@@ -3044,18 +2933,23 @@ impl AxiomSmithayBackendReal {
         info!("🛑 Shutting down Smithay backend");
         self.state.running = false;
 
-        // The `render()` method already handles context binding and texture
-        // cleanup via the `dead_tex_handles` list during the compose cycle.
-        // Here we only need to free the persistent compose upload texture
-        // that exists outside per-frame management.
+        // Free the persistent blit texture and shader that exist outside
+        // per-frame management.
         match self.backend_kind {
             BackendKind::Winit => {
                 if let Some(backend) = self.winit_backend.as_mut() {
                     // Try rebinding; failure during shutdown is non-fatal.
                     if backend.bind().is_ok() {
-                        if let Some((tex, _, _)) = self.compose_upload_texture.take() {
+                        if let Some((tex, _, _)) = self.blit_texture.take() {
                             // SAFETY: GL context is current after the rebind above.
-                            unsafe { gl::DeleteTextures(1, &tex); }
+                            unsafe {
+                                gl::DeleteTextures(1, &tex);
+                            }
+                        }
+                        if let Some(prog) = self.blit_shader.take() {
+                            unsafe {
+                                gl::DeleteProgram(prog);
+                            }
                         }
                     }
                 }
@@ -3071,5 +2965,208 @@ impl AxiomSmithayBackendReal {
         }
 
         Ok(())
+    }
+}
+
+// ── GL Blit Helpers ────────────────────────────────────────────────────────
+// Minimal GL code for the final fullscreen blit. The textured-quad shader is
+// compiled once and cached in `AxiomSmithayBackendReal::blit_shader`.
+
+/// Compile the minimal GLES 2.0 textured-quad shader used for the final
+/// fullscreen blit. Returns the cached program on subsequent calls.
+///
+/// # Safety
+/// Caller must ensure a GL context is current.
+unsafe fn ensure_blit_shader(shader: &mut Option<gl::types::GLuint>) -> Option<gl::types::GLuint> {
+    if let Some(prog) = *shader {
+        return Some(prog);
+    }
+
+    let vert_src = r#"
+        attribute vec2 a_position;
+        attribute vec2 a_texcoord;
+        varying vec2 v_texcoord;
+        void main() {
+            gl_Position = vec4(a_position, 0.0, 1.0);
+            v_texcoord = a_texcoord;
+        }
+    "#;
+
+    let frag_src = r#"
+        precision mediump float;
+        varying vec2 v_texcoord;
+        uniform sampler2D u_texture;
+        void main() {
+            gl_FragColor = texture2D(u_texture, v_texcoord);
+        }
+    "#;
+
+    unsafe fn compile_shader(ty: gl::types::GLenum, src: &str) -> Option<gl::types::GLuint> {
+        let s = gl::CreateShader(ty);
+        if s == 0 {
+            return None;
+        }
+        gl::ShaderSource(
+            s,
+            1,
+            &(src.as_ptr() as *const gl::types::GLchar),
+            &(src.len() as gl::types::GLint),
+        );
+        gl::CompileShader(s);
+        let mut ok: gl::types::GLint = 0;
+        gl::GetShaderiv(s, gl::COMPILE_STATUS, &mut ok);
+        if ok == 0 {
+            gl::DeleteShader(s);
+            return None;
+        }
+        Some(s)
+    }
+
+    let vs = compile_shader(gl::VERTEX_SHADER, vert_src);
+    let fs = compile_shader(gl::FRAGMENT_SHADER, frag_src);
+
+    if let (Some(vs), Some(fs)) = (vs, fs) {
+        let prog = gl::CreateProgram();
+        gl::AttachShader(prog, vs);
+        gl::AttachShader(prog, fs);
+        gl::LinkProgram(prog);
+        let mut linked: gl::types::GLint = 0;
+        gl::GetProgramiv(prog, gl::LINK_STATUS, &mut linked);
+        if linked != 0 {
+            *shader = Some(prog);
+        }
+        gl::DeleteShader(vs);
+        gl::DeleteShader(fs);
+        return *shader;
+    }
+
+    if let Some(v) = vs {
+        gl::DeleteShader(v);
+    }
+    if let Some(f) = fs {
+        gl::DeleteShader(f);
+    }
+    None
+}
+
+/// Upload RGBA data to a persistent GL texture, reusing it when dimensions match.
+///
+/// # Safety
+/// Caller must ensure a GL context is current.
+unsafe fn update_blit_texture(
+    cache: &mut Option<(gl::types::GLuint, u32, u32)>,
+    width: u32,
+    height: u32,
+    data: &[u8],
+) -> gl::types::GLuint {
+    unsafe {
+        if cache.is_none() {
+            let mut t: gl::types::GLuint = 0;
+            gl::GenTextures(1, &mut t);
+            gl::BindTexture(gl::TEXTURE_2D, t);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+            gl::BindTexture(gl::TEXTURE_2D, 0);
+            *cache = Some((t, 0, 0));
+        }
+
+        let (tex, old_w, old_h) = cache.as_mut().expect("just initialized");
+
+        gl::BindTexture(gl::TEXTURE_2D, *tex);
+        if *old_w == width && *old_h == height {
+            gl::TexSubImage2D(
+                gl::TEXTURE_2D,
+                0,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                gl::RGBA,
+                gl::UNSIGNED_BYTE,
+                data.as_ptr() as *const std::ffi::c_void,
+            );
+        } else {
+            gl::TexImage2D(
+                gl::TEXTURE_2D,
+                0,
+                gl::RGBA as i32,
+                width as i32,
+                height as i32,
+                0,
+                gl::RGBA,
+                gl::UNSIGNED_BYTE,
+                data.as_ptr() as *const std::ffi::c_void,
+            );
+            *old_w = width;
+            *old_h = height;
+        }
+        gl::BindTexture(gl::TEXTURE_2D, 0);
+        *tex
+    }
+}
+
+/// Draw a fullscreen textured quad for the final blit.
+///
+/// # Safety
+/// Caller must ensure a GL context is current and `tex` is a valid GL texture.
+unsafe fn draw_blit_quad(shader: Option<gl::types::GLuint>, tex: gl::types::GLuint) {
+    let Some(prog) = shader else {
+        return;
+    };
+
+    #[rustfmt::skip]
+    let vertices: [f32; 16] = [
+        -1.0,  1.0, 0.0, 1.0,
+         1.0,  1.0, 1.0, 1.0,
+        -1.0, -1.0, 0.0, 0.0,
+         1.0, -1.0, 1.0, 0.0,
+    ];
+
+    unsafe {
+        gl::UseProgram(prog);
+        gl::ActiveTexture(gl::TEXTURE0);
+        gl::BindTexture(gl::TEXTURE_2D, tex);
+
+        let pos_loc = gl::GetAttribLocation(prog, c"a_position".as_ptr());
+        let tex_loc = gl::GetAttribLocation(prog, c"a_texcoord".as_ptr());
+
+        let stride = (4 * std::mem::size_of::<f32>()) as gl::types::GLsizei;
+
+        if pos_loc >= 0 {
+            gl::EnableVertexAttribArray(pos_loc as gl::types::GLuint);
+            gl::VertexAttribPointer(
+                pos_loc as gl::types::GLuint,
+                2,
+                gl::FLOAT,
+                gl::FALSE,
+                stride,
+                vertices.as_ptr() as *const std::ffi::c_void,
+            );
+        }
+        if tex_loc >= 0 {
+            gl::EnableVertexAttribArray(tex_loc as gl::types::GLuint);
+            gl::VertexAttribPointer(
+                tex_loc as gl::types::GLuint,
+                2,
+                gl::FLOAT,
+                gl::FALSE,
+                stride,
+                vertices.as_ptr().add(2) as *const std::ffi::c_void,
+            );
+        }
+
+        gl::DrawArrays(gl::TRIANGLE_STRIP, 0, 4);
+
+        if pos_loc >= 0 {
+            gl::DisableVertexAttribArray(pos_loc as gl::types::GLuint);
+        }
+        if tex_loc >= 0 {
+            gl::DisableVertexAttribArray(tex_loc as gl::types::GLuint);
+        }
+
+        gl::BindTexture(gl::TEXTURE_2D, 0);
+        gl::UseProgram(0);
     }
 }

@@ -14,7 +14,6 @@
 use anyhow::{Context, Result};
 use log::{debug, info};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 // Type aliases for renderer effect queues reduce type complexity.
@@ -41,9 +40,7 @@ pub enum RendererError {
 impl std::fmt::Display for RendererError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DeviceLost => f.write_str(
-                "WGPU device was lost (driver crash / context reset)",
-            ),
+            Self::DeviceLost => f.write_str("WGPU device was lost (driver crash / context reset)"),
             Self::Buffer(s) => write!(f, "buffer allocation or write failed: {}", s),
             Self::Texture(s) => write!(f, "texture allocation or upload failed: {}", s),
             Self::Other(s) => write!(f, "renderer error: {}", s),
@@ -122,14 +119,6 @@ pub struct AxiomRenderer {
     /// dimensions change.
     cached_projection_buffer: Option<Buffer>,
     cached_projection_dims: (u32, u32),
-
-    /// Per-frame effect queue sizes tracked atomically so the backend can
-    /// observe "is work pending?" with relaxed loads without taking the
-    /// renderer's RwLock. Each `queue_*`/`clear_*` mutation mirrors into
-    /// the corresponding counter. Drained (set to 0) on `clear_*` and on
-    /// any successful composite in `composite_effects_on_buffer`.
-    pending_shadows: AtomicUsize,
-    pending_blurs: AtomicUsize,
 
     /// Border width in pixels for window decoration
     border_width: f32,
@@ -390,8 +379,6 @@ impl AxiomRenderer {
             cached_projection_dims: (0, 0),
             border_width: 2.0,
             cached_border_width: 2.0,
-            pending_shadows: AtomicUsize::new(0),
-            pending_blurs: AtomicUsize::new(0),
             device_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
@@ -563,8 +550,6 @@ impl AxiomRenderer {
             cached_projection_dims: (0, 0),
             border_width: 2.0,
             cached_border_width: 2.0,
-            pending_shadows: AtomicUsize::new(0),
-            pending_blurs: AtomicUsize::new(0),
             device_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
@@ -741,245 +726,7 @@ impl AxiomRenderer {
     }
 
     /// Non-locking observation of whether any post-processing effect has
-    /// been queued for the current frame. Used by the backend to decide
-    /// whether to perform the (expensive) GL→WGPU ping-pong or submit the
-    /// GL framebuffer directly.
-    ///
-    /// Returns `false` when there is nothing to do. The atomic loads are
-    /// ordered Relaxed because callers only need eventual consistency —
-    /// at worst, a freshly-queued effect will be observed on the next
-    /// render, and a stale count simply gates one extra round-trip.
-    pub fn has_pending_post_process(&self) -> bool {
-        self.pending_shadows.load(Ordering::Relaxed) > 0
-            || self.pending_blurs.load(Ordering::Relaxed) > 0
-    }
-
-    /// Run the GPU effects composite, but only when there is work to do.
-    ///
-    /// This is the only entry point that performs the GL->WGPU->GL round
-    /// trip. When `has_pending_post_process()` is `false` (or no
-    /// `effects_engine` is wired), the per-frame queues are drained and
-    /// `Ok(None)` is returned -- the caller should submit the GL
-    /// framebuffer unchanged. When work IS queued and the effects engine
-    /// is available, the full round-trip runs and a processed RGBA buffer
-    /// is returned for the caller to upload back into GL.
-    ///
-    /// Internally delegates to the (now-deprecated) round-trip helper for
-    /// the warm path; the `#[allow(deprecated)]` keeps that single call
-    /// quiet without polluting the public recommendation channel.
-    #[allow(deprecated)]
-    pub fn drain_post_process(
-        &mut self,
-        width: u32,
-        height: u32,
-        gl_pixels: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>> {
-        let has_effects =
-            !self.window_shadows.is_empty() || !self.window_blurs.is_empty();
-        if !has_effects || self.effects_engine.is_none() {
-            // Drop the readback bytes immediately — they would be
-            // discarded downstream (replaced by the original GL
-            // framebuffer) and not paying for them in the cold path is
-            // the entire point of this optimisation.
-            self.window_shadows.clear();
-            self.window_blurs.clear();
-            self.pending_shadows.store(0, Ordering::Relaxed);
-            self.pending_blurs.store(0, Ordering::Relaxed);
-            return Ok(None);
-        }
-        let processed = self.composite_effects_on_buffer(&gl_pixels, width, height)?;
-        Ok(Some(processed))
-    }
-
-    /// Composite shadow/blur effects onto an existing RGBA framebuffer.
-    ///
-    /// Uploads `input_rgba` to a WGPU texture, runs any queued shadow and blur
-    /// passes from the internal queues, then reads back the result. If no
-    /// effects are queued or no effects engine is wired, returns the input
-    /// unchanged (clipped to `width * height * 4` bytes).
-    ///
-    /// ***Prefer [`drain_post_process`] from backend code:*** this method
-    /// forces a full GL→WGPU→GL ping-pong even when nothing is queued. The
-    /// drain entry point skips both the CPU readback allocation *and* the
-    /// upload/composite when [`has_pending_post_process`] is `false`.
-    ///
-    /// The internal shadow and blur queues are consumed by this call.
-    ///
-    /// [`drain_post_process`]: AxiomRenderer::drain_post_process
-    /// [`has_pending_post_process`]: AxiomRenderer::has_pending_post_process
-    #[deprecated(
-        since = "0.1.0",
-        note = "use drain_post_process instead -- it skips the GL->CPU readback allocation when no shadows/blurs are queued"
-    )]
-    pub fn composite_effects_on_buffer(
-        &mut self,
-        input_rgba: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Result<Vec<u8>> {
-        use cgmath::Vector2;
-
-        let expected_len = (width as usize)
-            .saturating_mul(height as usize)
-            .saturating_mul(4);
-        let has_effects = !self.window_shadows.is_empty() || !self.window_blurs.is_empty();
-
-        if !has_effects || self.effects_engine.is_none() {
-            self.window_shadows.clear();
-            self.window_blurs.clear();
-            self.pending_shadows.store(0, Ordering::Relaxed);
-            self.pending_blurs.store(0, Ordering::Relaxed);
-            return Ok(input_rgba
-                .get(..expected_len)
-                .unwrap_or(input_rgba)
-                .to_vec());
-        }
-
-        // Ensure headless target exists and is correctly sized
-        let (headless_tex, target_view) =
-            ensure_headless_target(&self.device, &mut self.headless_target, width, height)?;
-
-        // Upload the GL framebuffer contents into the headless WGPU texture
-        let upload_size = wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        };
-        let bytes_per_row = std::num::NonZeroU32::new(4 * width);
-        if let Some(bpr) = bytes_per_row {
-            self.queue.write_texture(
-                wgpu::ImageCopyTexture {
-                    texture: headless_tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                input_rgba.get(..expected_len).unwrap_or(input_rgba),
-                wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bpr.get()),
-                    rows_per_image: Some(height),
-                },
-                upload_size,
-            );
-        }
-
-        // Apply effects in a single encoder
-        let effects_engine = match self.effects_engine.as_ref() {
-            Some(e) => e,
-            None => {
-                log::warn!("composite_effects_on_buffer called but effects_engine is not set; skipping GPU effects");
-                return Ok(vec![]);
-            }
-        };
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("GL-Bridged Effects Encoder"),
-            });
-
-        // Dispatch shadows
-        if !self.window_shadows.is_empty() {
-            let shadow_data: Vec<_> = self
-                .window_shadows
-                .values()
-                .map(|((px, py), (sx, sy), params)| {
-                    (
-                        Vector2::new(*px, *py),
-                        Vector2::new(*sx, *sy),
-                        params.clone(),
-                    )
-                })
-                .collect();
-            if let Err(e) =
-                effects_engine
-                    .write()
-                    .render_shadows(&mut encoder, target_view, &shadow_data)
-            {
-                log::warn!("⚠️ Shadow pass on GL bridge failed: {}", e);
-            }
-        }
-
-        // Dispatch blurs
-        if !self.window_blurs.is_empty() {
-            let tex_size = Vector2::new(width, height);
-            if let Err(e) = effects_engine.write().render_blurs(
-                &mut encoder,
-                target_view,
-                target_view,
-                tex_size,
-            ) {
-                log::warn!("⚠️ Blur pass on GL bridge failed: {}", e);
-            }
-        }
-
-        self.queue.submit(std::iter::once(encoder.finish()));
-
-        // Read back the composited result via a staging buffer
-        let buffer_size = (width as u64)
-            .saturating_mul(height as u64)
-            .saturating_mul(4);
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Effects Readback Buffer"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut copy_encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Effects Copy Encoder"),
-                });
-        copy_encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
-                texture: headless_tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::ImageCopyBuffer {
-                buffer: &staging,
-                layout: wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: bytes_per_row.map(std::num::NonZeroU32::get),
-                    rows_per_image: Some(height),
-                },
-            },
-            upload_size,
-        );
-        self.queue.submit(std::iter::once(copy_encoder.finish()));
-
-        // Poll for completion and read back
-        let slice = staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        self.device.poll(wgpu::Maintain::Wait);
-        rx.recv()
-            .map_err(|_| anyhow::anyhow!("GPU readback channel closed"))??;
-
-        let mapped = slice.get_mapped_range();
-        let result = mapped.to_vec();
-        drop(mapped);
-        staging.unmap();
-
-        // Consume per-frame effect queues
-        self.window_shadows.clear();
-        self.window_blurs.clear();
-        self.pending_shadows.store(0, Ordering::Relaxed);
-        self.pending_blurs.store(0, Ordering::Relaxed);
-
-        debug!(
-            "🖥️ GL-bridged effects composite: {}x{} ({} bytes)",
-            width,
-            height,
-            result.len()
-        );
-        Ok(result)
-    }
-
+    /// been queued for the current frame. Returns `false` when there is
     /// Render specifically to the named output.
     ///
     /// This used to hold an immutable borrow of `self.surfaces` across a
@@ -1054,10 +801,8 @@ impl AxiomRenderer {
             // buffers the textured pass uses.
 
             // Uniform buffer invalidation: opacity, size, or border width
-            let opacity_changed =
-                (window.cached_opacity - window.opacity).abs() > f32::EPSILON;
-            let size_changed = (window.cached_uniform_size.0 - window.size.0).abs()
-                > f32::EPSILON
+            let opacity_changed = (window.cached_opacity - window.opacity).abs() > f32::EPSILON;
+            let size_changed = (window.cached_uniform_size.0 - window.size.0).abs() > f32::EPSILON
                 || (window.cached_uniform_size.1 - window.size.1).abs() > f32::EPSILON;
             let border_changed =
                 (self.cached_border_width - self.border_width).abs() > f32::EPSILON;
@@ -1073,22 +818,19 @@ impl AxiomRenderer {
                     window_width: window.size.0,
                     window_height: window.size.1,
                 };
-                window.cached_uniform_buffer =
-                    Some(self.device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some(&format!("Window {} Uniforms", window.id)),
-                            contents: bytemuck::cast_slice(&[window_uniforms]),
-                            usage: wgpu::BufferUsages::UNIFORM
-                                | wgpu::BufferUsages::COPY_DST,
-                        },
-                    ));
+                window.cached_uniform_buffer = Some(self.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some(&format!("Window {} Uniforms", window.id)),
+                        contents: bytemuck::cast_slice(&[window_uniforms]),
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    },
+                ));
                 window.cached_opacity = window.opacity;
                 window.cached_uniform_size = window.size;
             }
 
             // Vertex buffer invalidation: position or size
-            let pos_changed = (window.cached_position.0 - window.position.0).abs()
-                > f32::EPSILON
+            let pos_changed = (window.cached_position.0 - window.position.0).abs() > f32::EPSILON
                 || (window.cached_position.1 - window.position.1).abs() > f32::EPSILON;
             let size_changed = (window.cached_size.0 - window.size.0).abs() > f32::EPSILON
                 || (window.cached_size.1 - window.size.1).abs() > f32::EPSILON;
@@ -1113,23 +855,40 @@ impl AxiomRenderer {
                 // TL(0,0) BL(0,1) TR(1,0) BR(1,1).
                 let vertices = [
                     // Triangle 1: TL, BL, TR
-                    Vertex { position: [x, y, 0.0],    tex_coords: [0.0, 0.0] },
-                    Vertex { position: [x, yh, 0.0],   tex_coords: [0.0, 1.0] },
-                    Vertex { position: [xw, y, 0.0],   tex_coords: [1.0, 0.0] },
+                    Vertex {
+                        position: [x, y, 0.0],
+                        tex_coords: [0.0, 0.0],
+                    },
+                    Vertex {
+                        position: [x, yh, 0.0],
+                        tex_coords: [0.0, 1.0],
+                    },
+                    Vertex {
+                        position: [xw, y, 0.0],
+                        tex_coords: [1.0, 0.0],
+                    },
                     // Triangle 2: BL, BR, TR
-                    Vertex { position: [x, yh, 0.0],   tex_coords: [0.0, 1.0] },
-                    Vertex { position: [xw, yh, 0.0],  tex_coords: [1.0, 1.0] },
-                    Vertex { position: [xw, y, 0.0],   tex_coords: [1.0, 0.0] },
+                    Vertex {
+                        position: [x, yh, 0.0],
+                        tex_coords: [0.0, 1.0],
+                    },
+                    Vertex {
+                        position: [xw, yh, 0.0],
+                        tex_coords: [1.0, 1.0],
+                    },
+                    Vertex {
+                        position: [xw, y, 0.0],
+                        tex_coords: [1.0, 0.0],
+                    },
                 ];
 
-                window.cached_vertex_buffer =
-                    Some(self.device.create_buffer_init(
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some(&format!("Window {} Vertex Buffer", window.id)),
-                            contents: bytemuck::cast_slice(&vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        },
-                    ));
+                window.cached_vertex_buffer = Some(self.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some(&format!("Window {} Vertex Buffer", window.id)),
+                        contents: bytemuck::cast_slice(&vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    },
+                ));
                 window.cached_position = window.position;
                 window.cached_size = window.size;
             }
@@ -1145,7 +904,10 @@ impl AxiomRenderer {
         config: &wgpu::SurfaceConfiguration,
         surface_texture: &wgpu::SurfaceTexture,
     ) -> Result<()> {
-        debug!("\u{1f3a8} Rendering {} windows to surface", self.windows.len());
+        debug!(
+            "\u{1f3a8} Rendering {} windows to surface",
+            self.windows.len()
+        );
 
         let view = surface_texture
             .texture
@@ -1198,10 +960,10 @@ impl AxiomRenderer {
 
         for window in &self.windows {
             if let Some(texture_view) = &window.texture_view {
-                let window_uniform_buffer = window
-                    .cached_uniform_buffer
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("uniform buffer for window {} not initialized", window.id))?;
+                let window_uniform_buffer =
+                    window.cached_uniform_buffer.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("uniform buffer for window {} not initialized", window.id)
+                    })?;
 
                 let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     layout: &self.render_pipeline.get_bind_group_layout(0),
@@ -1226,10 +988,9 @@ impl AxiomRenderer {
                     label: Some(&format!("Window {} Bind Group", window.id)),
                 });
 
-                let vertex_buffer = window
-                    .cached_vertex_buffer
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("vertex buffer for window {} not initialized", window.id))?;
+                let vertex_buffer = window.cached_vertex_buffer.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("vertex buffer for window {} not initialized", window.id)
+                })?;
 
                 draw_commands.push((window.id, bind_group, vertex_buffer));
             }
@@ -1338,7 +1099,8 @@ impl AxiomRenderer {
     /// `compose_full_frame`'s readback callback — see the inline
     /// notes there.
     pub fn mark_device_lost(&self) {
-        self.device_lost.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.device_lost
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         log::error!("⚠️ WGPU device flagged as lost — render path will fail until reset");
     }
 
@@ -1375,18 +1137,17 @@ impl AxiomRenderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Render pass: clear to the requested color
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Headless Clear Encoder"),
-                });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Headless Clear Encoder"),
+            });
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Headless Clear Pass"),
@@ -1470,8 +1231,7 @@ impl AxiomRenderer {
     /// through WGPU; no `gl::Scissor` toggle is needed for
     /// fresh/uncommitted windows.
     ///
-    /// The per-frame shadow and blur queues are consumed by this call
-    /// (mirrors [`composite_effects_on_buffer`]'s drain semantics).
+    /// The per-frame shadow and blur queues are consumed by this call.
     /// Returns `width * height * 4` bytes of RGBA8.
     pub fn compose_full_frame(&mut self, width: u32, height: u32) -> Result<Vec<u8>> {
         use cgmath::Vector2;
@@ -1482,7 +1242,9 @@ impl AxiomRenderer {
         // decide between reinit (emit a StateChange event) and graceful
         // fallback (skip render until reinit completes).
         if self.is_device_lost() {
-            return Err(anyhow::anyhow!("WGPU device lost (see is_device_lost() — renderer must be reinitialised)"));
+            return Err(anyhow::anyhow!(
+                "WGPU device lost (see is_device_lost() — renderer must be reinitialised)"
+            ));
         }
 
         // Reuse the extraction helper that `prepare_window_resources`
@@ -1607,11 +1369,11 @@ impl AxiomRenderer {
         // write-lock that would conflict with the `&mut self.windows`
         // borrow currently held through `textured_draws` /
         // `placeholder_draws`.
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Compose Full-Frame Encoder"),
-                });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Compose Full-Frame Encoder"),
+            });
 
         // ── Pass 1: textured windows + placeholder windows ────────
         {
@@ -1668,9 +1430,10 @@ impl AxiomRenderer {
             let tex_size = Vector2::new(width, height);
             if has_shadows && !shadow_data.is_empty() {
                 if let Some(ref engine) = self.effects_engine {
-                    if let Err(e) = engine
-                        .write()
-                        .render_shadows(&mut encoder, target_view, &shadow_data)
+                    if let Err(e) =
+                        engine
+                            .write()
+                            .render_shadows(&mut encoder, target_view, &shadow_data)
                     {
                         log::warn!("⚠️ compose_full_frame shadows failed: {}", e);
                     }
@@ -1678,10 +1441,12 @@ impl AxiomRenderer {
             }
             if has_blurs {
                 if let Some(ref engine) = self.effects_engine {
-                    if let Err(e) = engine
-                        .write()
-                        .render_blurs(&mut encoder, target_view, target_view, tex_size)
-                    {
+                    if let Err(e) = engine.write().render_blurs(
+                        &mut encoder,
+                        target_view,
+                        target_view,
+                        tex_size,
+                    ) {
                         log::warn!("⚠️ compose_full_frame blurs failed: {}", e);
                     }
                 }
@@ -1749,25 +1514,22 @@ impl AxiomRenderer {
             let _ = tx.send(r);
         });
         self.device.poll(wgpu::Maintain::Wait);
-        let map_result = rx.recv()
+        let map_result = rx
+            .recv()
             .map_err(|_| anyhow::anyhow!("GPU readback channel closed"))?;
         // Surface device-loss as a typed error so the compositor can
         // branch on it (reinit vs. fall back). Anything else is an
         // anyhow-style buffer error converted to RendererError::Buffer.
-        map_result.map_err(|e| {
-            anyhow::anyhow!("GPU readback map failed: {:?}", e)
-        })?;
+        map_result.map_err(|e| anyhow::anyhow!("GPU readback map failed: {:?}", e))?;
 
         let mapped = slice.get_mapped_range();
         let result = mapped.to_vec();
         drop(mapped);
         staging.unmap();
 
-        // Drain per-frame effect queues — mirrors `composite_effects_on_buffer`.
+        // Drain per-frame effect queues.
         self.window_shadows.clear();
         self.window_blurs.clear();
-        self.pending_shadows.store(0, Ordering::Relaxed);
-        self.pending_blurs.store(0, Ordering::Relaxed);
 
         // Compute placeholder count in a cfg-gated block expression —
         // `#[cfg]` is not allowed directly on individual macro arguments
@@ -1815,11 +1577,7 @@ impl AxiomRenderer {
     /// This exercises the full textured-quad render path — GPU buffers,
     /// bind groups, pipeline, draw calls, and readback — without
     /// needing a `wgpu::Surface`. Designed for integration tests.
-    pub fn render_to_headless_target(
-        &mut self,
-        width: u32,
-        height: u32,
-    ) -> Result<Vec<u8>> {
+    pub fn render_to_headless_target(&mut self, width: u32, height: u32) -> Result<Vec<u8>> {
         // Ensure per-window GPU buffers are up to date
         self.prepare_window_resources();
 
@@ -1838,8 +1596,7 @@ impl AxiomRenderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Bgra8UnormSrgb,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1866,65 +1623,45 @@ impl AxiomRenderer {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("projection buffer not initialized"))?;
 
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Headless Composite Encoder"),
-                });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Headless Composite Encoder"),
+            });
 
         // Build draw commands before the render pass to keep borrows happy
         let mut draw_commands = Vec::new();
         for window in &self.windows {
             if let Some(texture_view) = &window.texture_view {
-                let window_ub = window
-                    .cached_uniform_buffer
-                    .as_ref()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "uniform buffer for window {} not initialized",
-                            window.id
-                        )
-                    })?;
-                let vertex_buf = window
-                    .cached_vertex_buffer
-                    .as_ref()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "vertex buffer for window {} not initialized",
-                            window.id
-                        )
-                    })?;
+                let window_ub = window.cached_uniform_buffer.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("uniform buffer for window {} not initialized", window.id)
+                })?;
+                let vertex_buf = window.cached_vertex_buffer.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("vertex buffer for window {} not initialized", window.id)
+                })?;
 
-                let bind_group =
-                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        layout: &self.render_pipeline.get_bind_group_layout(0),
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: proj_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::TextureView(
-                                    texture_view,
-                                ),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::Sampler(
-                                    &self.sampler,
-                                ),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: window_ub.as_entire_binding(),
-                            },
-                        ],
-                        label: Some(&format!(
-                            "Window {} Headless Bind Group",
-                            window.id
-                        )),
-                    });
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout: &self.render_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: proj_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(texture_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: window_ub.as_entire_binding(),
+                        },
+                    ],
+                    label: Some(&format!("Window {} Headless Bind Group", window.id)),
+                });
 
                 draw_commands.push((window.id, bind_group, vertex_buf));
             }
@@ -1932,28 +1669,25 @@ impl AxiomRenderer {
 
         // Render pass: clear to transparent black, then composite windows
         {
-            let mut render_pass =
-                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Headless Composite Pass"),
-                    color_attachments: &[Some(
-                        wgpu::RenderPassColorAttachment {
-                            view: &target_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color {
-                                    r: 0.0,
-                                    g: 0.0,
-                                    b: 0.0,
-                                    a: 0.0,
-                                }),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        },
-                    )],
-                    depth_stencil_attachment: None,
-                    occlusion_query_set: None,
-                    timestamp_writes: None,
-                });
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Headless Composite Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
 
             render_pass.set_pipeline(&self.render_pipeline);
 
@@ -2137,8 +1871,6 @@ impl AxiomRenderer {
         // Clear per-frame effect queues after consumption
         self.window_shadows.clear();
         self.window_blurs.clear();
-        self.pending_shadows.store(0, Ordering::Relaxed);
-        self.pending_blurs.store(0, Ordering::Relaxed);
 
         Ok(())
     }
@@ -2183,18 +1915,11 @@ impl AxiomRenderer {
         params: crate::effects::ShadowParams,
     ) {
         self.window_shadows.insert(id, (position, size, params));
-        // Mirror the queue length into the atomic so the backend can
-        // observe whether work is pending without acquiring the renderer
-        // lock. `len()` is O(1) for HashMap and reflects reality after
-        // the insert.
-        self.pending_shadows
-            .store(self.window_shadows.len(), Ordering::Relaxed);
     }
 
     /// Clear the per-frame shadow queue (should be called at the start of each frame).
     pub fn clear_shadows(&mut self) {
         self.window_shadows.clear();
-        self.pending_shadows.store(0, Ordering::Relaxed);
     }
 
     /// Queue blur rendering for a window. Called each frame from render_frame()
@@ -2207,14 +1932,11 @@ impl AxiomRenderer {
         params: crate::effects::BlurParams,
     ) {
         self.window_blurs.insert(id, (position, size, params));
-        self.pending_blurs
-            .store(self.window_blurs.len(), Ordering::Relaxed);
     }
 
     /// Clear the per-frame blur queue (should be called at the start of each frame).
     pub fn clear_blurs(&mut self) {
         self.window_blurs.clear();
-        self.pending_blurs.store(0, Ordering::Relaxed);
     }
 
     /// Get number of rendered windows
@@ -2264,13 +1986,6 @@ impl AxiomRenderer {
         if removed {
             self.window_shadows.remove(&id);
             self.window_blurs.remove(&id);
-            // Unconditional `store(Relaxed)` is a few cycles; cheaper than
-            // the len()/compare branch the previous code had, and the
-            // hashmap `.remove` already invalidated any stale queue entry.
-            self.pending_shadows
-                .store(self.window_shadows.len(), Ordering::Relaxed);
-            self.pending_blurs
-                .store(self.window_blurs.len(), Ordering::Relaxed);
             log::trace!("🗑️ Renderer: removed window {}", id);
         }
         removed
@@ -2334,9 +2049,9 @@ fn ensure_headless_target<'a>(
         *headless_target = Some((texture, view));
     }
 
-    let (ref tex, ref view) = headless_target
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("headless_target must be initialized before ensure_headless_target returns"))?;
+    let (ref tex, ref view) = headless_target.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("headless_target must be initialized before ensure_headless_target returns")
+    })?;
     Ok((tex, view))
 }
 
@@ -2391,32 +2106,31 @@ pub fn create_placeholder_pipeline(
         source: wgpu::ShaderSource::Wgsl(include_str!("placeholder.wgsl").into()),
     });
 
-    let bind_group_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Placeholder Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Placeholder Bind Group Layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
-            ],
-        });
+                count: None,
+            },
+        ],
+    });
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("Placeholder Pipeline Layout"),
@@ -2500,8 +2214,8 @@ mod tests {
 
     // ---- Post-processing queue / fast-path ----
     //
-    // The atomic-counter mirroring and `drain_post_process` no-op
-    // branches are exercised end-to-end by the compositor integration
+    // The atomic-counter mirroring and effect queue lifecycle
+    // are exercised end-to-end by the compositor integration
     // tests (which actually run a real headless `AxiomRenderer`).
     // Per-process unit tests that hand-craft a `wgpu::Device` would
     // require `Arc::new(unsafe { mem::zeroed() })` on internal
@@ -2541,8 +2255,7 @@ mod tests {
                 dev.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("test uniform buffer"),
                     size: std::mem::size_of::<WindowUniforms>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM
-                        | wgpu::BufferUsages::COPY_DST,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 })
             };
@@ -2614,7 +2327,10 @@ mod tests {
             .await
             .expect("headless renderer");
 
-        assert!(renderer.windows.is_empty(), "renderer starts with zero windows");
+        assert!(
+            renderer.windows.is_empty(),
+            "renderer starts with zero windows"
+        );
 
         // Should not panic — iterates an empty Vec and updates the field
         renderer.set_border_width(5.0);
@@ -2671,7 +2387,10 @@ mod tests {
         renderer.upsert_window_rect(1, (0.0, 0.0), (400.0, 300.0), 0.5);
 
         let w = &renderer.windows[0];
-        assert!((w.opacity - 0.5).abs() < f32::EPSILON, "opacity should be updated");
+        assert!(
+            (w.opacity - 0.5).abs() < f32::EPSILON,
+            "opacity should be updated"
+        );
         assert!(
             (w.cached_opacity - 1.0).abs() < f32::EPSILON,
             "cached_opacity should retain old value (stale)"

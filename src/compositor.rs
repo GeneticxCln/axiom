@@ -88,9 +88,7 @@ impl AxiomCompositor {
         // rather than the previous hard-coded default placeholder.
         debug!("Initializing IPC server...");
         ipc_server.set_config_handle(Arc::new(parking_lot::RwLock::new(config.clone())));
-        ipc_server
-            .start()
-            .context("Failed to start IPC server")?;
+        ipc_server.start().context("Failed to start IPC server")?;
 
         info!("All subsystems initialized successfully");
 
@@ -148,14 +146,17 @@ impl AxiomCompositor {
         renderer.write().set_effects_engine(effects_engine.clone());
 
         // Wire border width from config into renderer
-        renderer.write().set_border_width(config.window.border_width as f32);
+        renderer
+            .write()
+            .set_border_width(config.window.border_width as f32);
 
         // Initialize server-side decoration manager (must be created before
         // the Smithay backend so it can receive a clone).
         let minimize_enabled = config.features.enable_minimize;
-        let decoration_manager = Arc::new(parking_lot::RwLock::new(
-            DecorationManager::new(&config.window, minimize_enabled),
-        ));
+        let decoration_manager = Arc::new(parking_lot::RwLock::new(DecorationManager::new(
+            &config.window,
+            minimize_enabled,
+        )));
 
         let smithay_backend = {
             info!("Initializing Axiom compositor with Smithay backend...");
@@ -414,11 +415,9 @@ impl AxiomCompositor {
             "enabled:{:?} blur_radius:{:?} animation_speed:{:?}",
             enabled, blur_radius, animation_speed
         );
-        let _ = self.ipc_server.broadcast_state_change(
-            "effects",
-            "previous",
-            &summary,
-        );
+        let _ = self
+            .ipc_server
+            .broadcast_state_change("effects", "previous", &summary);
     }
 
     /// Populate per-frame effect queues in the WGPU renderer from the effects engine.
@@ -455,15 +454,9 @@ impl AxiomCompositor {
 
         // Queue shadow and blur data from effects engine for GPU rendering.
         // Collect effect state first (only holding effects lock), then queue
-        // in renderer — avoids nesting effects.read() inside renderer.write()
-        // which would invert the lock order vs composite_effects_on_buffer
-        // (renderer &mut → effects.write()).
+        // in renderer — avoids nesting effects.read() inside renderer.write().
         //
-        // Skip the queue entirely when effects are globally disabled: the
-        // backend's `has_pending_post_process` non-locking peek will see
-        // both atomics at zero and skip the GL→CPU readback. This makes
-        // the no-effects hot path zero-cost (no HashMap inserts, no atomic
-        // stores, no GPU work, no `glReadPixels`).
+        // Skip the queue entirely when effects are globally disabled.
         let effects_enabled = self.effects_engine.read().is_enabled();
         if effects_enabled {
             if let Some(ref renderer) = self.renderer {
@@ -474,8 +467,7 @@ impl AxiomCompositor {
                     let effects = self.effects_engine.read();
                     for data in &self.render_data_buffer {
                         if let Some(effect_state) = effects.get_window_effects(data.id) {
-                            let pos =
-                                (data.layout_rect.x as f32, data.layout_rect.y as f32);
+                            let pos = (data.layout_rect.x as f32, data.layout_rect.y as f32);
                             let size = (
                                 data.layout_rect.width as f32,
                                 data.layout_rect.height as f32,
@@ -512,39 +504,39 @@ impl AxiomCompositor {
             }
         }
 
-        Ok(())
-    }
+        // Upsert window rects into the renderer so compose_full_frame
+        // has current positions/sizes before the backend renders.
+        if let Some(ref renderer) = self.renderer {
+            let mut r = renderer.write();
+            for win_data in &self.render_data_buffer {
+                let mut scale = 1.0_f32;
+                let mut opacity = win_data.opacity;
+                let mut offset = (0.0_f32, 0.0_f32);
 
-    /// Post-render phase: applies global effects, performance monitoring,
-    /// and window rect upserts for the renderer. The WGPU effects composite
-    /// now happens in the backend's GL render pass (between window drawing
-    /// and `submit`), so this method no longer calls `renderer.render()`.
-    fn render_frame(&mut self) -> Result<()> {
-        // Push window rects to renderer for metrics/housekeeping
-        for win_data in &self.render_data_buffer {
-            let mut scale = 1.0_f32;
-            let mut opacity = win_data.opacity;
-            let mut offset = (0.0_f32, 0.0_f32);
-
-            {
-                let effects = self.effects_engine.read();
-                if let Some(effect_state) = effects.get_window_effects(win_data.id) {
-                    scale = effect_state.scale;
-                    opacity = effect_state.opacity;
-                    offset = effect_state.position_offset;
+                {
+                    let effects = self.effects_engine.read();
+                    if let Some(effect_state) = effects.get_window_effects(win_data.id) {
+                        scale = effect_state.scale;
+                        opacity = effect_state.opacity;
+                        offset = effect_state.position_offset;
+                    }
                 }
-            }
 
-            if let Some(ref r) = self.renderer {
-                let mut renderer = r.write();
                 let x = win_data.layout_rect.x as f32 + offset.0;
                 let y = win_data.layout_rect.y as f32 + offset.1;
                 let w = win_data.layout_rect.width as f32 * scale;
                 let h = win_data.layout_rect.height as f32 * scale;
-                renderer.upsert_window_rect(win_data.id, (x, y), (w, h), opacity);
+                r.upsert_window_rect(win_data.id, (x, y), (w, h), opacity);
             }
         }
 
+        Ok(())
+    }
+
+    /// Post-render phase: applies global effects and performance monitoring.
+    /// Window rect upserts are now done in prepare_frame_data() so the
+    /// renderer's window list is current before the backend renders.
+    fn render_frame(&mut self) -> Result<()> {
         // Apply global effects (workspace transitions, blur backgrounds)
         self.apply_global_effects();
 
@@ -603,7 +595,9 @@ impl AxiomCompositor {
 
         // Broadcast shutdown state change before backend teardown so
         // IPC clients can react before the broadcast channel closes.
-        let _ = self.ipc_server.broadcast_state_change("compositor", "running", "shutdown");
+        let _ = self
+            .ipc_server
+            .broadcast_state_change("compositor", "running", "shutdown");
 
         // Clean up Smithay backend
         debug!("Shutting down Smithay backend...");
@@ -675,10 +669,7 @@ impl AxiomCompositor {
         // Update stability metrics
         if tick_error {
             self.consecutive_error_count += 1;
-            warn!(
-                "Consecutive error count: {}",
-                self.consecutive_error_count
-            );
+            warn!("Consecutive error count: {}", self.consecutive_error_count);
         } else if self.consecutive_error_count > 0 {
             // Stable tick, but DO NOT snap-to-zero. Decrement instead so
             // a single clean tick does not mask prior consecutive
@@ -691,8 +682,7 @@ impl AxiomCompositor {
             // ticks before the counter fully resets.
             // `saturating_sub` keeps the counter at 0 instead of
             // underflowing past it.
-            self.consecutive_error_count =
-                self.consecutive_error_count.saturating_sub(1);
+            self.consecutive_error_count = self.consecutive_error_count.saturating_sub(1);
         }
 
         // Broadcast IPC performance metrics to Lazy UI (~10Hz rate-limited
@@ -786,7 +776,11 @@ impl AxiomCompositor {
         let _ = self.ipc_server.broadcast_state_change(
             "workspace",
             &old_idx.to_string(),
-            &self.workspace_manager.read().focused_column_index().to_string(),
+            &self
+                .workspace_manager
+                .read()
+                .focused_column_index()
+                .to_string(),
         );
     }
 
@@ -798,7 +792,11 @@ impl AxiomCompositor {
         let _ = self.ipc_server.broadcast_state_change(
             "workspace",
             &old_idx.to_string(),
-            &self.workspace_manager.read().focused_column_index().to_string(),
+            &self
+                .workspace_manager
+                .read()
+                .focused_column_index()
+                .to_string(),
         );
     }
 
@@ -829,7 +827,11 @@ impl AxiomCompositor {
             "Added window '{}' (ID: {}) to current workspace",
             title, window_id
         );
-        let _ = self.ipc_server.broadcast_state_change("window", "none", &format!("added:{}", window_id));
+        let _ = self.ipc_server.broadcast_state_change(
+            "window",
+            "none",
+            &format!("added:{}", window_id),
+        );
         window_id
     }
 
@@ -855,7 +857,11 @@ impl AxiomCompositor {
 
         self.window_manager.write().remove_window(window_id);
         if removed {
-            let _ = self.ipc_server.broadcast_state_change("window", &format!("active:{}", window_id), "none");
+            let _ = self.ipc_server.broadcast_state_change(
+                "window",
+                &format!("active:{}", window_id),
+                "none",
+            );
         }
 
         if let Some(ref renderer) = self.renderer {
@@ -871,7 +877,11 @@ impl AxiomCompositor {
     pub fn move_window_left(&mut self, window_id: u64) {
         if self.workspace_manager.write().move_window_left(window_id) {
             info!("Moved window {} to left workspace", window_id);
-            let _ = self.ipc_server.broadcast_state_change("window", &format!("workspace:{}", window_id), "left");
+            let _ = self.ipc_server.broadcast_state_change(
+                "window",
+                &format!("workspace:{}", window_id),
+                "left",
+            );
         }
     }
 
@@ -879,7 +889,11 @@ impl AxiomCompositor {
     pub fn move_window_right(&mut self, window_id: u64) {
         if self.workspace_manager.write().move_window_right(window_id) {
             info!("Moved window {} to right workspace", window_id);
-            let _ = self.ipc_server.broadcast_state_change("window", &format!("workspace:{}", window_id), "right");
+            let _ = self.ipc_server.broadcast_state_change(
+                "window",
+                &format!("workspace:{}", window_id),
+                "right",
+            );
         }
     }
 
@@ -894,7 +908,11 @@ impl AxiomCompositor {
             self.effects_engine
                 .write()
                 .animate_window_minimize(window_id);
-            let _ = self.ipc_server.broadcast_state_change("window", &format!("active:{}", window_id), "minimized");
+            let _ = self.ipc_server.broadcast_state_change(
+                "window",
+                &format!("active:{}", window_id),
+                "minimized",
+            );
         }
         workspace_ok || wm_ok
     }
@@ -909,7 +927,11 @@ impl AxiomCompositor {
             self.effects_engine
                 .write()
                 .animate_window_restore(window_id);
-            let _ = self.ipc_server.broadcast_state_change("window", "minimized", &format!("active:{}", window_id));
+            let _ = self.ipc_server.broadcast_state_change(
+                "window",
+                "minimized",
+                &format!("active:{}", window_id),
+            );
         }
         workspace_ok || wm_ok
     }
@@ -918,7 +940,11 @@ impl AxiomCompositor {
     pub fn toggle_fullscreen(&mut self, window_id: u64) {
         self.window_manager.write().toggle_fullscreen(window_id);
         info!("Toggled fullscreen for window {}", window_id);
-        let _ = self.ipc_server.broadcast_state_change("window", &format!("active:{}", window_id), "fullscreen_toggle");
+        let _ = self.ipc_server.broadcast_state_change(
+            "window",
+            &format!("active:{}", window_id),
+            "fullscreen_toggle",
+        );
     }
 
     /// Get current workspace information
@@ -1038,9 +1064,10 @@ impl AxiomCompositor {
 
         // Initialize server-side decoration manager for tests
         let minimize_enabled = config.features.enable_minimize;
-        let decoration_manager = Arc::new(parking_lot::RwLock::new(
-            DecorationManager::new(&config.window, minimize_enabled),
-        ));
+        let decoration_manager = Arc::new(parking_lot::RwLock::new(DecorationManager::new(
+            &config.window,
+            minimize_enabled,
+        )));
 
         // Test Smithay backend (no socket bind, no GPU init)
         let smithay_backend = AxiomSmithayBackendReal::new_for_test(
@@ -1134,9 +1161,14 @@ mod tests {
         // Window should be registered with DecorationManager using real geometry
         {
             let deco = comp.decoration_manager.read();
-            let d = deco.get_decoration(id).expect("decoration should exist after add_window");
+            let d = deco
+                .get_decoration(id)
+                .expect("decoration should exist after add_window");
             assert_eq!(d.title, "Test Window");
-            assert_eq!(d.window_width, 800, "should use default BackendWindow width");
+            assert_eq!(
+                d.window_width, 800,
+                "should use default BackendWindow width"
+            );
         }
 
         let (column, _pos, _count, _scrolling) = comp.get_workspace_info();
