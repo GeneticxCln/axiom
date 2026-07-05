@@ -16,7 +16,6 @@ NC='\033[0m' # No Color
 # Configuration
 COVERAGE_DIR="target/tarpaulin"
 MIN_COVERAGE=70
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
 echo -e "${BLUE}🧪 Axiom Compositor Test Coverage Analysis${NC}"
 echo "=================================================="

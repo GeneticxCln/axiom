@@ -270,7 +270,8 @@ class BehaviorAnalyzer:
             self.workspace_usage[f"scroll_{direction}"] += 1
         
         # Track time-based patterns
-        hour = time.localtime(event.timestamp).tm_hour
+        from datetime import datetime, timezone
+        hour = datetime.now(tz=timezone.utc).hour
         self.time_patterns[hour].append(event.event_type)
         
         logger.debug(f"Recorded user event: {event.event_type}")
@@ -339,7 +340,10 @@ class LazyUIClient:
     """Main Lazy UI client that connects to Axiom compositor"""
     
     def __init__(self):
-        self.socket_path = "/tmp/axiom-lazy-ui.sock"
+        import os
+        self.socket_path = os.path.join(
+            os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "axiom", "axiom.sock"
+        )
         self.socket = None
         self.running = False
         
@@ -356,6 +360,7 @@ class LazyUIClient:
         """Connect to the Axiom compositor IPC socket"""
         try:
             self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.socket.settimeout(10.0)
             self.socket.connect(self.socket_path)
             logger.info(f"✅ Connected to Axiom IPC: {self.socket_path}")
             return True

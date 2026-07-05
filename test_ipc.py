@@ -19,9 +19,8 @@ def test_axiom_ipc():
     
     print("🔍 Testing Axiom IPC communication...")
     
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        # Connect to Axiom's IPC socket
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(5.0)
         sock.connect(socket_path)
         print(f"✅ Connected to Axiom IPC socket: {socket_path}")
@@ -35,7 +34,7 @@ def test_axiom_ipc():
         # Test 1: Send health check request
         print("\n🏥 Testing health check...")
         health_check = {"type": "HealthCheck"}
-        sock.send((json.dumps(health_check) + "\\n").encode())
+        sock.send((json.dumps(health_check) + "\n").encode())
         
         response = sock.recv(4096).decode().strip()
         if response:
@@ -45,7 +44,7 @@ def test_axiom_ipc():
         # Test 2: Send configuration query
         print("\n⚙️ Testing configuration query...")
         config_query = {"type": "GetConfig", "key": "workspace.count"}
-        sock.send((json.dumps(config_query) + "\\n").encode())
+        sock.send((json.dumps(config_query) + "\n").encode())
         
         response = sock.recv(4096).decode().strip()
         if response:
@@ -62,11 +61,9 @@ def test_axiom_ipc():
             },
             "reason": "AI performance optimization based on usage patterns"
         }
-        sock.send((json.dumps(optimization) + "\\n").encode())
+        sock.send((json.dumps(optimization) + "\n").encode())
         
         print("✅ All IPC tests completed successfully!")
-        
-        sock.close()
         
     except FileNotFoundError:
         print(f"❌ Axiom IPC socket not found: {socket_path}")
@@ -81,6 +78,9 @@ def test_axiom_ipc():
     except Exception as e:
         print(f"❌ IPC test failed: {e}")
         return False
+    finally:
+        sock.shutdown(socket.SHUT_RDWR)
+        sock.close()
     
     return True
 

@@ -10,7 +10,6 @@ echo "============================"
 # Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-RED='\033[0;31m'
 NC='\033[0m'
 
 # Run tests and measure time
@@ -18,7 +17,7 @@ echo -e "${YELLOW}Running test suite...${NC}"
 TEST_START=$(date +%s%N)
 cargo test --quiet 2>&1 | tail -5
 TEST_END=$(date +%s%N)
-TEST_TIME=$((($TEST_END - $TEST_START)/1000000))
+TEST_TIME=$(((TEST_END - TEST_START)/1000000))
 echo -e "${GREEN}✅ Test suite completed in ${TEST_TIME}ms${NC}"
 
 # Check binary size

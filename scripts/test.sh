@@ -23,7 +23,7 @@ echo "=================================="
 # Function to print section headers
 print_section() {
     echo -e "\n${BLUE}🔍 $1${NC}"
-    echo "$(printf '%.0s-' {1..40})"
+    printf '%.0s-' {1..40}; echo
 }
 
 # Function to run tests with proper error handling
@@ -175,9 +175,6 @@ run_security_audit() {
 # Function to generate test report
 generate_report() {
     print_section "Test Summary"
-    
-    local total_tests=0
-    local passed_tests=0
     
     # Count test results (simplified - in real implementation would parse test output)
     echo -e "${GREEN}Test execution completed${NC}"

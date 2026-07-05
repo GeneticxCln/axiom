@@ -10,7 +10,8 @@ both.
 """
 
 from pathlib import Path
-p = Path('/home/quinton/axiom/src/backend/mod.rs')
+import os
+p = Path(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src/backend/mod.rs'))
 text = p.read_text()
 
 # ---- EDIT 1: extend imports to include ForeignToplevelHandle -----
