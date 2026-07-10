@@ -551,7 +551,8 @@ impl WorkspaceTape {
         }
 
         // Cleanup empty columns that haven't been accessed in a while
-        if now.duration_since(self.last_cleanup) > Duration::from_secs(COLUMN_CLEANUP_INTERVAL_SECS) {
+        if now.duration_since(self.last_cleanup) > Duration::from_secs(COLUMN_CLEANUP_INTERVAL_SECS)
+        {
             self.cleanup_empty_columns();
             self.last_cleanup = now;
         }
@@ -768,9 +769,7 @@ impl ScrollableWorkspaces {
         *self.cached_layouts.lock() = None;
         debug!(
             "📦 Workspace: restored window {} to column {} (focused = {})",
-            window_id,
-            target_column,
-            focused_column
+            window_id, target_column, focused_column
         );
         true
     }

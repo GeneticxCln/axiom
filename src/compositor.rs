@@ -335,7 +335,7 @@ impl AxiomCompositor {
             }
             "minimize_window" => match parameters.get("window_id").and_then(|v| v.as_u64()) {
                 Some(id) => {
-                    self.minimize_window(id);
+                    let _ = self.minimize_window(id);
                 }
                 None => {
                     warn!("WorkspaceCommand minimize_window missing 'window_id' parameter — no-op")
@@ -343,7 +343,7 @@ impl AxiomCompositor {
             },
             "restore_window" => match parameters.get("window_id").and_then(|v| v.as_u64()) {
                 Some(id) => {
-                    self.restore_window(id);
+                    let _ = self.restore_window(id);
                 }
                 None => {
                     warn!("WorkspaceCommand restore_window missing 'window_id' parameter — no-op")
@@ -385,24 +385,13 @@ impl AxiomCompositor {
             animation_speed,
         );
 
-        // Persist live values back to the config so a subsequent
-        // OptimizeConfig / SetConfig for unrelated keys won't overwrite
-        // the live runtime mutations via update_config.
+        // Persist enabled state to config so it survives update_config calls.
+        // Blur radius and animation speed are runtime-only mutations that
+        // apply_live_effects_control stores in the effects engine; config
+        // values are the initial/baseline — the engine re-derives runtime
+        // state from them on each update_config call.
         if let Some(e) = enabled {
             self.config.effects.enabled = e;
-        }
-        if let Some(r) = blur_radius {
-            if r.is_finite() && r >= 0.0 {
-                self.config.effects.blur.radius = r as u32;
-            }
-        }
-        if let Some(s) = animation_speed {
-            if s.is_finite() && s > 0.0 {
-                // Re-derive duration from the speed multiplier.
-                let base_ms = self.config.effects.animations.duration as f32;
-                let new_ms = (base_ms / s).max(1.0).round() as u32;
-                self.config.effects.animations.duration = new_ms;
-            }
         }
 
         debug!(
@@ -626,6 +615,7 @@ impl AxiomCompositor {
     }
 
     /// Single tick of the compositor (event processing + rendering)
+    #[allow(clippy::await_holding_lock)] // false positive: parking_lot guard is explicitly dropped before any .await
     async fn tick(&mut self) -> Result<()> {
         use std::time::{Duration, Instant};
         let frame_start = Instant::now();
@@ -771,33 +761,27 @@ impl AxiomCompositor {
     /// Scroll workspace left (for input handling)
     pub fn scroll_workspace_left(&mut self) {
         info!("Scrolling workspace left");
-        let old_idx = self.workspace_manager.read().focused_column_index();
-        self.workspace_manager.write().scroll_left();
-        let _ = self.ipc_server.broadcast_state_change(
-            "workspace",
-            &old_idx.to_string(),
-            &self
-                .workspace_manager
-                .read()
-                .focused_column_index()
-                .to_string(),
-        );
+        let mut wm = self.workspace_manager.write();
+        let old_idx = wm.focused_column_index();
+        wm.scroll_left();
+        let new_idx = wm.focused_column_index();
+        drop(wm);
+        let _ = self
+            .ipc_server
+            .broadcast_state_change("workspace", &old_idx.to_string(), &new_idx.to_string());
     }
 
     /// Scroll workspace right (for input handling)
     pub fn scroll_workspace_right(&mut self) {
         info!("Scrolling workspace right");
-        let old_idx = self.workspace_manager.read().focused_column_index();
-        self.workspace_manager.write().scroll_right();
-        let _ = self.ipc_server.broadcast_state_change(
-            "workspace",
-            &old_idx.to_string(),
-            &self
-                .workspace_manager
-                .read()
-                .focused_column_index()
-                .to_string(),
-        );
+        let mut wm = self.workspace_manager.write();
+        let old_idx = wm.focused_column_index();
+        wm.scroll_right();
+        let new_idx = wm.focused_column_index();
+        drop(wm);
+        let _ = self
+            .ipc_server
+            .broadcast_state_change("workspace", &old_idx.to_string(), &new_idx.to_string());
     }
 
     /// Add a new window to the current workspace.
@@ -900,6 +884,7 @@ impl AxiomCompositor {
     /// Minimize a window (remove from workspace layout and mark as iconified).
     /// Returns `true` if the window was found and minimized, `false` if the
     /// window ID did not exist or was already minimized.
+    #[must_use]
     pub fn minimize_window(&mut self, window_id: u64) -> bool {
         let workspace_ok = self.workspace_manager.write().minimize_window(window_id);
         let wm_ok = self.window_manager.write().minimize_window(window_id);
@@ -919,6 +904,7 @@ impl AxiomCompositor {
 
     /// Restore a previously minimized window back to its originating column.
     /// Returns `true` if the window was found and restored.
+    #[must_use]
     pub fn restore_window(&mut self, window_id: u64) -> bool {
         let workspace_ok = self.workspace_manager.write().restore_window(window_id);
         let wm_ok = self.window_manager.write().restore_window(window_id);

@@ -36,7 +36,12 @@ pub enum BlurType {
     },
 }
 
-/// Blur effect parameters
+/// GPU-specific blur parameters for the [`BlurRenderer`].
+///
+/// This is distinct from [`crate::effects::BlurParams`] which is the
+/// high-level effects-engine blur config. This type includes GPU renderer
+/// specifics (adaptive quality, performance scale) that the effects engine
+/// does not expose.
 #[derive(Debug, Clone)]
 pub struct BlurParams {
     pub blur_type: BlurType,

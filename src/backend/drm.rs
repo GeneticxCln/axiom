@@ -15,19 +15,18 @@
 //!   └── DrmSession    — libinput + calloop event loop
 //! ```
 
-use drm::control::{
-    connector, crtc, encoder, framebuffer, Device as ControlDevice, Event, Mode,
-    ResourceHandles,
-};
 use calloop::generic::Generic;
-use calloop::{EventLoop, LoopHandle, Interest, Mode as CalloopMode, PostAction};
+use calloop::{EventLoop, Interest, LoopHandle, Mode as CalloopMode, PostAction};
+use drm::control::{
+    connector, crtc, encoder, framebuffer, Device as ControlDevice, Event, Mode, ResourceHandles,
+};
 use drm::Device;
 use gbm::{BufferObjectFlags, Device as GbmDevice, Format as GbmFormat};
 use input::{Libinput, LibinputInterface};
 use log::{debug, info, warn};
 use std::fs::File;
-use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::time::Duration;
 use udev::MonitorSocket;
@@ -176,8 +175,8 @@ impl GbmRenderState {
         // SAFETY: `duped` is a valid, newly-allocated FD from dup().
         let gbm_fd = unsafe { OwnedFd::from_raw_fd(duped) };
 
-        let device =
-            GbmDevice::new(gbm_fd).map_err(|e| anyhow::anyhow!("Failed to create GBM device: {}", e))?;
+        let device = GbmDevice::new(gbm_fd)
+            .map_err(|e| anyhow::anyhow!("Failed to create GBM device: {}", e))?;
 
         info!("GBM device created (backend: {:?})", device.backend_name());
 
@@ -280,7 +279,10 @@ impl std::fmt::Debug for KmsOutput {
             .field("encoder", &u32::from(self.encoder))
             .field("width", &self.width)
             .field("height", &self.height)
-            .field("physical_mm", &(self.physical_width_mm, self.physical_height_mm))
+            .field(
+                "physical_mm",
+                &(self.physical_width_mm, self.physical_height_mm),
+            )
             .field("scale_factor", &self.scale_factor)
             .field("gbm", &self.gbm.is_some())
             .finish()
@@ -298,7 +300,12 @@ impl std::fmt::Debug for KmsOutput {
 /// ```
 ///
 /// Falls back to 1.0 when physical dimensions are zero or NaN.
-fn scale_factor_from_edid(mode_width: u32, mode_height: u32, physical_w_mm: u32, physical_h_mm: u32) -> f64 {
+fn scale_factor_from_edid(
+    mode_width: u32,
+    mode_height: u32,
+    physical_w_mm: u32,
+    physical_h_mm: u32,
+) -> f64 {
     if physical_w_mm == 0 || physical_h_mm == 0 {
         return 1.0;
     }
@@ -314,7 +321,7 @@ fn scale_factor_from_edid(mode_width: u32, mode_height: u32, physical_w_mm: u32,
     let dpi = diagonal_px / (diagonal_mm / 25.4);
     // Cap at 4.0 — extreme EDID values (e.g. 4K at 10mm) would otherwise
     // produce absurd scales that break layout and hit-testing.
-    let scale = (dpi / 96.0).round().max(1.0).min(4.0);
+    let scale = (dpi / 96.0).round().clamp(1.0, 4.0);
     info!(
         "DPI calc: {}x{} px, {}x{} mm → {:.1} DPI → scale {:.0}x",
         mode_width, mode_height, physical_w_mm, physical_h_mm, dpi, scale
@@ -368,11 +375,13 @@ impl KmsState {
             std::collections::HashSet::new();
         let mut outputs: Vec<KmsOutput> = Vec::with_capacity(candidates.len());
 
-        for (connector, encoder, crtc, mode, physical_w_mm, physical_h_mm, conn_name) in candidates {
+        for (connector, encoder, crtc, mode, physical_w_mm, physical_h_mm, conn_name) in candidates
+        {
             if used_crtcs.contains(&crtc) {
                 warn!(
                     "Connector {} wants CRTC {:?} which is already claimed — skipping",
-                    conn_name, u32::from(crtc)
+                    conn_name,
+                    u32::from(crtc)
                 );
                 continue;
             }
@@ -402,7 +411,10 @@ impl KmsState {
                 let raw_fd = card.raw_fd();
                 GbmRenderState::new(raw_fd, width, height)
                     .map_err(|e| {
-                        warn!("GBM init failed for '{}' ({}); falling back to dumb buffer", conn_name, e);
+                        warn!(
+                            "GBM init failed for '{}' ({}); falling back to dumb buffer",
+                            conn_name, e
+                        );
                         e
                     })
                     .ok()
@@ -451,9 +463,11 @@ impl KmsState {
                 });
             }
 
-            info!("Output '{}' initialized: {}x{} @ {:.1}x scale",
+            info!(
+                "Output '{}' initialized: {}x{} @ {:.1}x scale",
                 outputs.last().unwrap().name,
-                width, height,
+                width,
+                height,
                 scale_factor,
             );
         }
@@ -468,7 +482,7 @@ impl KmsState {
     fn find_all_connected_connectors(
         card: &Card,
         resources: &ResourceHandles,
-    ) -> Result<Vec<(connector::Handle, encoder::Handle, crtc::Handle, Mode, u32, u32, String)>, anyhow::Error> {
+    ) -> Result<Vec<ConnectorInfo>, anyhow::Error> {
         let mut results = Vec::new();
 
         for &conn in resources.connectors() {
@@ -496,11 +510,7 @@ impl KmsState {
             let physical_h_mm = size_mm.1;
 
             // Build a human-readable connector name.
-            let conn_name = format!(
-                "{:?}-{}",
-                conn_info.interface(),
-                conn_info.interface_id()
-            );
+            let conn_name = format!("{:?}-{}", conn_info.interface(), conn_info.interface_id());
             debug!(
                 "Connector '{}' connected, mode: {}x{}, physical: {}x{}mm",
                 conn_name, w, h, physical_w_mm, physical_h_mm
@@ -518,8 +528,12 @@ impl KmsState {
                         conn, enc, crtc_h, w, h
                     );
                     results.push((
-                        conn, enc, crtc_h, mode,
-                        physical_w_mm, physical_h_mm,
+                        conn,
+                        enc,
+                        crtc_h,
+                        mode,
+                        physical_w_mm,
+                        physical_h_mm,
                         conn_name.clone(),
                     ));
                     // Only take the first compatible encoder for this
@@ -756,9 +770,21 @@ pub struct DrmEventCollector {
     pub udev_ready: bool,
 }
 
-// ============================================================================
-// DrmBackend — compositor-facing backend state
-// ============================================================================
+/// Connector info returned by [`KmsState::find_all_connected_connectors`].
+/// Fields: connector, encoder, crtc, mode, physical_w_mm, physical_h_mm, connector_name.
+type ConnectorInfo = (
+    connector::Handle,
+    encoder::Handle,
+    crtc::Handle,
+    Mode,
+    u32,
+    u32,
+    String,
+);
+
+// ======================================================================
+// KmsState — Connector/CRTC/encoder enumeration, mode setting, page-flip
+// ======================================================================
 
 /// Top-level DRM backend state for the Axiom compositor.
 pub struct DrmBackend {
@@ -791,7 +817,6 @@ impl std::fmt::Debug for DrmBackend {
             .finish()
     }
 }
-
 
 impl DrmBackend {
     pub fn new() -> Self {
@@ -879,7 +904,10 @@ impl DrmBackend {
     /// Iterate over KMS outputs for the caller (compositor).
     /// Returns an empty slice when KMS is not initialized.
     pub fn kms_outputs(&self) -> &[KmsOutput] {
-        self.kms.as_ref().map(|k| k.outputs.as_slice()).unwrap_or(&[])
+        self.kms
+            .as_ref()
+            .map(|k| k.outputs.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Drain pending DRM events.
@@ -916,9 +944,10 @@ impl DrmBackend {
 
     /// Block until a DRM event is available (up to `timeout`).
     pub fn poll_event(&self, timeout: Duration) -> Result<bool, anyhow::Error> {
-        let kms = self.kms.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("KMS not initialized")
-        })?;
+        let kms = self
+            .kms
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("KMS not initialized"))?;
         let fd = kms.card.raw_fd();
         let mut pfd = libc::pollfd {
             fd,
@@ -929,7 +958,10 @@ impl DrmBackend {
         // SAFETY: poll() is safe with a valid fd and initialized struct.
         let ret = unsafe { libc::poll(&mut pfd, 1, ms) };
         if ret < 0 {
-            Err(anyhow::anyhow!("DRM poll failed: {}", std::io::Error::last_os_error()))
+            Err(anyhow::anyhow!(
+                "DRM poll failed: {}",
+                std::io::Error::last_os_error()
+            ))
         } else {
             Ok(ret > 0)
         }
@@ -1000,7 +1032,6 @@ impl DrmBackend {
             debug!("Registered libinput FD {} with calloop", li_fd);
         }
 
-
         self.calloop_loop = Some(event_loop);
         self.calloop_handle = Some(handle);
         info!("Calloop event loop initialized");
@@ -1046,7 +1077,10 @@ impl DrmBackend {
                 }
             },
             Err(e) => {
-                warn!("Failed to create udev monitor: {} — DRM hotplug unavailable", e);
+                warn!(
+                    "Failed to create udev monitor: {} — DRM hotplug unavailable",
+                    e
+                );
                 return;
             }
         };
@@ -1062,13 +1096,16 @@ impl DrmBackend {
             }
             match CalloopFd::dup(udev_fd) {
                 Ok(dup_fd) => {
-                    if handle.insert_source(
-                        Generic::new(dup_fd, Interest::READ, CalloopMode::Level),
-                        |_, _, collector: &mut DrmEventCollector| {
-                            collector.udev_ready = true;
-                            Ok(PostAction::Continue)
-                        },
-                    ).is_ok() {
+                    if handle
+                        .insert_source(
+                            Generic::new(dup_fd, Interest::READ, CalloopMode::Level),
+                            |_, _, collector: &mut DrmEventCollector| {
+                                collector.udev_ready = true;
+                                Ok(PostAction::Continue)
+                            },
+                        )
+                        .is_ok()
+                    {
                         info!("🔌 udev DRM hotplug monitor registered with calloop");
                     } else {
                         warn!("Failed to register udev monitor FD with calloop");
@@ -1102,10 +1139,7 @@ impl DrmBackend {
             // the non-blocking socket. When the FD is set O_NONBLOCK,
             // the iterator stops when the buffer is drained.
             for event in monitor.iter() {
-                let action = event
-                    .action()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
+                let action = event.action().and_then(|s| s.to_str()).unwrap_or("unknown");
                 let devtype = event
                     .devtype()
                     .and_then(|s| s.to_str())
@@ -1122,8 +1156,10 @@ impl DrmBackend {
                 // state changed (monitor plugged/unplugged).
                 if subsystem == "drm" && action == "change" {
                     hotplug_detected = true;
-                    info!("🔌 DRM hotplug detected (udev action={}, devtype={})",
-                        action, devtype);
+                    info!(
+                        "🔌 DRM hotplug detected (udev action={}, devtype={})",
+                        action, devtype
+                    );
                 }
             }
         } // end of for-event scope
@@ -1153,11 +1189,8 @@ impl DrmBackend {
             .map(|k| k.outputs.iter().map(|o| o.name.as_str()).collect())
             .unwrap_or_default();
 
-        let new_names: std::collections::HashSet<&str> = new_kms
-            .outputs
-            .iter()
-            .map(|o| o.name.as_str())
-            .collect();
+        let new_names: std::collections::HashSet<&str> =
+            new_kms.outputs.iter().map(|o| o.name.as_str()).collect();
 
         let added: Vec<String> = new_names
             .difference(&old_names)
@@ -1260,7 +1293,10 @@ mod tests {
     fn test_backend_kind_unknown_falls_back_to_winit() {
         assert_eq!(BackendKind::from_config_str("bogus"), BackendKind::Winit);
         assert_eq!(BackendKind::from_config_str(""), BackendKind::Winit);
-        assert_eq!(BackendKind::from_config_str("drm_backend"), BackendKind::Winit);
+        assert_eq!(
+            BackendKind::from_config_str("drm_backend"),
+            BackendKind::Winit
+        );
     }
 
     // ── DRM probe ──────────────────────────────────────────────────────────
@@ -1384,5 +1420,4 @@ mod tests {
             );
         }
     }
-
 }

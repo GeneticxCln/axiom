@@ -414,11 +414,7 @@ fn test_remove_middle_window_preserves_order() {
     workspaces.add_window(3);
 
     let col = workspaces.get_focused_column_opt().unwrap();
-    assert_eq!(
-        col.windows,
-        vec![1, 2, 3],
-        "three windows added in order"
-    );
+    assert_eq!(col.windows, vec![1, 2, 3], "three windows added in order");
 
     // ── Remove the middle window (ID 2) ─────────────────────────────
     let removed = workspaces.remove_window(2);
@@ -429,14 +425,8 @@ fn test_remove_middle_window_preserves_order() {
         !workspaces.window_exists(2),
         "window 2 must no longer exist"
     );
-    assert!(
-        workspaces.window_exists(1),
-        "window 1 must still exist"
-    );
-    assert!(
-        workspaces.window_exists(3),
-        "window 3 must still exist"
-    );
+    assert!(workspaces.window_exists(1), "window 1 must still exist");
+    assert!(workspaces.window_exists(3), "window 3 must still exist");
 
     let col = workspaces.get_focused_column_opt().unwrap();
     assert_eq!(
@@ -536,72 +526,73 @@ fn test_multi_monitor_tapes() {
         workspaces.active_tape().get_focused_column_windows(),
         vec![1001]
     );
-}    /// Verify that changing viewport size multiple times produces
-    /// correct layout dimensions on every call — no stale cached values
-    /// from a previous viewport size survive across resizes.
-    #[test]
-    fn test_viewport_resize_invalidates_layout_cache() {
-        let config = WorkspaceConfig::default();
-        let mut workspaces = ScrollableWorkspaces::new(&config);
+}
+/// Verify that changing viewport size multiple times produces
+/// correct layout dimensions on every call — no stale cached values
+/// from a previous viewport size survive across resizes.
+#[test]
+fn test_viewport_resize_invalidates_layout_cache() {
+    let config = WorkspaceConfig::default();
+    let mut workspaces = ScrollableWorkspaces::new(&config);
 
-        // Add three windows to the focused column
-        workspaces.add_window(1);
-        workspaces.add_window(2);
-        workspaces.add_window(3);
+    // Add three windows to the focused column
+    workspaces.add_window(1);
+    workspaces.add_window(2);
+    workspaces.add_window(3);
 
-        // ── 1080p ────────────────────────────────────
-        workspaces.set_viewport_size(1920.0, 1080.0);
-        let layouts_1080 = workspaces.calculate_workspace_layouts();
-        assert_eq!(layouts_1080.len(), 3, "all three windows tiled");
-        for rect in layouts_1080.values() {
-            assert!(rect.height > 0, "height must be positive at 1080p");
-            assert!(rect.height <= 1080, "height must not exceed viewport");
-        }
-        let heights_1080: Vec<_> = layouts_1080.values().map(|r| r.height).collect();
+    // ── 1080p ────────────────────────────────────
+    workspaces.set_viewport_size(1920.0, 1080.0);
+    let layouts_1080 = workspaces.calculate_workspace_layouts();
+    assert_eq!(layouts_1080.len(), 3, "all three windows tiled");
+    for rect in layouts_1080.values() {
+        assert!(rect.height > 0, "height must be positive at 1080p");
+        assert!(rect.height <= 1080, "height must not exceed viewport");
+    }
+    let heights_1080: Vec<_> = layouts_1080.values().map(|r| r.height).collect();
 
-        // ── Shrink to 600p ───────────────────────────
-        workspaces.set_viewport_size(800.0, 600.0);
-        let layouts_600 = workspaces.calculate_workspace_layouts();
-        assert_eq!(layouts_600.len(), 3);
-        for rect in layouts_600.values() {
-            assert!(rect.height > 0, "height must be positive at 600p");
-            assert!(
-                rect.height < heights_1080[0],
-                "600p window height {} must be smaller than 1080p height {}",
-                rect.height,
-                heights_1080[0]
-            );
-        }
-
-        // ── Grow to 4K ───────────────────────────────
-        workspaces.set_viewport_size(3840.0, 2160.0);
-        let layouts_4k = workspaces.calculate_workspace_layouts();
-        assert_eq!(layouts_4k.len(), 3);
-        for rect in layouts_4k.values() {
-            assert!(rect.height > 0, "height must be positive at 4K");
-            assert!(
-                rect.height > heights_1080[0],
-                "4K window height {} must be larger than 1080p height {}",
-                rect.height,
-                heights_1080[0]
-            );
-        }
-
-        // ── Back to 1080p — must match original ──────
-        workspaces.set_viewport_size(1920.0, 1080.0);
-        let layouts_1080_round2 = workspaces.calculate_workspace_layouts();
-        assert_eq!(layouts_1080_round2.len(), 3);
-        for (id, rect) in &layouts_1080_round2 {
-            let original = layouts_1080.get(id).expect("same window id");
-            assert_eq!(
-                rect.height, original.height,
-                "back to 1080p: window {} height should match original",
-                id
-            );
-        }
+    // ── Shrink to 600p ───────────────────────────
+    workspaces.set_viewport_size(800.0, 600.0);
+    let layouts_600 = workspaces.calculate_workspace_layouts();
+    assert_eq!(layouts_600.len(), 3);
+    for rect in layouts_600.values() {
+        assert!(rect.height > 0, "height must be positive at 600p");
+        assert!(
+            rect.height < heights_1080[0],
+            "600p window height {} must be smaller than 1080p height {}",
+            rect.height,
+            heights_1080[0]
+        );
     }
 
-    #[cfg(test)]
+    // ── Grow to 4K ───────────────────────────────
+    workspaces.set_viewport_size(3840.0, 2160.0);
+    let layouts_4k = workspaces.calculate_workspace_layouts();
+    assert_eq!(layouts_4k.len(), 3);
+    for rect in layouts_4k.values() {
+        assert!(rect.height > 0, "height must be positive at 4K");
+        assert!(
+            rect.height > heights_1080[0],
+            "4K window height {} must be larger than 1080p height {}",
+            rect.height,
+            heights_1080[0]
+        );
+    }
+
+    // ── Back to 1080p — must match original ──────
+    workspaces.set_viewport_size(1920.0, 1080.0);
+    let layouts_1080_round2 = workspaces.calculate_workspace_layouts();
+    assert_eq!(layouts_1080_round2.len(), 3);
+    for (id, rect) in &layouts_1080_round2 {
+        let original = layouts_1080.get(id).expect("same window id");
+        assert_eq!(
+            rect.height, original.height,
+            "back to 1080p: window {} height should match original",
+            id
+        );
+    }
+}
+
+#[cfg(test)]
 mod property_tests {
     use super::*;
     use proptest::prelude::*;

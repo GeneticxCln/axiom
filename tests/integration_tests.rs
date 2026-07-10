@@ -491,18 +491,20 @@ async fn test_decoration_manager_with_real_window_geometry() -> Result<()> {
     let window_id = wm.add_window("Integration Test Window".into());
     assert_eq!(window_id, 1, "first window ID is 1");
 
-    let axiom_window = wm
-        .get_window(window_id)
-        .expect("window exists after add");
+    let axiom_window = wm.get_window(window_id).expect("window exists after add");
     let real_width = axiom_window.window.size.0 as i32; // 800 by default
     assert_eq!(real_width, 800, "default BackendWindow width is 800");
     let real_title = axiom_window.window.title.clone();
     assert_eq!(real_title, "Integration Test Window");
 
     // ── Feed real geometry into DecorationManager (no placeholder) ─
-    let mut deco =
-        DecorationManager::new(&window_config, /* minimize_enabled */ false);
-    deco.add_window(window_id, real_title.clone(), /* prefers_server_side */ true, real_width);
+    let mut deco = DecorationManager::new(&window_config, /* minimize_enabled */ false);
+    deco.add_window(
+        window_id,
+        real_title.clone(),
+        /* prefers_server_side */ true,
+        real_width,
+    );
 
     // ── Verify the decoration was created with the real width ──────
     let decoration = deco
@@ -567,10 +569,7 @@ async fn test_decoration_manager_with_real_window_geometry() -> Result<()> {
 
     // Click below the titlebar (y=50) → no action
     let action = deco.handle_button_press(window_id, 100, 50);
-    assert!(
-        action.is_none(),
-        "click below titlebar should return None"
-    );
+    assert!(action.is_none(), "click below titlebar should return None");
 
     // ── Resize window and verify button positions update ───────────
     // Simulate the compositor resizing the window to 1200px wide
@@ -600,7 +599,10 @@ async fn test_decoration_manager_with_real_window_geometry() -> Result<()> {
     // Verify it doesn't panic or corrupt state
     deco.set_window_width(window_id, 1200);
     let decoration = deco.get_decoration(window_id).unwrap();
-    assert_eq!(decoration.buttons.close.bounds.x, 1168, "no-op set_window_width unchanged");
+    assert_eq!(
+        decoration.buttons.close.bounds.x, 1168,
+        "no-op set_window_width unchanged"
+    );
 
     // ── Focus change ──────────────────────────────────────────────
     deco.set_window_focus(window_id, true);
@@ -610,7 +612,10 @@ async fn test_decoration_manager_with_real_window_geometry() -> Result<()> {
 
     // ── Title update ──────────────────────────────────────────────
     deco.set_window_title(window_id, "Renamed Window".into());
-    assert_eq!(deco.get_decoration(window_id).unwrap().title, "Renamed Window");
+    assert_eq!(
+        deco.get_decoration(window_id).unwrap().title,
+        "Renamed Window"
+    );
 
     // ── Remove window from decoration manager ─────────────────────
     deco.remove_window(window_id);
@@ -670,8 +675,14 @@ async fn test_prepare_window_resources_creates_buffers() -> Result<()> {
     {
         let w = &renderer.windows[0];
         assert!(w.texture_view.is_some(), "texture should be uploaded");
-        assert!(w.cached_uniform_buffer.is_none(), "uniform buffer starts None");
-        assert!(w.cached_vertex_buffer.is_none(), "vertex buffer starts None");
+        assert!(
+            w.cached_uniform_buffer.is_none(),
+            "uniform buffer starts None"
+        );
+        assert!(
+            w.cached_vertex_buffer.is_none(),
+            "vertex buffer starts None"
+        );
     }
 
     // After prepare, both buffers should be populated
@@ -692,7 +703,10 @@ async fn test_prepare_window_resources_creates_buffers() -> Result<()> {
             (w.cached_opacity - w.opacity).abs() < f32::EPSILON,
             "cached_opacity should sync to live opacity"
         );
-        assert_eq!(w.cached_uniform_size, w.size, "cached_uniform_size should sync");
+        assert_eq!(
+            w.cached_uniform_size, w.size,
+            "cached_uniform_size should sync"
+        );
         assert_eq!(w.cached_position, w.position, "cached_position should sync");
         assert_eq!(w.cached_size, w.size, "cached_size should sync");
     }
@@ -731,7 +745,10 @@ async fn test_prepare_window_resources_opacity_recreation() -> Result<()> {
 
     {
         let w = &renderer.windows[0];
-        assert!(w.cached_uniform_buffer.is_some(), "uniform buffer recreated");
+        assert!(
+            w.cached_uniform_buffer.is_some(),
+            "uniform buffer recreated"
+        );
         assert!(
             (w.cached_opacity - 0.5).abs() < f32::EPSILON,
             "cached_opacity should sync to 0.5"
@@ -770,18 +787,30 @@ async fn test_prepare_window_resources_size_recreation() -> Result<()> {
 
     // Caches should be stale
     assert_eq!(renderer.windows[0].size, (600.0, 450.0));
-    assert_eq!(renderer.windows[0].cached_uniform_size, (400.0, 300.0),
-        "cached_uniform_size stale");
-    assert_eq!(renderer.windows[0].cached_size, (400.0, 300.0),
-        "cached_size stale");
+    assert_eq!(
+        renderer.windows[0].cached_uniform_size,
+        (400.0, 300.0),
+        "cached_uniform_size stale"
+    );
+    assert_eq!(
+        renderer.windows[0].cached_size,
+        (400.0, 300.0),
+        "cached_size stale"
+    );
 
     // Second prepare — both buffers regenerated (size flows into both)
     renderer.prepare_window_resources();
 
     {
         let w = &renderer.windows[0];
-        assert!(w.cached_uniform_buffer.is_some(), "uniform buffer recreated after size change");
-        assert!(w.cached_vertex_buffer.is_some(), "vertex buffer recreated after size change");
+        assert!(
+            w.cached_uniform_buffer.is_some(),
+            "uniform buffer recreated after size change"
+        );
+        assert!(
+            w.cached_vertex_buffer.is_some(),
+            "vertex buffer recreated after size change"
+        );
         assert_eq!(w.cached_uniform_size, (600.0, 450.0));
         assert_eq!(w.cached_size, (600.0, 450.0));
     }
@@ -809,8 +838,11 @@ async fn test_prepare_window_resources_position_recreation() -> Result<()> {
     renderer.upsert_window_rect(1, (300.0, 500.0), (400.0, 300.0), 1.0);
 
     assert_eq!(renderer.windows[0].position, (300.0, 500.0));
-    assert_eq!(renderer.windows[0].cached_position, (100.0, 200.0),
-        "cached_position stale");
+    assert_eq!(
+        renderer.windows[0].cached_position,
+        (100.0, 200.0),
+        "cached_position stale"
+    );
 
     // Second prepare — vertex buffer regenerated (coords shift),
     // uniform buffer survives (opacity + size unchanged)
@@ -818,8 +850,14 @@ async fn test_prepare_window_resources_position_recreation() -> Result<()> {
 
     {
         let w = &renderer.windows[0];
-        assert!(w.cached_uniform_buffer.is_some(), "uniform buffer survives position change");
-        assert!(w.cached_vertex_buffer.is_some(), "vertex buffer recreated after position change");
+        assert!(
+            w.cached_uniform_buffer.is_some(),
+            "uniform buffer survives position change"
+        );
+        assert!(
+            w.cached_vertex_buffer.is_some(),
+            "vertex buffer recreated after position change"
+        );
         assert_eq!(w.cached_position, (300.0, 500.0));
         assert_eq!(w.cached_uniform_size, (400.0, 300.0));
         assert_eq!(w.cached_size, (400.0, 300.0));
@@ -884,8 +922,7 @@ async fn test_prepare_window_resources_idempotent() -> Result<()> {
 #[cfg(debug_assertions)]
 #[tokio::test]
 #[serial_test::serial]
-async fn test_prepare_window_resources_creates_buffers_for_placeholder_window() -> Result<()>
-{
+async fn test_prepare_window_resources_creates_buffers_for_placeholder_window() -> Result<()> {
     use axiom::renderer::AxiomRenderer;
 
     let mut renderer = AxiomRenderer::new_headless().await?;
@@ -920,7 +957,10 @@ async fn test_prepare_window_resources_creates_buffers_for_placeholder_window() 
         "vertex buffer should be created even with no texture (placeholder path)"
     );
     // Window state is still placeholder (no texture)
-    assert!(w.texture_view.is_none(), "texture still None — placeholder path");
+    assert!(
+        w.texture_view.is_none(),
+        "texture still None — placeholder path"
+    );
 
     Ok(())
 }
@@ -996,12 +1036,15 @@ async fn test_compose_full_frame_with_mixed_windows() -> Result<()> {
     assert!(
         textured.0 > textured.1 * 3 && textured.0 > textured.2 * 3,
         "textured window center should be strongly red-dominant (R={}, G={}, B={})",
-        textured.0, textured.1, textured.2
+        textured.0,
+        textured.1,
+        textured.2
     );
     assert!(
         textured != bg,
         "textured window center ({:?}) must differ from background ({:?})",
-        textured, bg
+        textured,
+        bg
     );
 
     // ── 3. Placeholder window sample — center of the 32×32 placeholder ──
@@ -1014,7 +1057,8 @@ async fn test_compose_full_frame_with_mixed_windows() -> Result<()> {
         placeholder != bg,
         "placeholder window center ({:?}) must differ from background ({:?}) \
          — placeholder pass did not write any pixels",
-        placeholder, bg
+        placeholder,
+        bg
     );
 
     // ── 4. The two window samples must differ from each other ────────
@@ -1083,7 +1127,9 @@ async fn test_compose_full_frame_skips_untextured_windows() -> Result<()> {
     assert!(
         textured.0 > textured.1 * 3 && textured.0 > textured.2 * 3,
         "textured window center should be strongly red-dominant (R={}, G={}, B={})",
-        textured.0, textured.1, textured.2
+        textured.0,
+        textured.1,
+        textured.2
     );
     assert_ne!(
         textured, bg,
@@ -1159,7 +1205,11 @@ async fn test_headless_clear_readback() -> Result<()> {
     let pixels = renderer.render_headless_clear_readback(width, height, 64, 128, 192, 255)?;
 
     // Should get width × height × 4 bytes back
-    assert_eq!(pixels.len(), (width * height * 4) as usize, "correct byte count");
+    assert_eq!(
+        pixels.len(),
+        (width * height * 4) as usize,
+        "correct byte count"
+    );
 
     // Verify every pixel matches the clear color
     for chunk in pixels.chunks_exact(4) {
@@ -1305,7 +1355,10 @@ async fn test_remove_window_clears_shadow_blur_queues() -> Result<()> {
     assert!(renderer.has_window_blur(1), "blur should be queued");
 
     // ── Remove the window ────────────────────────────────────────
-    assert!(renderer.remove_window(1), "should successfully remove window 1");
+    assert!(
+        renderer.remove_window(1),
+        "should successfully remove window 1"
+    );
 
     // Both shadow and blur entries must be cleared
     assert!(
@@ -1364,7 +1417,10 @@ async fn test_remove_middle_window_clears_only_its_shadow() -> Result<()> {
     assert!(renderer.has_window_blur(3), "window 3 blur queued");
 
     // ── Remove the middle window (ID 2) ─────────────────────────
-    assert!(renderer.remove_window(2), "should successfully remove window 2");
+    assert!(
+        renderer.remove_window(2),
+        "should successfully remove window 2"
+    );
 
     // ── Only window 2's shadow and blur entries should be cleared ──
     assert!(
@@ -1395,7 +1451,11 @@ async fn test_remove_middle_window_clears_only_its_shadow() -> Result<()> {
     );
 
     // ── Window count: 3 - 1 = 2 ─────────────────────────────────
-    assert_eq!(renderer.window_count(), 2, "two windows remaining after removal");
+    assert_eq!(
+        renderer.window_count(),
+        2,
+        "two windows remaining after removal"
+    );
 
     Ok(())
 }
@@ -1425,10 +1485,7 @@ async fn test_remove_window_from_empty_renderer_no_panic() -> Result<()> {
 
     // State unchanged
     assert_eq!(renderer.window_count(), 0, "window_count still zero");
-    assert!(
-        renderer.windows.is_empty(),
-        "windows vec still empty"
-    );
+    assert!(renderer.windows.is_empty(), "windows vec still empty");
 
     Ok(())
 }
@@ -1532,7 +1589,11 @@ async fn test_two_overlapping_windows_alpha_blend() -> Result<()> {
     let width = 128u32;
     let height = 128u32;
     let pixels = renderer.render_to_headless_target(width, height)?;
-    assert_eq!(pixels.len(), (width * height * 4) as usize, "correct byte count");
+    assert_eq!(
+        pixels.len(),
+        (width * height * 4) as usize,
+        "correct byte count"
+    );
 
     // Helper: fetch (R, G, B, A) at (x, y).
     // BGRA sRGB target → bytes at idx+0=B, idx+1=G, idx+2=R, idx+3=A.
@@ -1541,7 +1602,7 @@ async fn test_two_overlapping_windows_alpha_blend() -> Result<()> {
         (
             pixels[idx + 2], // R
             pixels[idx + 1], // G
-            pixels[idx], // B
+            pixels[idx],     // B
             pixels[idx + 3], // A
         )
     };
@@ -1558,10 +1619,18 @@ async fn test_two_overlapping_windows_alpha_blend() -> Result<()> {
     // Semi-transparent green over transparent black → dim green.
     let (r, g, b, a) = sample(72, 72);
     assert!(r < 10, "green-only: R should be low, got {}", r);
-    assert!(g > 50, "green-only: G should be elevated even with opacity=0.5, got {}", g);
+    assert!(
+        g > 50,
+        "green-only: G should be elevated even with opacity=0.5, got {}",
+        g
+    );
     assert!(b < 10, "green-only: B should be low, got {}", b);
     // With alpha blending: a = 1.0*src.a + (1-src.a)*dst.a = 0.5 + 0.5·0 = 0.5 → byte 128
-    assert!(a < 200, "green-only: A should reflect partial opacity, got {}", a);
+    assert!(
+        a < 200,
+        "green-only: A should reflect partial opacity, got {}",
+        a
+    );
 
     // ── Overlap region (48, 48) ───────────────────────────────────
     // Red drawn first, then semi-transparent green on top.
@@ -1569,21 +1638,21 @@ async fn test_two_overlapping_windows_alpha_blend() -> Result<()> {
     let (r, g, b, a) = sample(48, 48);
     assert!(
         r > 50,
-        "overlap: R should be non-trivial (blend includes red channel), got {}", r
+        "overlap: R should be non-trivial (blend includes red channel), got {}",
+        r
     );
     assert!(
         g > 50,
-        "overlap: G should be non-trivial (blend includes green channel), got {}", g
+        "overlap: G should be non-trivial (blend includes green channel), got {}",
+        g
     );
     assert!(
         b < 10,
-        "overlap: B should stay low (neither texture contributes blue), got {}", b
+        "overlap: B should stay low (neither texture contributes blue), got {}",
+        b
     );
     // Overlap alpha: 1.0*0.5 + 0.5*1.0 = 1.0 → byte 255
-    assert!(
-        a > 200,
-        "overlap: A should be nearly opaque, got {}", a
-    );
+    assert!(a > 200, "overlap: A should be nearly opaque, got {}", a);
 
     // ── Proof of blending ─────────────────────────────────────────
     // Overlap is neither pure-red (r>200,g<10) nor pure-green (r<10,g>50).
@@ -1633,7 +1702,11 @@ async fn test_reverse_draw_order_red_dominant_blend() -> Result<()> {
     let width = 128u32;
     let height = 128u32;
     let pixels = renderer.render_to_headless_target(width, height)?;
-    assert_eq!(pixels.len(), (width * height * 4) as usize, "correct byte count");
+    assert_eq!(
+        pixels.len(),
+        (width * height * 4) as usize,
+        "correct byte count"
+    );
 
     // Helper: fetch (R, G, B, A) at (x, y).
     // BGRA sRGB target → bytes at idx+0=B, idx+1=G, idx+2=R, idx+3=A.
@@ -1642,7 +1715,7 @@ async fn test_reverse_draw_order_red_dominant_blend() -> Result<()> {
         (
             pixels[idx + 2], // R
             pixels[idx + 1], // G
-            pixels[idx], // B
+            pixels[idx],     // B
             pixels[idx + 3], // A
         )
     };
@@ -1652,15 +1725,27 @@ async fn test_reverse_draw_order_red_dominant_blend() -> Result<()> {
     // Semi-transparent green over transparent black → dim green.
     let (r, g, b, a) = sample(8, 8);
     assert!(r < 10, "green-only: R should be low, got {}", r);
-    assert!(g > 50, "green-only: G should be elevated (even with α=0.5), got {}", g);
+    assert!(
+        g > 50,
+        "green-only: G should be elevated (even with α=0.5), got {}",
+        g
+    );
     assert!(b < 10, "green-only: B should be low, got {}", b);
-    assert!(a < 200, "green-only: A should reflect partial opacity, got {}", a);
+    assert!(
+        a < 200,
+        "green-only: A should reflect partial opacity, got {}",
+        a
+    );
 
     // ── Red-only region (72, 72) ───────────────────────────────────
     // y=72 is below green window 1's bottom edge (64), inside red window 2.
     // Opaque red over transparent black → pure red.
     let (r, g, b, a) = sample(72, 72);
-    assert!(r > 200, "red-only: R should be high (opaque red), got {}", r);
+    assert!(
+        r > 200,
+        "red-only: R should be high (opaque red), got {}",
+        r
+    );
     assert!(g < 10, "red-only: G should be low, got {}", g);
     assert!(b < 10, "red-only: B should be low, got {}", b);
     assert!(a > 200, "red-only: A should be opaque, got {}", a);
@@ -1671,19 +1756,19 @@ async fn test_reverse_draw_order_red_dominant_blend() -> Result<()> {
     let (r, g, b, a) = sample(48, 48);
     assert!(
         r > 200,
-        "overlap: R should be high (red dominates), got {}", r
+        "overlap: R should be high (red dominates), got {}",
+        r
     );
     assert!(
         g < 30,
-        "overlap: G should be low (green covered by opaque red), got {}", g
+        "overlap: G should be low (green covered by opaque red), got {}",
+        g
     );
-    assert!(
-        b < 10,
-        "overlap: B should stay low, got {}", b
-    );
+    assert!(b < 10, "overlap: B should stay low, got {}", b);
     assert!(
         a > 200,
-        "overlap: A should be opaque (red is opaque), got {}", a
+        "overlap: A should be opaque (red is opaque), got {}",
+        a
     );
 
     // ── Proof of red-dominant blending via draw order ─────────────
@@ -1693,7 +1778,9 @@ async fn test_reverse_draw_order_red_dominant_blend() -> Result<()> {
     // order matters and the GPU blend pipeline handles it correctly.
     assert!(
         r > g * 5,
-        "overlap: R should be >5x G (red dominates, not a blend), R={} G={}", r, g
+        "overlap: R should be >5x G (red dominates, not a blend), R={} G={}",
+        r,
+        g
     );
 
     Ok(())
@@ -1732,8 +1819,7 @@ async fn test_render_textured_quad_to_headless() -> Result<()> {
     for y in 0..128u32 {
         for x in 0..128u32 {
             let idx = ((y * 128 + x) * 4) as usize;
-            let is_nonzero =
-                pixels[idx] != 0 || pixels[idx + 1] != 0 || pixels[idx + 2] != 0;
+            let is_nonzero = pixels[idx] != 0 || pixels[idx + 1] != 0 || pixels[idx + 2] != 0;
             if x < 64 && y < 64 {
                 if is_nonzero {
                     any_nonzero = true;
@@ -1945,7 +2031,12 @@ fn run_spring_trajectory_assertions(
     //    on CPU. For animate_window_open, position_offset stays at
     //    (0, 0) so the render output matches the unscaled rect
     //    exactly once the spring settles.
-    let rect = TestRect { x: 100, y: 200, width: 800, height: 600 };
+    let rect = TestRect {
+        x: 100,
+        y: 200,
+        width: 800,
+        height: 600,
+    };
     let (rendered_w, rendered_h, rendered_x, rendered_y, rendered_alpha) =
         render_rect_from_state(&rect, final_scale, (0.0, 0.0), final_opacity);
     let expected_w = (rect.width as f32) * final_scale;
@@ -1991,7 +2082,8 @@ fn run_spring_trajectory_assertions(
     assert!(
         scales[early_idx] >= initial_scale - 1e-4,
         "early-trajectory scale {} should be ≥ initial scale {} (spring rising)",
-        scales[early_idx], initial_scale,
+        scales[early_idx],
+        initial_scale,
     );
     assert!(
         (scales[mid_idx] - 1.0).abs() < 0.20,
@@ -2009,9 +2101,14 @@ fn run_spring_trajectory_assertions(
         "📊 Spring trajectory ({} frames @ {}ms): \
          scale {:.4} → {:.4} (peak {:.4}); \
          alpha {:.4} → {:.4} (peak {:.4})",
-        frames, frame_dt.as_millis(),
-        initial_scale, final_scale, peak_scale,
-        initial_opacity, final_opacity, peak_alpha,
+        frames,
+        frame_dt.as_millis(),
+        initial_scale,
+        final_scale,
+        peak_scale,
+        initial_opacity,
+        final_opacity,
+        peak_alpha,
     );
 
     Ok(())
@@ -2029,10 +2126,8 @@ fn init_test_logger() {
     use std::sync::Once;
     static LOGGER_INIT: Once = Once::new();
     LOGGER_INIT.call_once(|| {
-        let _ = env_logger::Builder::from_env(
-            env_logger::Env::default().default_filter_or("off"),
-        )
-        .try_init();
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("off"))
+            .try_init();
     });
 }
 
@@ -2278,7 +2373,10 @@ async fn test_tick_error_recovery() -> Result<()> {
     // through `set_errors_for_test` and `force_next_tick_error`. The
     // recovery is observable as: shutdown happens at the CUMULATIVE
     // 5th error, not 3 more errors.
-    assert!(compositor.is_running(), "1 clean tick: still running (count=2)");
+    assert!(
+        compositor.is_running(),
+        "1 clean tick: still running (count=2)"
+    );
 
     // 4) Two more error ticks push count from 2 to 4 (still running).
     for _ in 0..2 {

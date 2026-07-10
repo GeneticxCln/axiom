@@ -194,12 +194,19 @@ impl InputManager {
                 if let Some(action) = Self::parse_action_str(action_str) {
                     mouse_bindings.insert(code, action);
                 } else {
-                    debug!("⚠️ Unknown mouse binding action '{}' for button 0x{:x} — skipped", action_str, code);
+                    debug!(
+                        "⚠️ Unknown mouse binding action '{}' for button 0x{:x} — skipped",
+                        action_str, code
+                    );
                 }
             }
         }
 
-        debug!("🔑 Loaded {} key bindings, {} mouse bindings", key_bindings.len(), mouse_bindings.len());
+        debug!(
+            "🔑 Loaded {} key bindings, {} mouse bindings",
+            key_bindings.len(),
+            mouse_bindings.len()
+        );
 
         Self {
             key_bindings,

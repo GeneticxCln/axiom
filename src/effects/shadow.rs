@@ -368,13 +368,13 @@ impl ShadowRenderer {
 
             // Each shadow gets its own uniform buffer so bind groups
             // don't alias a shared buffer that gets overwritten.
-            let uniform_buffer = self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("Shadow Uniform Buffer"),
-                    contents: bytemuck::cast_slice(&[uniforms]),
-                    usage: BufferUsages::UNIFORM,
-                },
-            );
+            let uniform_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Shadow Uniform Buffer"),
+                        contents: bytemuck::cast_slice(&[uniforms]),
+                        usage: BufferUsages::UNIFORM,
+                    });
 
             bind_groups.push(self.device.create_bind_group(&BindGroupDescriptor {
                 label: Some("Shadow Bind Group"),

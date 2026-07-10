@@ -309,11 +309,7 @@ fn bench_headless_render(c: &mut Criterion) {
             },
             |mut renderer| {
                 // Cache miss — allocates projection buffer
-                black_box(
-                    renderer
-                        .render_to_headless_target(128, 128)
-                        .unwrap(),
-                );
+                black_box(renderer.render_to_headless_target(128, 128).unwrap());
             },
             BatchSize::SmallInput,
         );
@@ -334,11 +330,7 @@ fn bench_headless_render(c: &mut Criterion) {
             },
             |mut renderer| {
                 // Cache hit — projection buffer reused from warm call
-                black_box(
-                    renderer
-                        .render_to_headless_target(128, 128)
-                        .unwrap(),
-                );
+                black_box(renderer.render_to_headless_target(128, 128).unwrap());
             },
             BatchSize::SmallInput,
         );
@@ -366,11 +358,7 @@ fn bench_headless_render(c: &mut Criterion) {
                 // Timed: BATCH cache-hit composites (projection buffer reused,
                 // window resources cached after first call)
                 for _ in 0..BATCH {
-                    black_box(
-                        renderer
-                            .render_to_headless_target(128, 128)
-                            .unwrap(),
-                    );
+                    black_box(renderer.render_to_headless_target(128, 128).unwrap());
                 }
             },
             BatchSize::SmallInput,

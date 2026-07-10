@@ -519,10 +519,7 @@ pub enum AnimationProperty {
 pub enum AnimationValue {
     Float(f32),
     Position(Vector2<f32>),
-    Transform {
-        scale: Vector2<f32>,
-        opacity: f32,
-    },
+    Transform { scale: Vector2<f32>, opacity: f32 },
 }
 
 /// Animation system statistics

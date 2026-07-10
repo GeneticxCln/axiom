@@ -726,7 +726,8 @@ impl AxiomConfig {
         // in the happy path keeps the on-disk file either entirely
         // old or entirely new; this check keeps it from being either
         // and the new one breaking load().
-        self.validate().context("Refusing to save invalid configuration")?;
+        self.validate()
+            .context("Refusing to save invalid configuration")?;
         let contents = toml::to_string_pretty(self).context("Failed to serialize configuration")?;
 
         let tmp_path = path.with_extension("tmp");

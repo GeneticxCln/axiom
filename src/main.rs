@@ -57,14 +57,16 @@ struct Cli {
     no_effects: bool,
 
     /// Run scrollable workspace demo (Phase 3)
+    #[cfg(feature = "demo")]
     #[arg(long)]
     demo: bool,
 
     /// Run visual effects demo (Phase 4)
+    #[cfg(feature = "demo")]
     #[arg(long)]
     effects_demo: bool,
 
-    /// Backend selection — `winit` (default, nested-session),
+    /// Backend selection
     /// `drm` (real KMS/udev/libinput session compositor),
     /// or `noop` (tests / headless). Persisted into
     /// `config.backend.kind` so downstream subsystems see one source of truth.
@@ -176,7 +178,7 @@ async fn main() -> Result<()> {
         .map(|r| Arc::new(RwLock::new(r)))
         .map_err(|e| anyhow::anyhow!("Failed to initialize headless renderer: {}", e))?;
 
-    let mut compositor = AxiomCompositor::new(
+    let compositor = AxiomCompositor::new(
         config.clone(),
         cli.windowed,
         workspace_manager.clone(),
@@ -192,21 +194,24 @@ async fn main() -> Result<()> {
     info!("✨ Axiom is ready! Where productivity meets beauty.");
 
     // Run demos if requested
-    if cli.demo {
-        info!("🎭 Running Phase 3 scrollable workspace demo...");
-        axiom::demo_workspace::run_comprehensive_test(&mut compositor).await?;
-        info!("🎆 Phase 3 demo completed!");
-    }
+    #[cfg(feature = "demo")]
+    {
+        if cli.demo {
+            info!("🎭 Running Phase 3 scrollable workspace demo...");
+            axiom::demo_workspace::run_comprehensive_test(&mut compositor).await?;
+            info!("🎆 Phase 3 demo completed!");
+        }
 
-    if cli.effects_demo {
-        info!("🎨 Running Phase 4 visual effects demo...");
-        axiom::demo_phase4_effects::display_effects_capabilities(&compositor);
-        axiom::demo_phase4_effects::run_phase4_effects_demo(&mut compositor).await?;
-        info!("🎆 Phase 4 effects demo completed!");
-    }
+        if cli.effects_demo {
+            info!("🎨 Running Phase 4 visual effects demo...");
+            axiom::demo_phase4_effects::display_effects_capabilities(&compositor);
+            axiom::demo_phase4_effects::run_phase4_effects_demo(&mut compositor).await?;
+            info!("🎆 Phase 4 effects demo completed!");
+        }
 
-    if cli.demo || cli.effects_demo {
-        info!("🎆 All demos completed! Continuing with normal compositor operation...");
+        if cli.demo || cli.effects_demo {
+            info!("🎆 All demos completed! Continuing with normal compositor operation...");
+        }
     }
 
     // Main event loop

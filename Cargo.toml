@@ -103,6 +103,7 @@ path = "src/lib.rs"
 [features]
 default = []
 examples = []
+demo = []
 
 # Development dependencies for testing
 [dev-dependencies]

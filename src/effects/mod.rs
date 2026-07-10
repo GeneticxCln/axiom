@@ -442,21 +442,24 @@ impl EffectsEngine {
     /// mapping before this call.
     pub fn animate_popup_open(&mut self, popup_id: u64, parent_window_id: u64) {
         let now = Instant::now();
-        self.window_effects.entry(popup_id).and_modify(|e| {
-            // Update parent_id and refresh opened_at so a reused popup
-            // id (rare on most compositors) gets a fresh fade-in too.
-            e.parent_id = Some(parent_window_id);
-            e.opened_at = Some(now);
-        }).or_insert_with(|| WindowEffectState {
-            scale: 1.0,
-            opacity: 1.0,
-            position_offset: (0.0, 0.0),
-            blur_radius: 0.0,
-            corner_radius: 8.0,
-            shadow: ShadowParams::default(),
-            opened_at: Some(now),
-            parent_id: Some(parent_window_id),
-        });
+        self.window_effects
+            .entry(popup_id)
+            .and_modify(|e| {
+                // Update parent_id and refresh opened_at so a reused popup
+                // id (rare on most compositors) gets a fresh fade-in too.
+                e.parent_id = Some(parent_window_id);
+                e.opened_at = Some(now);
+            })
+            .or_insert_with(|| WindowEffectState {
+                scale: 1.0,
+                opacity: 1.0,
+                position_offset: (0.0, 0.0),
+                blur_radius: 0.0,
+                corner_radius: 8.0,
+                shadow: ShadowParams::default(),
+                opened_at: Some(now),
+                parent_id: Some(parent_window_id),
+            });
         debug!(
             "🎬 Popup {} registered with parent window {} (opened_at = {:?})",
             popup_id, parent_window_id, now
@@ -575,13 +578,13 @@ impl EffectsEngine {
     /// (possibly minimized) values are. Idempotent when already visible.
     pub fn animate_window_restore(&mut self, window_id: u64) {
         if !self.animations_enabled || !self.config.enabled {
-            self.window_effects.entry(window_id).or_insert_with(|| {
-                WindowEffectState {
+            self.window_effects
+                .entry(window_id)
+                .or_insert_with(|| WindowEffectState {
                     scale: 1.0,
                     opacity: 1.0,
                     ..WindowEffectState::default()
-                }
-            });
+                });
             return;
         }
 
@@ -824,10 +827,7 @@ impl EffectsEngine {
     pub fn set_window_blur(&mut self, window_id: u64, radius: f32) {
         const MAX_RADIUS: f32 = 32.0;
         let clamped = radius.clamp(0.0, MAX_RADIUS);
-        let state = self
-            .window_effects
-            .entry(window_id)
-            .or_default();
+        let state = self.window_effects.entry(window_id).or_default();
         state.blur_radius = clamped;
         debug!(
             "Per-window blur set — window {} radius {:.1}",

@@ -283,10 +283,7 @@ pub enum LazyUIMessage {
     },
 
     /// Per-window blur control. `radius` in pixels (0..=32); 0 disables blur.
-    SetWindowBlur {
-        window_id: u64,
-        radius: f32,
-    },
+    SetWindowBlur { window_id: u64, radius: f32 },
 
     /// System health check request
     HealthCheck,
@@ -395,10 +392,7 @@ impl AxiomIPCServer {
     /// any future code path that wants to emit a typed ACK without
     /// going through the IPC channel.
     #[allow(dead_code)]
-    pub(super) fn build_workspace_command_ack(
-        action: &str,
-        accepted: bool,
-    ) -> AxiomMessage {
+    pub(super) fn build_workspace_command_ack(action: &str, accepted: bool) -> AxiomMessage {
         AxiomMessage::UserEvent {
             // Fail loudly on a pre-1970 system clock rather than silently
             // emitting `timestamp: 0` that IPC clients would misread.
@@ -468,6 +462,8 @@ impl AxiomIPCServer {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
+                // Set 0700 immediately after creation to minimise the
+                // window where the directory is world-readable.
                 if let Err(e) =
                     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
                 {
@@ -1881,8 +1877,7 @@ mod tests {
     #[test]
     fn test_workspace_command_ack_schema_includes_status() {
         // Accepted path — call the actual production constructor.
-        let ack_accepted =
-            AxiomIPCServer::build_workspace_command_ack("scroll_left", true);
+        let ack_accepted = AxiomIPCServer::build_workspace_command_ack("scroll_left", true);
         let s = serde_json::to_string(&ack_accepted).unwrap();
         assert!(
             s.contains(r#""status":"queued_for_execution""#),
@@ -1899,8 +1894,7 @@ mod tests {
 
         // Unknown-action path — call the actual production constructor with
         // an action verb that's not in KNOWN_WORKSPACE_ACTIONS.
-        let ack_unknown =
-            AxiomIPCServer::build_workspace_command_ack("nuke_all_windows", false);
+        let ack_unknown = AxiomIPCServer::build_workspace_command_ack("nuke_all_windows", false);
         let s = serde_json::to_string(&ack_unknown).unwrap();
         assert!(
             s.contains(r#""status":"unknown_action""#),
@@ -1923,10 +1917,7 @@ mod tests {
     fn test_effects_control_ack_schema_distinguishes_partial() {
         // All fields accepted.
         let ack_full = AxiomIPCServer::build_effects_control_ack(
-            vec![
-                "enabled=true".to_string(),
-                "blur_radius=4.0".to_string(),
-            ],
+            vec!["enabled=true".to_string(), "blur_radius=4.0".to_string()],
             Vec::new(),
         );
         let s = serde_json::to_string(&ack_full).unwrap();

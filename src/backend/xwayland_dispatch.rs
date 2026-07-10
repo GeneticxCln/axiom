@@ -15,8 +15,8 @@
 use anyhow::Result;
 use log::{info, warn};
 
-use super::State;
 use super::xwm::{AxiomXwm, XwmEvent};
+use super::State;
 
 /// Collect and dispatch X11 events from XWayland.
 ///

@@ -12,8 +12,6 @@ use crate::config::WindowConfig;
 use crate::effects::WindowEffectState;
 use crate::window::Rectangle;
 
-
-
 /// Decoration mode for windows
 #[allow(clippy::approx_constant)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,7 +219,11 @@ impl DecorationManager {
         info!("  🎨 Corner radius: {:.1}px", theme.corner_radius);
         info!(
             "  🔘 Minimize button: {}",
-            if minimize_enabled { "enabled" } else { "disabled (scope decision)" }
+            if minimize_enabled {
+                "enabled"
+            } else {
+                "disabled (scope decision)"
+            }
         );
 
         Self {
@@ -354,7 +356,6 @@ impl DecorationManager {
 
     /// Set window focus state
     pub fn set_window_focus(&mut self, window_id: u64, focused: bool) {
-
         if let Some(decoration) = self.decorations.get_mut(&window_id) {
             if decoration.focused != focused {
                 decoration.focused = focused;
@@ -504,9 +505,7 @@ impl DecorationManager {
             // through (e.g. legacy config or race with a toggle), we
             // refuse to emit `Minimize` when the feature is off so the
             // event stream stays consistent.
-            if self.minimize_enabled
-                && decoration.buttons.minimize.bounds.contains_point(x, y)
-            {
+            if self.minimize_enabled && decoration.buttons.minimize.bounds.contains_point(x, y) {
                 decoration.buttons.minimize.pressed = true;
                 return Some(DecorationAction::Minimize);
             }
@@ -757,16 +756,6 @@ pub enum DecorationRenderData {
     },
 }
 
-// Helper trait for Rectangle
-impl Rectangle {
-    pub fn contains_point(&self, x: i32, y: i32) -> bool {
-        x >= self.x
-            && y >= self.y
-            && x < self.x + self.width as i32
-            && y < self.y + self.height as i32
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -884,21 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn test_contains_point() {
-        let r = Rectangle {
-            x: 10,
-            y: 20,
-            width: 30,
-            height: 40,
-        };
-        assert!(r.contains_point(10, 20));
-        assert!(r.contains_point(39, 59));
-        assert!(!r.contains_point(40, 20)); // right edge exclusive
-        assert!(!r.contains_point(10, 60)); // bottom edge exclusive
-        assert!(!r.contains_point(9, 20)); // left edge exclusive
-    }
-
-    /// Scope decision: when `minimize_enabled = false` (the new default
+    /// Scope decision: when `minimize_enabled = false`
     /// derived from `crate::config::FeaturesConfig::enable_minimize`),
     /// the minimize button must be neither drawn nor clickable. We
     /// verify both invariants: the bounds are zeroed in

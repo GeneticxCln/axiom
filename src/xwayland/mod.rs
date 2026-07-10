@@ -266,7 +266,10 @@ impl XWaylandManager {
                 }
                 Err(_) => {
                     // Timeout — force kill
-                    log::warn!("⏰ XWayland didn't exit within {}s, sending SIGKILL", shutdown_timeout.as_secs());
+                    log::warn!(
+                        "⏰ XWayland didn't exit within {}s, sending SIGKILL",
+                        shutdown_timeout.as_secs()
+                    );
                     #[cfg(unix)]
                     {
                         // Process was taken by wait(), but we can still force-kill via pid
@@ -275,7 +278,9 @@ impl XWaylandManager {
                     }
                     // On unix, we already sent SIGTERM. If still alive, the caller
                     // should handle cleanup. For now, log the situation.
-                    log::error!("XWayland process may still be running — manual cleanup may be needed");
+                    log::error!(
+                        "XWayland process may still be running — manual cleanup may be needed"
+                    );
                 }
             }
 

@@ -62,6 +62,15 @@ impl Rectangle {
             height,
         }
     }
+
+    /// Returns `true` if the point `(x, y)` lies inside this rectangle.
+    /// The right and bottom edges are exclusive (standard UI hit-testing).
+    pub fn contains_point(&self, x: i32, y: i32) -> bool {
+        x >= self.x
+            && y >= self.y
+            && x < self.x + self.width as i32
+            && y < self.y + self.height as i32
+    }
 }
 
 /// Enhanced window wrapper for Axiom-specific functionality
@@ -326,6 +335,21 @@ impl WindowManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_contains_point() {
+        let r = Rectangle {
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+        };
+        assert!(r.contains_point(10, 20));
+        assert!(r.contains_point(39, 59));
+        assert!(!r.contains_point(40, 20)); // right edge exclusive
+        assert!(!r.contains_point(10, 60)); // bottom edge exclusive
+        assert!(!r.contains_point(9, 20)); // left edge exclusive
+    }
 
     #[test]
     fn test_window_manager_initialization() {

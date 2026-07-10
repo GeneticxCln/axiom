@@ -56,14 +56,9 @@ pub enum XwmEvent {
         time: x11rb::protocol::xproto::Timestamp,
     },
     /// A new X11 window was mapped and should be added to the compositor.
-    WindowMapped {
-        x11_window_id: u32,
-        title: String,
-    },
+    WindowMapped { x11_window_id: u32, title: String },
     /// An X11 window was unmapped and should be removed from the compositor.
-    WindowUnmapped {
-        x11_window_id: u32,
-    },
+    WindowUnmapped { x11_window_id: u32 },
 }
 
 pub struct AxiomXwm {
@@ -137,9 +132,7 @@ impl AxiomXwm {
     /// Handle X11 events
     pub fn handle_event(&mut self, event: &x11rb::protocol::Event) -> Result<Option<XwmEvent>> {
         match event {
-            x11rb::protocol::Event::MapRequest(event) => {
-                self.handle_map_request(*event)
-            }
+            x11rb::protocol::Event::MapRequest(event) => self.handle_map_request(*event),
             x11rb::protocol::Event::ConfigureRequest(event) => {
                 // Grant configure request for now
                 let values = ConfigureWindowAux::from_configure_request(event);
