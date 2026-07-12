@@ -29,52 +29,114 @@ print_section() {
     echo "----------------------------------------"
 }
 
-# Function to check if tarpaulin is installed
-check_tarpaulin() {
+# Function to check tool prerequisites
+check_prerequisites() {
+    if ! command -v cargo &> /dev/null; then
+        echo -e "${RED}❌ cargo is not installed${NC}"
+        exit 1
+    fi
+
     if ! command -v cargo-tarpaulin &> /dev/null; then
         echo -e "${RED}❌ cargo-tarpaulin is not installed${NC}"
         echo "Install it with: cargo install cargo-tarpaulin"
         exit 1
     fi
-    echo -e "${GREEN}✅ cargo-tarpaulin is available${NC}"
+
+    if ! command -v python3 &> /dev/null; then
+        echo -e "${RED}❌ python3 is required for coverage summary parsing${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}✅ coverage prerequisites are available${NC}"
 }
 
 # Function to run coverage for specific test types
 run_coverage() {
     local test_type="$1"
     local output_suffix="$2"
-    local additional_args="${3:-}"
-    
+    shift 2
+
     print_section "Running $test_type coverage"
-    
-    local cmd="cargo tarpaulin \
-        --config tarpaulin.toml \
-        --output-dir $COVERAGE_DIR/$output_suffix \
-        $additional_args \
-        --verbose"
-    
-    echo "Command: $cmd"
-    
-    if eval "$cmd"; then
+
+    local output_dir="$COVERAGE_DIR/$output_suffix"
+    mkdir -p "$output_dir"
+
+    local cmd=(
+        cargo tarpaulin
+        --config tarpaulin.toml
+        --output-dir "$output_dir"
+        --verbose
+    )
+    if [[ $# -gt 0 ]]; then
+        cmd+=("$@")
+    fi
+
+    echo "Command: ${cmd[*]}"
+
+    if "${cmd[@]}"; then
         echo -e "${GREEN}✅ $test_type coverage completed${NC}"
     else
         echo -e "${YELLOW}⚠️  $test_type coverage completed with warnings${NC}"
     fi
 }
 
+extract_coverage_percent() {
+    local json_file="$1"
+    python3 - "$json_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    print("0")
+    raise SystemExit(0)
+
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    print("0")
+    raise SystemExit(0)
+
+coverage = data.get("coverage")
+if isinstance(coverage, (int, float)):
+    print(coverage)
+    raise SystemExit(0)
+
+files = data.get("files")
+if isinstance(files, list):
+    vals = [f.get("coverage") for f in files if isinstance(f, dict) and isinstance(f.get("coverage"), (int, float))]
+    if vals:
+        print(sum(vals) / len(vals))
+        raise SystemExit(0)
+
+print("0")
+PY
+}
+
 # Function to generate summary report
 generate_summary() {
     print_section "Generating Coverage Summary"
-    
+
     local json_file="$COVERAGE_DIR/unit/tarpaulin-report.json"
     if [[ -f "$json_file" ]]; then
-        # Extract coverage percentage from JSON report
-        local coverage=$(jq -r '.files | map(.coverage) | add / length' "$json_file" 2>/dev/null || echo "0")
-        local coverage_int=$(printf "%.0f" "$coverage" 2>/dev/null || echo "0")
-        
+        local coverage
+        coverage="$(extract_coverage_percent "$json_file")"
+        local coverage_int
+        coverage_int=$(python3 - <<PY
+coverage = float(${coverage:-0})
+print(round(coverage))
+PY
+)
+
         echo "Overall Coverage: ${coverage_int}%"
-        
-        if (( coverage_int >= MIN_COVERAGE )); then
+
+        if python3 - <<PY
+coverage = float(${coverage:-0})
+threshold = float(${MIN_COVERAGE})
+raise SystemExit(0 if coverage >= threshold else 1)
+PY
+        then
             echo -e "${GREEN}✅ Coverage meets minimum threshold (${MIN_COVERAGE}%)${NC}"
         else
             echo -e "${RED}❌ Coverage below minimum threshold (${MIN_COVERAGE}%)${NC}"
@@ -115,21 +177,23 @@ cleanup_old_reports() {
 main() {
     local mode="${1:-full}"
     
-    check_tarpaulin
+    check_prerequisites
     
     case "$mode" in
         "unit")
-            run_coverage "Unit Tests" "unit" "--lib --tests"
+            run_coverage "Unit Tests" "unit" --lib --tests
             ;;
         "integration")
-            run_coverage "Integration Tests" "integration" "--test integration_tests"
+            run_coverage "Integration Tests" "integration" --test integration_tests
             ;;
         "property")
-            run_coverage "Property Tests" "property" "--lib --tests -- property_tests"
+            # Property tests live in the lib test target, so we reuse the
+            # standard lib/tests coverage invocation here.
+            run_coverage "Property Tests" "property" --lib --tests
             ;;
         "fast")
-            # Quick coverage run without HTML generation
-            run_coverage "Fast Coverage" "fast" "--lib --tests --output-format Json"
+            # Quick coverage run with JSON output only.
+            run_coverage "Fast Coverage" "fast" --out Json --lib --tests --skip-clean
             ;;
         "full"|*)
             echo -e "${BLUE}🔬 Running comprehensive coverage analysis${NC}\n"
@@ -138,7 +202,7 @@ main() {
             cleanup_old_reports
             
             # Run different types of coverage
-            run_coverage "Unit & Property Tests" "unit" "--lib --tests"
+            run_coverage "Unit & Property Tests" "unit" --lib --tests
             
             # Skip integration tests in coverage as they may require graphics context
             echo -e "${YELLOW}ℹ️  Skipping integration tests (may require graphics context)${NC}"

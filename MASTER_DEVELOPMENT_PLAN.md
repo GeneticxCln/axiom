@@ -1,104 +1,189 @@
-# 🗺️ Axiom Master Development Plan
+# Axiom Master Development Plan
 
-**Status**: Active 🟢
-**Current Phase**: Phase 7 (Production Polish)
-**Last Updated**: 2026-06-24
-
----
-
-## 📋 Executive Summary
-Axiom is transitioning from a high-fidelity simulation to a functional Wayland compositor. The architectural foundation (Phases 1-5) is complete. We are currently in **Phase 6**, integrating the canonical Smithay backend to handle real Wayland clients, hardware input, and GPU rendering.
-
-This document consolidates all previous roadmaps (`PRODUCTION_ROADMAP.md`, `PHASE5_ROADMAP.md`, `PHASE_6_IMPLEMENTATION_PLAN.md`) into a single source of truth.
+**Status:** Active
+**Current Phase:** Repository stabilization and alpha hardening
+**Last Updated:** 2026-07-11
 
 ---
 
-## ✅ Completed Foundation (Phases 1-5)
-All core subsystems are architected, implemented, and verified in simulation mode.
+## Executive Summary
 
-| Phase | Component | Key Achievements |
-|-------|-----------|------------------|
-| **1** | **Architecture** | Async Tokio event loop, modular design, logging, error handling. |
-| **2** | **Core Systems** | TOML Config, IPC (Unix Domain Sockets), Lazy UI (AI) integration. |
-| **3** | **Workspaces** | Niri-style infinite horizontal scrolling, dynamic columns, spring physics. |
-| **4** | **Window Mgmt** | Tiling algorithms, focus logic, window states (floating/fullscreen). |
-| **5** | **Effects Engine** | Hyprland-style animations, shader framework, blur/shadow references. |
+Axiom has a strong prototype codebase with real compositor infrastructure, but it is **not yet a production-ready compositor**.
 
----
+### Current reality
+- The **nested / windowed path** is the most complete execution mode.
+- Core logic for configuration, workspaces, IPC, rendering infrastructure, and input exists.
+- The standalone DRM/KMS path now has an early compositor output path using WGPU-composed frames copied into CPU dumb-buffer scanout, but it still needs validation, optimization, and multi-output hardening.
+- Documentation, packaging, and status claims previously overstated project maturity; this document is now the source of truth.
 
-## 🚀 Phase 6: Real Compositor Integration (✅ COMPLETE)
-**Goal**: Replace simulation with a fully functional Wayland backend capable of running real applications (Firefox, Terminal, etc.).
-
-### 6.1 Backend Migration (✅ Completed)
-- [x] **Canonical Backend**: Migrated to `smithay_backend_real.rs`.
-- [x] **Protocols**: Integrated core Wayland protocols (Compositor, XDG Shell, Seat, Output).
-
-### 6.2 Real Window Lifecycle (✅ Completed)
-- [x] **Surface Mapping**: `XdgShellHandler::new_toplevel` → `create_window_from_surface` → `WindowManager` + `ScrollableWorkspaces`.
-- [x] **Lifecycle Hooks**: `destroy_window` cleans up all three subsystems (WM, workspace, renderer).
-- [x] **State Sync**: Initial `configure` with 1024×720 default; dynamic tiling-based resizes via `configured_sizes` tracking in `render()`; serialized with `pending_configure` to avoid flooding clients.
-- [x] **Dead Surface Pruning**: `prune_dead_surfaces` cleans up disconnected client state.
-
-### 6.3 Input Routing (✅ Completed)
-- [x] **Pointer**: `PointerMotionAbsolute` → `element_under()` hit test → surface focus via `pointer.motion()`.
-- [x] **Pointer Buttons**: Left/right/middle clicks forwarded via `pointer.button()`.
-- [x] **Keyboard**: `InputManager` intercepts global shortcuts (Super+key) → `FilterResult::Intercept`; non-shortcuts → `FilterResult::Forward` to clients.
-- [x] **Bindings**: `process_actions` handles ScrollLeft/Right, Quit, CloseWindow, ToggleFullscreen, MoveWindowLeft/Right.
-- [x] **Focus Chasing**: `SeatHandler::focus_changed` syncs Wayland focus → `WindowManager::focus_window`.
-- [x] **Scroll**: Axis events forwarded to clients AND trigger workspace navigation.
-
-### 6.4 Rendering Pipeline (✅ Completed)
-- [x] **Buffer Management**: SHM buffer data cached on commit; uploaded to GL textures in `render()`.
-- [x] **Compositor Loop**: `calculate_workspace_layouts()` positions windows via tiling; positions synced to `WindowManager`.
-- [x] **GL Rendering**: `GlesRenderer` with lazy-compiled GLES 2.0 shader for textured quads; scissor-based placeholders for untextured windows.
-- [x] **WGPU Renderer**: Parallel WGPU renderer with `upsert_window_rect`, shadow/blur queuing, and `render_to_surface_auto()`.
-- [x] **Dual Render Path**: Backend GL pass runs first (layout + texture); compositor `render_frame()` follows (WGPU effects post-processing).
-- [x] **Cursor**: Pointer position tracked; cursor image handler present (no-op).
+### Immediate objective
+Stabilize the repository around an **honest alpha target**:
+1. fix correctness/documentation issues,
+2. make nested mode the first supported experience,
+3. finish the standalone DRM path afterward.
 
 ---
 
-## 🔮 Active Phase: Phase 7 - Production Polish
-**Goal**: Stability, compatibility, and distribution.
+## Completed Foundations
 
-### 7.1 Stability & Performance
-- [x] **Error Recovery**: Consecutive-error threshold (5) triggers emergency shutdown; `force_next_tick_error` test mechanism validates recovery.
-- [ ] **Optimization**: Reduce CPU/memory footprint of the composite loop.
-- [ ] **Multi-Monitor**: Robust handling of hotplugging and DPI scaling.
-- [x] **Integration Tests**: 22 integration tests covering IPC, window lifecycle, effects, compositor event loop, frame pacing, viewport resize, and error recovery.
+### Architecture and core systems
+- Modular Rust codebase with compositor, backend, renderer, config, workspace, effects, IPC, and XWayland modules
+- Tokio-driven orchestration layer
+- TOML configuration loading, validation, and atomic save
+- Unix-socket IPC with structured JSON messages and basic peer verification
 
-### 7.2 Application Compatibility
-- [x] **XWayland**: XWM event polling integrated into main loop; X11 window lifecycle (MapRequest, ConfigureRequest, UnmapNotify) tracked; clipboard atoms + SelectionRequest handling. (Remaining: Wayland→X11 data extraction from SelectionSource, XWM→Surface wrapping for layout integration.)
-- [x] **Clipboard**: `SelectionHandler::new_selection` stores Wayland source + claims X11 ownership; `AxiomXwm::handle_selection_request` serves cached data to X11 apps; `set_clipboard_data()` lets IPC/compositor layer populate cache. (Remaining: async pipe-based data extraction from `SelectionSource`, Wayland←X11 direction via `send_selection`.)
-- [x] **Popups**: Popup buffer uploads wired (SHM → GL textures); render pass draws popups above windows at correct absolute positions; grab-based dismissal on outside click; `send_popup_done()` lifecycle.
-- [ ] **DPI Scaling**: Fractional scaling support for HiDPI displays.
+### Workspace and window logic
+- Scrollable workspace/tape model
+- Dynamic column management
+- Minimize/floating/fullscreen state tracking
+- Layout calculation and pointer hit-testing
 
-### 7.3 Effects Integration
-- [x] **GPU Effects Pipeline**: WGPU `render()` now dispatches shadow/blur passes via headless target; `render_frame()` populates per-frame effect queues consumed by GPU passes. (Next: wire headless target into GL compositing for on-screen output.)
-- [ ] **GL Effects**: Alternatively, implement GL-based blur/shadow shaders for the GL rendering path.
-- [ ] **Animations**: Wire `AnimationController` spring physics and easing curves into window transitions.
+### Rendering/effects infrastructure
+- WGPU renderer for off-screen composition and effect passes
+- GL presentation path for current nested rendering flow
+- Animation/effects state engine with spring-based transitions
 
-### 7.4 Distribution
-- [ ] **Packaging**: AUR, RPM, DEB packages.
-- [ ] **Docs**: User guide for configuration and installation.
-
----
-
-## ✅ Validation Checkpoints (Phase 6 Incremental Tests)
-Use these as pass/fail gates while implementing each sub-phase:
-
-| # | Checkpoint | Phase | Status |
-|---|------------|-------|--------|
-| 1 | Backend brings up a Wayland socket | 6.1 | ✅ Done |
-| 2 | `weston-simple-egl` or `weston-terminal` connects and creates a surface | 6.2 | ✅ Done |
-| 3 | Window appears in Axiom layout and is tracked in `WindowManager` | 6.2 | ✅ Done |
-| 4 | Mouse/keyboard events are routed and keybindings still work | 6.3 | ✅ Done |
-| 5 | The client buffer is visible in the renderer | 6.4 | ✅ Done |
+### Backend groundwork
+- Smithay-based Wayland compositor backend
+- Winit nested backend
+- DRM/libinput/udev scaffolding
+- XWayland/XWM integration groundwork
 
 ---
 
-## 🛠️ Immediate Next Steps (Phase 7 Kick-off)
+## Current Project Assessment
 
-1. **GPU Effects Integration**: ✅ WGPU blur/shadows wired; popups render in GL pass. Next: wire headless WGPU output into GL compositing.
-2. **XWayland Clipboard**: ✅ XWM polling + SelectionHandler + clipboard bridge. Next: async SelectionSource→cache data extraction.
-3. **Animations**: Wire `AnimationController` spring physics into window transitions.
-4. **Multi-Monitor**: Test and fix hotplug DPI scaling.
+### Working well
+- Config system
+- Workspace logic
+- Basic window lifecycle tracking
+- IPC server foundation
+- Nested development mode
+- A substantial logic/integration test suite
+- Real nested smoke coverage using an actual Wayland client in CI
+
+### Partially complete
+- Real Wayland client lifecycle and metadata propagation
+- Effects integration into the live render path
+- Decorations
+- XWayland compatibility
+- Multi-monitor handling
+- Standalone DRM/KMS execution path
+
+### Missing or incomplete
+- Release-ready packaging
+- Session assets and polished installation flow
+- Fractional scaling
+- Unified render architecture
+
+### Main technical blockers
+1. Transitional render architecture still includes a WGPU compose + GL presentation bridge
+2. Incomplete DRM/KMS compositor path and limited committed real-hardware validation coverage
+3. Multi-monitor/layout correctness gaps
+4. Broader XWayland compatibility still needs more end-to-end validation beyond the current lifecycle/metadata/clipboard paths
+5. Documentation and packaging drift
+
+### Render direction decision
+Axiom is now explicitly **WGPU-first**:
+- WGPU owns compositor frame composition and effects
+- GL is treated as a temporary presentation bridge in the nested path
+- standalone DRM work should converge on the same compositor frame architecture rather than grow a second independent render feature path
+
+See `docs/dev/RENDER_ARCHITECTURE.md` for the design note.
+
+---
+
+## Development Phases
+
+## Phase 1 — Immediate fixes
+Focus on correctness, honesty, and obvious lifecycle bugs.
+
+### Goals
+- Correct repo status/documentation
+- Fix packaging metadata and missing assets
+- Reconcile IPC socket behavior across code/docs/clients
+- Fix focused-window action bugs
+- Ensure window destroy cleans all subsystems
+
+### Exit criteria
+- No major docs/status contradictions remain
+- Packaging references valid files
+- Helper IPC clients can find the actual socket path
+- Window destroy no longer leaks renderer/effects state
+
+---
+
+## Phase 2 — Stable nested compositor
+Treat `--windowed` as the first supported alpha target.
+
+### Goals
+- Choose and document the intended render architecture
+- Reduce or isolate the WGPU → CPU → GL roundtrip in the main path
+- Integrate real decoration rendering or explicitly reduce SSD claims
+- Align runtime config and Lazy UI protocol behavior with what is actually supported
+
+### Exit criteria
+- Nested mode is the recommended and documented alpha target
+- Basic nested compositor smoke flow is documented, automated, and testable
+- Known limitations are documented for alpha users
+- Major protocol/runtime mismatches are resolved
+
+---
+
+## Phase 3 — Standalone DRM alpha
+Finish the real session-compositor path.
+
+### Goals
+- Complete the compositor output/render path in DRM mode
+- Validate output hotplug and multi-monitor state synchronization
+- Make layout and coordinate handling correct across outputs
+- Improve HiDPI behavior, including early fractional scale support
+
+### Exit criteria
+- DRM mode can render mapped client content reliably enough for alpha testing
+- Output add/remove flows are documented and validated
+
+---
+
+## Phase 4 — Testing, optimization, and release prep
+Turn the alpha into something users can evaluate repeatably.
+
+### Goals
+- Expand real client smoke coverage beyond the current nested `weston-terminal` path
+- Expand XWayland validation
+- Refactor oversized modules
+- Add release/session/package assets
+- Prepare first tagged alpha release
+
+### Exit criteria
+- Release checklist exists (`docs/dev/RELEASE_CHECKLIST.md`)
+- Known limitations are documented
+- Packaging/session assets exist
+- First alpha release can be cut honestly
+
+---
+
+## Task Ordering
+
+The current execution order is:
+1. docs/status correction
+2. packaging cleanup
+3. IPC socket consistency
+4. input/lifecycle bug fixes
+5. nested-mode stabilization
+6. DRM completion
+7. test/release hardening
+
+---
+
+## Decision Note
+
+Axiom should **not** present itself as a production-ready compositor until:
+- one compositor mode is clearly supportable end-to-end,
+- docs match reality,
+- packaging/session assets exist,
+- and real-client testing is in place.
+
+Until then, the right positioning is:
+
+> **alpha compositor prototype with a strong nested development path**

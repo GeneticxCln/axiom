@@ -1324,6 +1324,49 @@ async fn test_headless_projection_buffer_cache_reuse() -> Result<()> {
     Ok(())
 }
 
+/// Integration test: `render_to_headless_target` should also reuse the shared
+/// GPU readback staging buffer when dimensions stay the same, then resize it
+/// when the target dimensions change.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_headless_readback_buffer_cache_reuse() -> Result<()> {
+    use axiom::renderer::AxiomRenderer;
+
+    let mut renderer = AxiomRenderer::new_headless().await?;
+    let tex = make_solid_texture_rgba(32, 96, 160, 255);
+    renderer.add_window(1, (0.0, 0.0), (64.0, 64.0));
+    renderer.update_window_texture(1, 32, 32, &tex);
+
+    assert!(!renderer.has_cached_readback(), "readback cache starts cold");
+
+    let _pixels = renderer.render_to_headless_target(128, 128)?;
+    assert!(
+        renderer.has_cached_readback(),
+        "readback cache populated after first headless render"
+    );
+    assert_eq!(
+        renderer.cached_readback_dims(),
+        (128, 128),
+        "cached readback dims match first call"
+    );
+
+    let _pixels = renderer.render_to_headless_target(128, 128)?;
+    assert_eq!(
+        renderer.cached_readback_dims(),
+        (128, 128),
+        "cached readback dims unchanged when dimensions match"
+    );
+
+    let _pixels = renderer.render_to_headless_target(256, 256)?;
+    assert_eq!(
+        renderer.cached_readback_dims(),
+        (256, 256),
+        "cached readback dims updated after resize"
+    );
+
+    Ok(())
+}
+
 /// Integration test: `remove_window` must clear queued shadow and blur
 /// entries for the removed window from the internal `window_shadows` and
 /// `window_blurs` hashmaps.

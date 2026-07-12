@@ -1,12 +1,16 @@
-# Axiom Performance Benchmark Baseline
-# Generated: placeholder — run `cargo bench` to populate
+# Axiom benchmark baseline notes
 #
-# Run with: cargo bench --bench compositor_benchmarks
+# This repository uses Criterion's built-in baseline support instead of
+# maintaining a hand-written CSV in git.
 #
-# Key metrics to track across releases:
-# - workspace_scrolling throughput (windows/sec)
-# - window_layout calculation cost per frame
-# - effects_engine animation update (windows/frame)
-# - configuration TOML round-trip latency
-# - input_processing event throughput
-# - frame_timing simulation (full composite time)
+# Create a local baseline:
+#   bash ./scripts/benchmark.sh save-baseline local-main
+#
+# Compare a later run against that baseline:
+#   bash ./scripts/benchmark.sh compare local-main
+#
+# Raw benchmark artifacts and comparison reports are written under:
+#   target/criterion/
+#
+# The CI performance job currently records benchmark artifacts for inspection,
+# but does not claim an automatic pass/fail regression threshold yet.

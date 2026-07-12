@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Axiom (Nested)
+Comment=Run the Axiom Wayland compositor prototype in nested windowed mode
+Exec=axiom --windowed
+TryExec=axiom
+Icon=axiom
+Terminal=false
+Categories=System;
+Keywords=wayland;compositor;

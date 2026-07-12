@@ -1,0 +1,34 @@
+#!/usr/bin/env sh
+# Launch Axiom as a standalone DRM session.
+#
+# Preference order for config:
+# 1. User config in $XDG_CONFIG_HOME/axiom/axiom.toml (or ~/.config/...)
+# 2. System fallback in /etc/axiom/axiom.toml
+# 3. Axiom built-in defaults if neither file exists
+
+set -eu
+
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    echo "axiom-session: XDG_RUNTIME_DIR is not set; refusing to start a Wayland session" >&2
+    exit 1
+fi
+
+HOME_DIR="${HOME:-}"
+if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    CONFIG_HOME="$XDG_CONFIG_HOME"
+elif [ -n "$HOME_DIR" ]; then
+    CONFIG_HOME="$HOME_DIR/.config"
+else
+    CONFIG_HOME="/nonexistent"
+fi
+
+USER_CONFIG="$CONFIG_HOME/axiom/axiom.toml"
+SYSTEM_CONFIG="/etc/axiom/axiom.toml"
+
+if [ -f "$USER_CONFIG" ]; then
+    exec axiom --config "$USER_CONFIG" --backend=drm "$@"
+elif [ -f "$SYSTEM_CONFIG" ]; then
+    exec axiom --config "$SYSTEM_CONFIG" --backend=drm "$@"
+else
+    exec axiom --backend=drm "$@"
+fi

@@ -1,31 +1,49 @@
 # Contributing to Axiom
 
-We welcome contributions!
+We welcome contributions.
 
-## Development Flow
+## Current project expectations
 
-1.  **Fork & Clone**: Fork the repo and clone it locally.
-2.  **Branch**: Create a feature branch (`git checkout -b feature/my-feature`).
-3.  **Code**: Implement your changes.
-    -   Follow Rust formatting: `cargo fmt`
-    -   Ensure no warnings: `cargo check`
-4.  **Test**: Add unit tests for logic and ensure `cargo test` passes.
-5.  **Pull Request**: Submit PR with a clear description.
+Axiom is an **alpha-stage compositor prototype**. Please prefer small, reviewable changes that improve correctness, documentation, test coverage, or a clearly scoped subsystem.
 
-## Code Style
+## Development flow
 
--   Use **standard Rust formatting** (`rustfmt`).
--   Prioritize **readability** and **safety** (avoid `unsafe` unless strictly necessary).
--   Document public APIs with doc comments (`///`).
+1. Fork and clone the repository.
+2. Create a focused branch for your change.
+3. Implement the change.
+4. Run formatting and tests locally where possible.
+5. Submit a pull request with:
+   - what changed,
+   - why it changed,
+   - any limitations or follow-up work.
 
-## Project Structure
+## Code style
 
--   `src/compositor.rs`: Main entry loop.
--   `src/workspace/`: Scrollable workspace logic (niri-style).
--   `src/renderer/`: wgpu rendering pipeline.
--   `src/window/`: Window state management.
--   `src/experimental/smithay/`: Smithay backend integration.
+- Use standard Rust formatting (`cargo fmt`).
+- Keep warnings low (`cargo check`, `cargo clippy` where available).
+- Prefer small modules and clear ownership boundaries.
+- Avoid `unsafe` unless it is required for backend/graphics interop and clearly justified.
+- Document public APIs with `///` comments where practical.
+
+## Project structure
+
+- `src/compositor.rs` — top-level orchestration and tick loop
+- `src/backend/` — Smithay backend orchestration, DRM/KMS, presentation-bridge helpers, XWayland glue
+- `src/workspace/` — scrollable workspace logic
+- `src/renderer/` — WGPU compositor and presentation helpers
+- `src/effects/` — animation and visual effect state
+- `src/window/` — window registry/state
+- `src/ipc/` — Unix-socket IPC protocol/server
+- `src/config/` — TOML config model and validation
+
+## Good contribution targets
+
+- bug fixes in lifecycle/state synchronization
+- renderer/backend cleanup
+- tests for compositor behavior
+- documentation accuracy
+- packaging/session assets
 
 ## Communication
 
-Feel free to open Issues for bugs or feature requests.
+Please open an issue or PR discussion for larger architectural changes before starting them.

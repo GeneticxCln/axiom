@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use log::{debug, info, warn};
 use tokio::signal;
 
+use crate::backend::xwm::AxiomXwm;
 use crate::backend::AxiomSmithayBackendReal;
 use crate::config::AxiomConfig;
 use crate::decoration::DecorationManager;
@@ -21,6 +22,7 @@ use crate::window::{Rectangle, WindowManager};
 use crate::workspace::ScrollableWorkspaces;
 use crate::xwayland::XWaylandManager;
 
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use tokio::sync::RwLock as AsyncRwLock;
 
@@ -70,6 +72,26 @@ type PendingShadow = (u64, (f32, f32), (f32, f32), crate::effects::ShadowParams)
 type PendingBlur = (u64, (f32, f32), (f32, f32), crate::effects::BlurParams);
 
 impl AxiomCompositor {
+    async fn wire_xwayland_xwm(
+        backend: &mut AxiomSmithayBackendReal,
+        xwayland_manager: &Arc<AsyncRwLock<XWaylandManager>>,
+    ) -> Result<()> {
+        let (xwm_stream, xwayland_stream) = UnixStream::pair()
+            .context("Failed to create XWM/XWayland socket pair")?;
+
+        let wayland_display = backend.socket_name.clone();
+        xwayland_manager
+            .write()
+            .await
+            .restart_with_wm_stream_for_display(xwayland_stream, Some(wayland_display))
+            .await
+            .context("Failed to restart XWayland with compositor XWM stream")?;
+
+        let xwm = AxiomXwm::new(xwm_stream).context("Failed to initialize compositor-side XWM")?;
+        backend.set_xwm(xwm);
+        Ok(())
+    }
+
     /// Create a new Axiom compositor instance
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
@@ -158,7 +180,7 @@ impl AxiomCompositor {
             minimize_enabled,
         )));
 
-        let smithay_backend = {
+        let mut smithay_backend = {
             info!("Initializing Axiom compositor with Smithay backend...");
             debug!("Initializing Smithay Wayland backend...");
             let mut backend = AxiomSmithayBackendReal::new(
@@ -175,6 +197,12 @@ impl AxiomCompositor {
                 .context("Failed to initialize Smithay backend")?;
             backend
         };
+
+        if let Some(ref xwayland_manager) = xwayland_manager {
+            if let Err(e) = Self::wire_xwayland_xwm(&mut smithay_backend, xwayland_manager).await {
+                warn!("Failed to wire compositor-side XWM into XWayland: {}", e);
+            }
+        }
 
         Ok(Self {
             config,
@@ -829,18 +857,18 @@ impl AxiomCompositor {
     /// keep them in lockstep to avoid lock-order inversion if a future
     /// contributor adds a concurrent removal path.
     pub fn remove_window(&mut self, window_id: u64) -> bool {
-        let removed = self
+        let removed_from_workspace = self
             .workspace_manager
             .write()
             .remove_window(window_id)
             .is_some();
+        let removed_from_windows = self.window_manager.write().remove_window(window_id).is_some();
+        let removed_from_effects = self.effects_engine.write().remove_window(window_id);
+
+        let removed = removed_from_workspace || removed_from_windows || removed_from_effects;
 
         if removed {
             info!("Removed window {}", window_id);
-        }
-
-        self.window_manager.write().remove_window(window_id);
-        if removed {
             let _ = self.ipc_server.broadcast_state_change(
                 "window",
                 &format!("active:{}", window_id),
@@ -1163,6 +1191,10 @@ mod tests {
         comp.remove_window(id);
         // Window should be removed from DecorationManager too
         assert!(comp.decoration_manager.read().get_decoration(id).is_none());
+        assert!(
+            comp.effects_engine().get_window_effects(id).is_none(),
+            "window effects should be cleaned up on removal"
+        );
     }
 
     #[tokio::test]

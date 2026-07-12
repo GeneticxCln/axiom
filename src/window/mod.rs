@@ -238,6 +238,19 @@ impl WindowManager {
         }
     }
 
+    /// Set focus to a specific window ID or clear focus entirely.
+    pub fn set_focused_window(&mut self, id: Option<u64>) {
+        match id {
+            Some(id) if self.windows.contains_key(&id) => {
+                self.focused_window = Some(id);
+            }
+            Some(_) => {}
+            None => {
+                self.focused_window = None;
+            }
+        }
+    }
+
     /// Get the currently focused window id
     pub fn focused_window_id(&self) -> Option<u64> {
         self.focused_window
@@ -415,6 +428,15 @@ mod tests {
         wm.focus_window(999);
         // Focus should not change
         assert_eq!(wm.focused_window_id(), Some(1));
+    }
+
+    #[test]
+    fn test_set_focused_window_can_clear_focus() {
+        let mut wm = WindowManager::new(&WindowConfig::default());
+        let id = wm.add_window("test".into());
+        assert_eq!(wm.focused_window_id(), Some(id));
+        wm.set_focused_window(None);
+        assert_eq!(wm.focused_window_id(), None);
     }
 
     #[test]

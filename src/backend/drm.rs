@@ -262,8 +262,10 @@ pub struct KmsOutput {
     pub scale_factor: f64,
     /// Human-readable connector name (e.g. "HDMI-A-1").
     pub name: String,
-    /// GBM device + surface for scanout buffer allocation.
+    /// GBM device + surface for future GPU-accelerated scanout.
     pub gbm: Option<GbmRenderState>,
+    /// CPU-writable dumb-buffer scanout used by the current standalone alpha path.
+    cpu_scanout: Option<CpuScanoutBuffer>,
     /// Currently displayed DRM framebuffer handle.
     current_fb: framebuffer::Handle,
     /// Saved CRTC state for restoration on shutdown.
@@ -285,8 +287,15 @@ impl std::fmt::Debug for KmsOutput {
             )
             .field("scale_factor", &self.scale_factor)
             .field("gbm", &self.gbm.is_some())
+            .field("cpu_scanout", &self.cpu_scanout.is_some())
             .finish()
     }
+}
+
+/// CPU-writable dumb-buffer scanout backing the current standalone alpha path.
+struct CpuScanoutBuffer {
+    fb: framebuffer::Handle,
+    buffer: drm::control::dumbbuffer::DumbBuffer,
 }
 
 /// Compute a DPI scale factor from EDID physical dimensions and mode
@@ -319,14 +328,61 @@ fn scale_factor_from_edid(
         return 1.0;
     }
     let dpi = diagonal_px / (diagonal_mm / 25.4);
-    // Cap at 4.0 — extreme EDID values (e.g. 4K at 10mm) would otherwise
-    // produce absurd scales that break layout and hit-testing.
-    let scale = (dpi / 96.0).round().clamp(1.0, 4.0);
+    // Quantize to 0.25 steps so the output can advertise a stable fractional
+    // scale (e.g. 1.25x, 1.5x, 1.75x) instead of snapping everything to a whole
+    // integer. Cap at 4.0 to avoid absurd EDID-derived values.
+    let raw_scale = dpi / 96.0;
+    let scale = ((raw_scale * 4.0).round() / 4.0).clamp(1.0, 4.0);
     info!(
-        "DPI calc: {}x{} px, {}x{} mm → {:.1} DPI → scale {:.0}x",
+        "DPI calc: {}x{} px, {}x{} mm → {:.1} DPI → scale {:.2}x",
         mode_width, mode_height, physical_w_mm, physical_h_mm, dpi, scale
     );
     scale
+}
+
+/// Copy a BGRA8 compositor frame into an XRGB8888 dumb buffer.
+///
+/// The compositor currently reads back a BGRA8 image from the WGPU path.
+/// Dumb buffers created for scanout use XRGB8888, whose little-endian memory
+/// layout is effectively B, G, R, X. This helper copies the overlapping region
+/// and clears any uncovered destination pixels to black.
+fn copy_bgra_to_xrgb8888(
+    src: &[u8],
+    src_width: u32,
+    src_height: u32,
+    src_origin_x: u32,
+    src_origin_y: u32,
+    dst: &mut [u8],
+    dst_width: u32,
+    dst_height: u32,
+    dst_pitch: u32,
+) {
+    if src_origin_x >= src_width || src_origin_y >= src_height {
+        dst.fill(0);
+        return;
+    }
+
+    let copy_w = (src_width - src_origin_x).min(dst_width) as usize;
+    let copy_h = (src_height - src_origin_y).min(dst_height) as usize;
+    let src_pitch = src_width as usize * 4;
+    let dst_pitch = dst_pitch as usize;
+
+    dst.fill(0);
+
+    for y in 0..copy_h {
+        let src_y = src_origin_y as usize + y;
+        let src_row = &src[src_y * src_pitch..(src_y + 1) * src_pitch];
+        let dst_row = &mut dst[y * dst_pitch..(y + 1) * dst_pitch];
+        for x in 0..copy_w {
+            let src_x = src_origin_x as usize + x;
+            let si = src_x * 4;
+            let di = x * 4;
+            dst_row[di] = src_row[si];
+            dst_row[di + 1] = src_row[si + 1];
+            dst_row[di + 2] = src_row[si + 2];
+            dst_row[di + 3] = 0xFF;
+        }
+    }
 }
 
 // ============================================================================
@@ -420,8 +476,40 @@ impl KmsState {
                     .ok()
             };
 
-            // Allocate initial framebuffer and program the CRTC.
-            if let Some(ref gbm_state) = gbm {
+            // Allocate a CPU-writable scanout buffer for the current standalone
+            // alpha path. GBM is kept around for future GPU-direct presentation,
+            // but the compositor output currently lands in a dumb buffer.
+            let cpu_scanout = match Self::create_cpu_scanout_buffer(&card, width, height) {
+                Ok(scanout) => Some(scanout),
+                Err(e) => {
+                    warn!(
+                        "Failed to create CPU scanout for '{}' ({}); falling back to legacy path",
+                        conn_name, e
+                    );
+                    None
+                }
+            };
+
+            if let Some(scanout_fb) = cpu_scanout.as_ref().map(|scanout| scanout.fb) {
+                card.set_crtc(crtc, Some(scanout_fb), (0, 0), &[connector], Some(mode))?;
+
+                outputs.push(KmsOutput {
+                    connector,
+                    crtc,
+                    encoder,
+                    mode,
+                    width,
+                    height,
+                    physical_width_mm: physical_w_mm,
+                    physical_height_mm: physical_h_mm,
+                    scale_factor,
+                    name: conn_name,
+                    gbm,
+                    cpu_scanout,
+                    current_fb: scanout_fb,
+                    saved_crtc,
+                });
+            } else if let Some(ref gbm_state) = gbm {
                 // SAFETY: Initial modeset — no prior EGL rendering.
                 let (fb, front) = unsafe { gbm_state.lock_and_create_fb(&card)? };
                 card.set_crtc(crtc, Some(fb), (0, 0), &[connector], Some(mode))?;
@@ -439,6 +527,7 @@ impl KmsState {
                     scale_factor,
                     name: conn_name,
                     gbm,
+                    cpu_scanout: None,
                     current_fb: fb,
                     saved_crtc,
                 });
@@ -458,6 +547,7 @@ impl KmsState {
                     scale_factor,
                     name: conn_name,
                     gbm: None,
+                    cpu_scanout: None,
                     current_fb: fb,
                     saved_crtc,
                 });
@@ -654,7 +744,15 @@ impl KmsState {
                     );
                 }
             }
-            let _ = self.card.destroy_framebuffer(output.current_fb);
+            if let Some(scanout) = output.cpu_scanout.take() {
+                if output.current_fb != scanout.fb {
+                    let _ = self.card.destroy_framebuffer(output.current_fb);
+                }
+                let _ = self.card.destroy_framebuffer(scanout.fb);
+                let _ = self.card.destroy_dumb_buffer(scanout.buffer);
+            } else {
+                let _ = self.card.destroy_framebuffer(output.current_fb);
+            }
             drop(output.gbm.take());
         }
 
@@ -662,6 +760,58 @@ impl KmsState {
         let _ = self.card.release_master_lock();
         info!("KMS state cleaned up");
         Ok(())
+    }
+
+    /// Create a persistent CPU-writable scanout buffer for compositor output.
+    fn create_cpu_scanout_buffer(
+        card: &Card,
+        width: u32,
+        height: u32,
+    ) -> Result<CpuScanoutBuffer, anyhow::Error> {
+        let (fb, dumb) = Self::create_dumb_framebuffer(card, width, height)?;
+        Ok(CpuScanoutBuffer { fb, buffer: dumb })
+    }
+
+    /// Present a composed BGRA frame to every output through the CPU dumb-buffer
+    /// scanout path. Returns the number of outputs updated.
+    pub fn present_composited_frame(
+        &mut self,
+        src_width: u32,
+        src_height: u32,
+        bgra: &[u8],
+    ) -> Result<usize, anyhow::Error> {
+        let mut presented = 0usize;
+        let mut output_origin_x = 0u32;
+        for output in &mut self.outputs {
+            let Some(scanout) = output.cpu_scanout.as_mut() else {
+                output_origin_x = output_origin_x.saturating_add(output.width);
+                continue;
+            };
+            let mut mapping = self
+                .card
+                .map_dumb_buffer(&mut scanout.buffer)
+                .map_err(|e| anyhow::anyhow!("Failed to map dumb buffer for '{}': {}", output.name, e))?;
+            copy_bgra_to_xrgb8888(
+                bgra,
+                src_width,
+                src_height,
+                output_origin_x,
+                0,
+                &mut mapping,
+                output.width,
+                output.height,
+                drm::buffer::Buffer::pitch(&scanout.buffer),
+            );
+            output_origin_x = output_origin_x.saturating_add(output.width);
+            presented += 1;
+        }
+        if presented > 0 {
+            debug!(
+                "Presented composed frame {}x{} to {} CPU scanout output(s)",
+                src_width, src_height, presented
+            );
+        }
+        Ok(presented)
     }
 
     /// Fallback: create a dumb buffer + framebuffer (used when GBM is
@@ -882,7 +1032,21 @@ impl DrmBackend {
         Ok(output_count)
     }
 
-    /// Render frames to all connected displays via GBM surface → DRM
+    /// Present a composed BGRA frame to every connected output through the
+    /// current CPU-writable dumb-buffer scanout path.
+    pub fn present_composited_frame(
+        &mut self,
+        width: u32,
+        height: u32,
+        bgra: &[u8],
+    ) -> Result<usize, anyhow::Error> {
+        match self.kms.as_mut() {
+            Some(kms) => kms.present_composited_frame(width, height, bgra),
+            None => Ok(0),
+        }
+    }
+
+    /// Legacy fallback path: render frames to all connected displays via GBM surface → DRM
     /// framebuffer → synchronous CRTC mode set. Returns the count of
     /// outputs that were actually rendered (GBM path). Dumb-buffer
     /// outputs are skipped (no-op).
@@ -1317,6 +1481,46 @@ mod tests {
         let c = DrmEventCollector::default();
         assert!(!c.drm_ready);
         assert!(!c.libinput_ready);
+    }
+
+    #[test]
+    fn test_copy_bgra_to_xrgb8888_copies_and_sets_padding() {
+        let src = vec![
+            10, 20, 30, 40, // pixel 0: B,G,R,A
+            50, 60, 70, 80, // pixel 1
+        ];
+        let mut dst = vec![0u8; 8];
+        copy_bgra_to_xrgb8888(&src, 2, 1, 0, 0, &mut dst, 2, 1, 8);
+        assert_eq!(dst, vec![10, 20, 30, 255, 50, 60, 70, 255]);
+    }
+
+    #[test]
+    fn test_copy_bgra_to_xrgb8888_crops_to_destination() {
+        let src = vec![
+            1, 2, 3, 4, 5, 6, 7, 8,
+            9, 10, 11, 12, 13, 14, 15, 16,
+        ];
+        let mut dst = vec![0u8; 4];
+        copy_bgra_to_xrgb8888(&src, 2, 2, 0, 0, &mut dst, 1, 1, 4);
+        assert_eq!(dst, vec![1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn test_copy_bgra_to_xrgb8888_respects_source_origin() {
+        let src = vec![
+            1, 2, 3, 4, 5, 6, 7, 8,
+            9, 10, 11, 12, 13, 14, 15, 16,
+        ];
+        let mut dst = vec![0u8; 4];
+        copy_bgra_to_xrgb8888(&src, 2, 2, 1, 0, &mut dst, 1, 1, 4);
+        assert_eq!(dst, vec![5, 6, 7, 255]);
+    }
+
+    #[test]
+    fn test_scale_factor_from_edid_can_be_fractional() {
+        // Chosen so the effective DPI is ~144, which should quantize to 1.5x.
+        let scale = scale_factor_from_edid(1920, 1080, 338, 192);
+        assert!((scale - 1.5).abs() < 0.01, "expected ~1.5x, got {scale}");
     }
 
     // ── CalloopFd ──────────────────────────────────────────────────────────

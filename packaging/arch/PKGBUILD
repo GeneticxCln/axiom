@@ -2,25 +2,22 @@
 pkgname=axiom-compositor-git
 pkgver=0.1.0.r$(git rev-list --count HEAD).$(git rev-parse --short HEAD)
 pkgrel=1
-pkgdesc="Hybrid Wayland compositor combining niri's scrollable workspaces with Hyprland's visual effects"
+pkgdesc="Hybrid Wayland compositor prototype with scrollable workspaces and visual effects"
 arch=('x86_64')
-url="https://github.com/yourusername/axiom"
-license=('MIT')
+url="https://github.com/GeneticxCln/axiom"
+license=('GPL3')
 depends=(
     'wayland'
     'libxkbcommon'
     'mesa'
     'libinput'
     'systemd-libs'
-    'dbus'
     'vulkan-icd-loader'
 )
 makedepends=(
     'rust'
     'cargo'
     'git'
-    'meson'
-    'ninja'
     'wayland-protocols'
     'pkgconf'
 )
@@ -32,7 +29,7 @@ optdepends=(
 )
 provides=('axiom-compositor')
 conflicts=('axiom-compositor')
-source=("git+https://github.com/yourusername/axiom.git")
+source=("git+https://github.com/GeneticxCln/axiom.git")
 md5sums=('SKIP')
 
 pkgver() {
@@ -59,21 +56,22 @@ check() {
 
 package() {
     cd "$srcdir/axiom"
-    
-    # Install binary
+
     install -Dm755 "target/release/axiom" "$pkgdir/usr/bin/axiom"
-    
-    # Install desktop file
+    install -Dm755 "packaging/axiom-session" "$pkgdir/usr/bin/axiom-session"
+
+    # Example nested launcher desktop entry
     install -Dm644 "packaging/axiom.desktop" "$pkgdir/usr/share/applications/axiom.desktop"
-    
-    # Install configuration
+
+    # Session entry for display managers / manual session launchers
+    install -Dm644 "packaging/axiom.session" "$pkgdir/usr/share/wayland-sessions/axiom.desktop"
+
+    # Shared app icon used by the nested desktop entry and session file
+    install -Dm644 "assets/logo.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/axiom.svg"
+
     install -Dm644 "config/axiom.toml" "$pkgdir/usr/share/axiom/axiom.toml"
     install -Dm644 "config/axiom.toml" "$pkgdir/etc/axiom/axiom.toml"
-    
-    # Install documentation
+
     install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
     install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-    
-    # Install session file for display managers
-    install -Dm644 "packaging/axiom.session" "$pkgdir/usr/share/wayland-sessions/axiom.desktop"
 }

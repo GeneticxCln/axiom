@@ -62,9 +62,10 @@ pub struct AxiomConfig {
     ///    with a synthetic Wayland surface to notify clients, which is
     ///    deeper protocol work than the current milestone aims for).
     /// 2. Register the `zxdg_decoration_manager_v1` global for clients
-    ///    to negotiate SSD↔CSD preference with us. We unilaterally
-    ///    render the internal SSD via `DecorationManager` today; the
-    ///    proper XdgDecorationHandler is deferred to a follow-up.
+    ///    to negotiate SSD↔CSD preference with us. The live compositor
+    ///    output still does **not** render visible SSD chrome yet, so
+    ///    the current handler negotiates **client-side decorations**
+    ///    even when the protocol global is enabled.
     ///
     /// Users can opt back into either independently by setting the
     /// matching flag to `true` (and then supplying the corresponding
@@ -92,8 +93,9 @@ pub struct FeaturesConfig {
 
     /// Enable the `xdg-decoration-unstable-v1` Wayland protocol global so
     /// clients can negotiate SSD/CSD with the compositor. Disabled by
-    /// default (the handler is not implemented yet; the flag is a
-    /// forward-looking no-op until implementation lands).
+    /// default. When enabled today, the compositor still negotiates
+    /// **client-side decorations** because visible SSD rendering is not
+    /// part of the live output path yet.
     #[serde(default = "FeaturesConfig::default_enable_xdg_decoration_protocol")]
     pub enable_xdg_decoration_protocol: bool,
 }

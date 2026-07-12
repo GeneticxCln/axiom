@@ -15,16 +15,18 @@ Key Features:
 """
 
 import asyncio
-import json
-import socket
-import time
-import sys
-import logging
-import statistics
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
 from collections import deque, defaultdict
+from dataclasses import dataclass
+import glob
+import json
+import logging
+import os
 import signal
+import socket
+import statistics
+import sys
+import time
+from typing import Dict, List, Optional, Any
 
 # Configure logging
 logging.basicConfig(
@@ -32,6 +34,12 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('LazyUI')
+
+SUPPORTED_OPTIMIZE_CONFIG_KEYS = {
+    "effects.blur.radius",
+    "effects.animations.duration",
+    "workspace.scroll_speed",
+}
 
 @dataclass
 class PerformanceMetrics:
@@ -145,95 +153,112 @@ class PerformanceAnalyzer:
         return slope
     
     def generate_optimizations(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate AI-driven optimization recommendations"""
+        """Generate AI-driven optimization recommendations.
+
+        The compositor currently accepts only a small optimization surface:
+        - OptimizeConfig keys:
+          * effects.blur.radius
+          * effects.animations.duration
+          * workspace.scroll_speed
+        - EffectsControl fields:
+          * enabled
+          * blur_radius
+          * animation_speed
+        """
         if analysis["status"] != "analyzed":
-            return {"changes": {}, "reason": "insufficient_data"}
-        
-        changes = {}
+            return {
+                "config_changes": {},
+                "effects_control": {},
+                "reason": "insufficient_data",
+            }
+
+        config_changes: Dict[str, Any] = {}
+        effects_control: Dict[str, Any] = {}
         reasons = []
-        
+
         issues = analysis["issues"]
         averages = analysis["averages"]
-        
+
         # Frame time optimizations
         if "critical_frame_time" in issues:
-            # Aggressive performance mode
-            changes.update({
-                "effects.blur_radius": 3.0,
-                "effects.shadow_size": 10.0,
+            effects_control.update({
+                "blur_radius": 3.0,
                 "animation_speed": 0.7,
-                "effects.antialiasing": 1,
             })
-            reasons.append("Critical frame time detected - enabling performance mode")
-            
+            config_changes["effects.animations.duration"] = 400
+            reasons.append("Critical frame time detected - enabling aggressive runtime tuning")
+
         elif "poor_frame_time" in issues:
-            # Moderate performance adjustments
-            changes.update({
-                "effects.blur_radius": 6.0,
+            effects_control.update({
+                "blur_radius": 6.0,
                 "animation_speed": 0.85,
-                "effects.shadow_size": 15.0,
             })
-            reasons.append("Poor frame time detected - reducing visual effects")
-        
+            config_changes["effects.animations.duration"] = 300
+            reasons.append("Poor frame time detected - reducing visual overhead")
+
         # CPU optimizations
         if "critical_cpu" in issues or "high_cpu" in issues:
-            changes.update({
-                "animation_speed": 0.6,
-                "workspace.smooth_scrolling": False,
-            })
-            reasons.append("High CPU usage - disabling expensive animations")
-        
+            effects_control["animation_speed"] = 0.6
+            config_changes["effects.animations.duration"] = 450
+            reasons.append("High CPU usage - slowing animation workload")
+
         # GPU optimizations
         if "critical_gpu" in issues:
-            changes.update({
-                "effects.blur_radius": 2.0,
-                "effects.enabled": False,
+            effects_control.update({
+                "blur_radius": 2.0,
+                "enabled": False,
             })
-            reasons.append("Critical GPU usage - disabling visual effects")
-            
+            reasons.append("Critical GPU usage - disabling expensive effects")
+
         elif "high_gpu" in issues:
-            changes.update({
-                "effects.blur_radius": 4.0,
-                "effects.shadow_opacity": 0.4,
-            })
-            reasons.append("High GPU usage - reducing effect intensity")
-        
+            effects_control["blur_radius"] = 4.0
+            reasons.append("High GPU usage - reducing blur intensity")
+
         # Adaptive optimizations based on window count
         last_metrics = list(self.metrics_history)[-1]
         if last_metrics.active_windows > 8:
-            changes.update({
-                "animation_speed": 0.8,
-                "workspace.animation_duration": 200,
-            })
-            reasons.append(f"Many windows open ({last_metrics.active_windows}) - optimizing for responsiveness")
-        
+            effects_control["animation_speed"] = 0.8
+            config_changes["effects.animations.duration"] = 220
+            reasons.append(
+                f"Many windows open ({last_metrics.active_windows}) - optimizing for responsiveness"
+            )
+
         # Performance improvement optimizations
-        if (not issues and 
-            averages["frame_time"] < 12.0 and 
-            averages["cpu_usage"] < 40.0 and 
-            averages["gpu_usage"] < 50.0):
-            # System has headroom - enable more effects
-            changes.update({
-                "effects.blur_radius": 12.0,
-                "effects.shadow_size": 25.0,
+        if (
+            not issues
+            and averages["frame_time"] < 12.0
+            and averages["cpu_usage"] < 40.0
+            and averages["gpu_usage"] < 50.0
+        ):
+            effects_control.update({
+                "enabled": True,
+                "blur_radius": 12.0,
                 "animation_speed": 1.0,
-                "effects.antialiasing": 4,
             })
-            reasons.append("System has performance headroom - enabling enhanced visuals")
-        
+            config_changes["effects.animations.duration"] = 200
+            reasons.append("System has performance headroom - enabling stronger visual settings")
+
+        # Keep only compositor-supported config keys
+        config_changes = {
+            key: value
+            for key, value in config_changes.items()
+            if key in SUPPORTED_OPTIMIZE_CONFIG_KEYS
+        }
+
         reason = "; ".join(reasons) if reasons else "No optimizations needed"
-        
-        # Record optimization for history
+
         optimization = {
             "timestamp": time.time(),
-            "changes": changes,
+            "config_changes": config_changes,
+            "effects_control": effects_control,
             "reason": reason,
             "triggered_by": issues,
         }
         self.optimization_history.append(optimization)
-        
+
         return {
-            "changes": changes,
+            "config_changes": config_changes,
+            "effects_control": effects_control,
             "reason": reason,
             "confidence": self._calculate_confidence(analysis),
         }
@@ -304,46 +329,73 @@ class BehaviorAnalyzer:
         }
     
     def generate_behavioral_optimizations(self, patterns: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate optimizations based on user behavior"""
+        """Generate optimizations based on user behavior using supported keys only."""
         if patterns["status"] != "analyzed":
-            return {"changes": {}, "reason": "insufficient_behavioral_data"}
-        
-        changes = {}
+            return {
+                "config_changes": {},
+                "effects_control": {},
+                "reason": "insufficient_behavioral_data",
+            }
+
+        config_changes: Dict[str, Any] = {}
+        effects_control: Dict[str, Any] = {}
         reasons = []
-        
+
         # Optimize for frequent workspace scrolling
         if patterns["scroll_frequency"] > 0.3:  # 30% of events are scrolls
-            changes.update({
+            config_changes.update({
                 "workspace.scroll_speed": 1.3,
-                "workspace.animation_duration": 180,
-                "animation_speed": 1.1,
+                "effects.animations.duration": 180,
             })
-            reasons.append("Frequent workspace scrolling detected - optimizing for navigation speed")
-        
+            effects_control["animation_speed"] = 1.1
+            reasons.append("Frequent workspace scrolling detected - optimizing navigation speed")
+
         # Optimize based on most common event
         common_event = patterns["most_common_event"]
         if common_event == "window_focus":
-            changes.update({
-                "window.focus_animation_speed": 1.2,
-                "effects.window_blur": True,
-            })
-            reasons.append("Frequent window switching - optimizing focus animations")
-        
+            config_changes["effects.animations.duration"] = 220
+            reasons.append("Frequent window switching - slightly shortening transition duration")
+
+        config_changes = {
+            key: value
+            for key, value in config_changes.items()
+            if key in SUPPORTED_OPTIMIZE_CONFIG_KEYS
+        }
+
         reason = "; ".join(reasons) if reasons else "No behavioral optimizations suggested"
-        
+
         return {
-            "changes": changes,
+            "config_changes": config_changes,
+            "effects_control": effects_control,
             "reason": reason,
         }
+
+def discover_socket_path() -> str:
+    """Resolve the compositor IPC socket path used by the current instance."""
+    override = os.environ.get("AXIOM_SOCKET_PATH")
+    if override:
+        return override
+
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        candidate = os.path.join(runtime_dir, "axiom", "axiom.sock")
+        if os.path.exists(candidate):
+            return candidate
+
+    matches = sorted(glob.glob("/tmp/axiom-*/axiom-lazy-ui.sock"))
+    if matches:
+        return matches[-1]
+
+    if runtime_dir:
+        return os.path.join(runtime_dir, "axiom", "axiom.sock")
+    return "/tmp/axiom-<pid>/axiom-lazy-ui.sock"
+
 
 class LazyUIClient:
     """Main Lazy UI client that connects to Axiom compositor"""
     
     def __init__(self):
-        import os
-        self.socket_path = os.path.join(
-            os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "axiom", "axiom.sock"
-        )
+        self.socket_path = discover_socket_path()
         self.socket = None
         self.running = False
         
@@ -366,7 +418,8 @@ class LazyUIClient:
             return True
         except (ConnectionRefusedError, FileNotFoundError) as e:
             logger.error(f"❌ Failed to connect to Axiom IPC: {e}")
-            logger.error("   Make sure Axiom compositor is running")
+            logger.error(f"   Tried socket: {self.socket_path}")
+            logger.error("   Make sure Axiom compositor is running or set AXIOM_SOCKET_PATH")
             return False
     
     def disconnect(self):
@@ -443,48 +496,53 @@ class LazyUIClient:
         elif msg_type == "ConfigResponse":
             logger.info(f"⚙️ Config response: {message['key']} = {message['value']}")
     
+    async def send_supported_optimizations(self, recommendation: Dict[str, Any], prefix: str):
+        """Send optimizer output using only compositor-supported message shapes."""
+        config_changes = recommendation.get("config_changes", {})
+        effects_control = recommendation.get("effects_control", {})
+        reason = recommendation.get("reason", "no reason provided")
+
+        if config_changes:
+            logger.info(f"{prefix} config optimization: {reason}")
+            await self.send_message({
+                "type": "OptimizeConfig",
+                "changes": config_changes,
+                "reason": reason,
+            })
+
+        if effects_control:
+            logger.info(f"{prefix} runtime effects tuning: {reason}")
+            await self.send_message({
+                "type": "EffectsControl",
+                "enabled": effects_control.get("enabled"),
+                "blur_radius": effects_control.get("blur_radius"),
+                "animation_speed": effects_control.get("animation_speed"),
+            })
+
     async def run_optimization_cycle(self):
         """Run AI optimization analysis and send recommendations"""
         current_time = time.time()
-        
+
         if current_time - self.last_optimization_time < self.optimization_interval:
             return
-        
+
         self.last_optimization_time = current_time
-        
+
         logger.info("🧠 Running AI optimization analysis...")
-        
+
         # Analyze current performance
         perf_analysis = self.performance_analyzer.analyze_performance()
         behavior_patterns = self.behavior_analyzer.analyze_patterns()
-        
+
         if perf_analysis["status"] == "analyzed":
-            # Generate performance optimizations
             perf_optimizations = self.performance_analyzer.generate_optimizations(perf_analysis)
-            
-            if perf_optimizations["changes"]:
-                logger.info(f"🎯 Performance optimization: {perf_optimizations['reason']}")
-                
-                # Send optimization to compositor
-                await self.send_message({
-                    "type": "OptimizeConfig",
-                    "changes": perf_optimizations["changes"],
-                    "reason": perf_optimizations["reason"],
-                })
-        
+            if perf_optimizations["config_changes"] or perf_optimizations["effects_control"]:
+                await self.send_supported_optimizations(perf_optimizations, "🎯 Performance")
+
         if behavior_patterns["status"] == "analyzed":
-            # Generate behavioral optimizations  
             behavior_optimizations = self.behavior_analyzer.generate_behavioral_optimizations(behavior_patterns)
-            
-            if behavior_optimizations["changes"]:
-                logger.info(f"👤 Behavioral optimization: {behavior_optimizations['reason']}")
-                
-                # Send optimization to compositor
-                await self.send_message({
-                    "type": "OptimizeConfig",
-                    "changes": behavior_optimizations["changes"],
-                    "reason": behavior_optimizations["reason"],
-                })
+            if behavior_optimizations["config_changes"] or behavior_optimizations["effects_control"]:
+                await self.send_supported_optimizations(behavior_optimizations, "👤 Behavioral")
     
     async def health_check_cycle(self):
         """Periodically request health check from compositor"""

@@ -21,7 +21,7 @@ use log::{debug, info, warn};
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::io::OwnedFd;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 // Re-export BackendKind from the drm module so the rest of the compositor
 // can reference `crate::backend::BackendKind` as documented in the config.
@@ -52,9 +52,11 @@ use smithay::{
             with_states, BufferAssignment, CompositorClientState, CompositorHandler,
             CompositorState, SurfaceAttributes,
         },
+        fractional_scale::{self, FractionalScaleHandler, FractionalScaleManagerState},
         output::OutputHandler,
         selection::{
             data_device::{
+                request_data_device_client_selection, set_data_device_selection,
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
             },
             SelectionHandler, SelectionSource, SelectionTarget,
@@ -62,6 +64,7 @@ use smithay::{
         shell::xdg::{
             decoration::{XdgDecorationHandler, XdgDecorationState},
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+            XdgToplevelSurfaceData,
         },
         shm::{with_buffer_contents, ShmHandler, ShmState},
     },
@@ -75,14 +78,34 @@ use wayland_server::{
 
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
 
+mod clipboard_bridge;
 pub mod drm;
+mod render_bridge;
 mod xwayland_dispatch;
 pub mod xwm;
+use self::clipboard_bridge::{create_pipe, spawn_clipboard_read_worker, write_selection_bytes_to_fd};
+use self::render_bridge::{popup_render_id, should_use_wgpu_gl_bridge};
 use self::xwm::AxiomXwm;
 
 // Type alias to reduce complexity of the Rc<RefCell<Option<...>>> pattern
 // used for passing buffer data out of the SHM commit closure.
 type CachedBufferData = std::rc::Rc<std::cell::RefCell<Option<(Vec<u8>, i32, i32)>>>;
+type ClipboardUpdate = Vec<u8>;
+
+/// Visible server-side decoration rendering is not yet wired into the live
+/// compositor output. Until that lands, the backend should not claim SSD to
+/// Wayland/X11 clients even though internal decoration state exists for tests
+/// and future rendering work.
+fn backend_prefers_server_side_decorations() -> bool {
+    false
+}
+
+/// Current protocol-level decoration response advertised to xdg-decoration
+/// clients. We intentionally negotiate client-side decorations until visible
+/// SSD rendering is part of the live render path.
+fn negotiated_xdg_decoration_mode() -> Mode {
+    Mode::ClientSide
+}
 
 // ============================================================================
 // Surface Data
@@ -142,6 +165,7 @@ pub struct State {
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
     pub xdg_decoration_state: Option<XdgDecorationState>,
+    pub fractional_scale_manager_state: FractionalScaleManagerState,
 
     // Seat
     pub seat: Seat<Self>,
@@ -212,10 +236,17 @@ pub struct State {
     /// surface ID will dismiss it via popup_done().
     pub active_popup_grab: Option<u32>,
 
-    /// Cached Wayland clipboard data for X11 selection bridging.
-    /// Populated when a Wayland client sets the selection; served to X11
-    /// apps that request clipboard contents.
+    /// Cached clipboard payload served to both X11 and compositor-provided
+    /// Wayland selections. Populated from explicit compositor updates and from
+    /// the asynchronous Wayland-selection extraction worker.
     pub clipboard_cache: Option<Vec<u8>>,
+
+    /// Sender used by async Wayland-selection extraction workers to publish
+    /// freshly-read clipboard bytes back onto the compositor thread.
+    clipboard_update_tx: mpsc::Sender<ClipboardUpdate>,
+    /// Receiver drained in the main backend loop to refresh `clipboard_cache`
+    /// without blocking the compositor thread on pipe reads.
+    clipboard_update_rx: mpsc::Receiver<ClipboardUpdate>,
 
     /// Active Wayland selection source (when a client owns the clipboard).
     /// Stored so we can serve data to X11 and re-offer to other Wayland clients.
@@ -241,6 +272,111 @@ pub struct State {
 }
 
 impl State {
+    fn keyboard_repeat_settings(config: &AxiomConfig) -> (i32, i32) {
+        let delay = config.input.keyboard_repeat_delay.min(i32::MAX as u32) as i32;
+        let rate = config.input.keyboard_repeat_rate.min(i32::MAX as u32) as i32;
+        (delay, rate)
+    }
+
+    fn preferred_text_mime_type(mime_types: &[String]) -> Option<String> {
+        [
+            "text/plain;charset=utf-8",
+            "text/plain;charset=UTF-8",
+            "text/plain",
+            "TEXT",
+            "STRING",
+        ]
+        .iter()
+        .find_map(|wanted| {
+            mime_types
+                .iter()
+                .find(|candidate| candidate.as_str() == *wanted)
+                .cloned()
+        })
+        .or_else(|| mime_types.first().cloned())
+    }
+
+    fn drain_clipboard_updates(&mut self) {
+        while let Ok(data) = self.clipboard_update_rx.try_recv() {
+            debug!("📋 Clipboard cache refreshed from Wayland selection ({} bytes)", data.len());
+            self.clipboard_cache = Some(data);
+            if let Some(xwm) = self.xwm.as_mut() {
+                if let Err(e) = xwm.own_selection() {
+                    warn!("⚠️ Failed to claim X11 clipboard ownership: {}", e);
+                }
+            }
+        }
+    }
+
+    fn display_title(title: Option<String>, app_id: Option<String>) -> String {
+        title
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| app_id.filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| String::from("Wayland Client"))
+    }
+
+    fn read_xdg_toplevel_metadata(surface: &WlSurface) -> (Option<String>, Option<String>) {
+        with_states(surface, |states| {
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .and_then(|data| data.lock().ok().map(|role| (role.title.clone(), role.app_id.clone())))
+                .unwrap_or((None, None))
+        })
+    }
+
+    fn update_focus_state(&mut self, focused_window_id: Option<u64>) {
+        self.window_manager
+            .write()
+            .set_focused_window(focused_window_id);
+        let mut tracked_ids: Vec<u64> = self.window_map.keys().copied().collect();
+        tracked_ids.extend(self.x11_window_map.values().copied());
+        tracked_ids.sort_unstable();
+        tracked_ids.dedup();
+        let mut decorations = self.decoration_manager.write();
+        for id in tracked_ids {
+            decorations.set_window_focus(id, Some(id) == focused_window_id);
+        }
+    }
+
+    fn update_surface_fractional_scale(&self, surface: &WlSurface) {
+        let preferred_scale = self
+            .window_id_for_surface(surface)
+            .map(|window_id| self.workspace_manager.read().scale_factor_for_window(window_id))
+            .unwrap_or_else(|| self.focused_output_scale())
+            .clamp(1.0, 4.0);
+
+        with_states(surface, |states| {
+            fractional_scale::with_fractional_scale(states, |fractional_scale| {
+                fractional_scale.set_preferred_scale(preferred_scale);
+            });
+        });
+    }
+
+    fn update_window_metadata(
+        &mut self,
+        surface_id: u32,
+        title: Option<String>,
+        app_id: Option<String>,
+    ) {
+        let effective_title = Self::display_title(title.clone(), app_id.clone());
+        let window_id = self.surfaces.get(&surface_id).and_then(|data| data.window_id);
+
+        if let Some(surface_data) = self.surfaces.get_mut(&surface_id) {
+            surface_data.title = effective_title.clone();
+            surface_data.app_id = app_id.clone();
+        }
+
+        if let Some(window_id) = window_id {
+            if let Some(window) = self.window_manager.write().get_window_mut(window_id) {
+                window.window.title = effective_title.clone();
+            }
+            self.decoration_manager
+                .write()
+                .set_window_title(window_id, effective_title.clone());
+        }
+    }
+
     /// Create a new Axiom window from a surface
     pub fn create_window_from_surface(
         &mut self,
@@ -254,7 +390,8 @@ impl State {
             surface_id, title, app_id
         );
 
-        let window_id = self.window_manager.write().add_window(title.clone());
+        let visible_title = title.clone();
+        let window_id = self.window_manager.write().add_window(visible_title.clone());
         self.workspace_manager.write().add_window(window_id);
 
         // Trigger window open animation (spring-physics scale + fade-in)
@@ -271,11 +408,11 @@ impl State {
         self.surfaces.insert(surface_id, surface_data);
         self.window_map.insert(window_id, surface_id);
 
-        // Register with DecorationManager using real window geometry.
+        // Register decoration state, but do not claim visible SSD yet.
         self.decoration_manager.write().add_window(
             window_id,
-            String::from("Wayland Client"),
-            /* prefers_server_side */ true,
+            visible_title,
+            backend_prefers_server_side_decorations(),
             640,
         );
 
@@ -283,20 +420,31 @@ impl State {
     }
 
     /// Create a new Axiom window for an X11 client (via XWayland).
-    pub fn create_window_from_x11(&mut self, x11_window_id: u32, title: String) -> u64 {
+    pub fn create_window_from_x11(
+        &mut self,
+        x11_window_id: u32,
+        title: String,
+        class: Option<String>,
+    ) -> u64 {
         info!(
-            "Creating window from X11 window {} (title: \"{}\")",
-            x11_window_id, title
+            "Creating window from X11 window {} (title: \"{}\", class: {:?})",
+            x11_window_id, title, class
         );
 
-        let window_id = self.window_manager.write().add_window(title.clone());
+        let visible_title = if title.starts_with("X11 Window #") {
+            class.clone().unwrap_or(title.clone())
+        } else {
+            title.clone()
+        };
+
+        let window_id = self.window_manager.write().add_window(visible_title.clone());
         self.workspace_manager.write().add_window(window_id);
         self.effects_engine.write().animate_window_open(window_id);
 
         self.decoration_manager.write().add_window(
             window_id,
-            title.clone(),
-            /* prefers_server_side */ true,
+            visible_title,
+            backend_prefers_server_side_decorations(),
             640,
         );
 
@@ -317,6 +465,8 @@ impl State {
         // Clean up configure tracking
         self.configured_sizes.remove(&surface_id);
         self.pending_configure.remove(&surface_id);
+        self.buffer_cache.remove(&surface_id);
+        self.buffer_cache_dimensions.remove(&surface_id);
 
         if let Some(data) = self.surfaces.remove(&surface_id) {
             if let Some(window_id) = data.window_id {
@@ -324,6 +474,10 @@ impl State {
                 self.window_map.remove(&window_id);
                 self.window_manager.write().remove_window(window_id);
                 self.workspace_manager.write().remove_window(window_id);
+                self.effects_engine.write().remove_window(window_id);
+                if let Some(ref renderer) = self.renderer {
+                    renderer.write().remove_window(window_id);
+                }
                 self.decoration_manager.write().remove_window(window_id);
             }
         }
@@ -530,11 +684,10 @@ impl SeatHandler for State {
     }
 
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {
-        if let Some(surface) = _focused {
-            if let Some(window_id) = self.window_id_for_surface(surface) {
-                self.window_manager.write().focus_window(window_id);
-                debug!("🎯 Wayland focus changed to window {}", window_id);
-            }
+        let focused_window_id = _focused.and_then(|surface| self.window_id_for_surface(surface));
+        self.update_focus_state(focused_window_id);
+        if let Some(window_id) = focused_window_id {
+            debug!("🎯 Wayland focus changed to window {}", window_id);
         }
     }
 
@@ -579,14 +732,16 @@ impl XdgShellHandler for State {
         // Keep the ToplevelSurface alive — it is destroyed when dropped
         self.toplevels.insert(surface_id, surface.clone());
 
-        info!("🪟 New XDG toplevel: surface={}", surface_id);
+        let (title, app_id) = Self::read_xdg_toplevel_metadata(&wl_surface);
+        let display_title = Self::display_title(title, app_id.clone());
 
-        self.create_window_from_surface(
-            surface_id,
-            String::from("Wayland Client"),
-            None,
-            wl_surface,
+        info!(
+            "🪟 New XDG toplevel: surface={} title={:?} app_id={:?}",
+            surface_id, display_title, app_id
         );
+
+        self.create_window_from_surface(surface_id, display_title, app_id, wl_surface.clone());
+        self.update_surface_fractional_scale(&wl_surface);
         self.needs_redraw = true;
     }
 
@@ -627,6 +782,32 @@ impl XdgShellHandler for State {
                 surface,
             },
         );
+    }
+
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        let wl_surface = surface.wl_surface().clone();
+        let surface_id = wl_surface.id().protocol_id();
+        let (title, app_id) = Self::read_xdg_toplevel_metadata(&wl_surface);
+        let display_title = Self::display_title(title.clone(), app_id.clone());
+        self.update_window_metadata(surface_id, title, app_id);
+        debug!(
+            "📝 Updated XDG toplevel metadata: surface={} title={:?}",
+            surface_id, display_title
+        );
+        self.needs_redraw = true;
+    }
+
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        let wl_surface = surface.wl_surface().clone();
+        let surface_id = wl_surface.id().protocol_id();
+        let (title, app_id) = Self::read_xdg_toplevel_metadata(&wl_surface);
+        let display_title = Self::display_title(title.clone(), app_id.clone());
+        self.update_window_metadata(surface_id, title, app_id.clone());
+        debug!(
+            "🪪 Updated XDG toplevel metadata: surface={} title={:?} app_id={:?}",
+            surface_id, display_title, app_id
+        );
+        self.needs_redraw = true;
     }
 
     fn ack_configure(
@@ -683,7 +864,7 @@ impl SelectionHandler for State {
         &mut self,
         ty: SelectionTarget,
         source: Option<SelectionSource>,
-        _seat: Seat<Self>,
+        seat: Seat<Self>,
     ) {
         match ty {
             SelectionTarget::Clipboard => {
@@ -694,15 +875,38 @@ impl SelectionHandler for State {
                         mime_types.len(),
                         mime_types
                     );
-                    // Claim X11 clipboard ownership so X11 apps query us (not stale X11 owners)
-                    if let Some(xwm) = self.xwm.as_ref() {
+                    if let Some(xwm) = self.xwm.as_mut() {
                         if let Err(e) = xwm.own_selection() {
                             warn!("⚠️ Failed to claim X11 clipboard ownership: {}", e);
                         }
                     }
-                    // Store the source so X11 clipboard requests can extract
-                    // text/plain on demand (see State::extract_wayland_clipboard).
                     self.clipboard_source = Some(src.clone());
+
+                    if let Some(mime) = Self::preferred_text_mime_type(&mime_types) {
+                        match create_pipe() {
+                            Ok((read_fd, write_fd)) => {
+                                match request_data_device_client_selection(&seat, mime.clone(), write_fd) {
+                                    Ok(()) => {
+                                        debug!(
+                                            "📋 Requested Wayland clipboard payload for X11 bridge via MIME {}",
+                                            mime
+                                        );
+                                        spawn_clipboard_read_worker(
+                                            read_fd,
+                                            self.clipboard_update_tx.clone(),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "⚠️ Failed requesting Wayland clipboard payload for MIME {}: {:?}",
+                                            mime, e
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => warn!("⚠️ Failed creating clipboard bridge pipe: {}", e),
+                        }
+                    }
                 } else {
                     debug!("📋 Wayland clipboard cleared");
                     self.clipboard_source = None;
@@ -712,6 +916,32 @@ impl SelectionHandler for State {
             SelectionTarget::Primary => {
                 debug!("📋 Wayland primary selection updated");
             }
+        }
+    }
+
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &Self::SelectionUserData,
+    ) {
+        if !matches!(ty, SelectionTarget::Clipboard) {
+            return;
+        }
+        if let Some(data) = self.clipboard_cache.clone() {
+            debug!(
+                "📤 Serving compositor clipboard to Wayland client via MIME {} ({} bytes)",
+                mime_type,
+                data.len()
+            );
+            write_selection_bytes_to_fd(fd, &data);
+        } else {
+            debug!(
+                "📤 Wayland client requested compositor clipboard via MIME {}, but cache is empty",
+                mime_type
+            );
         }
     }
 }
@@ -729,44 +959,52 @@ impl ServerDndGrabHandler for State {
 
 impl OutputHandler for State {}
 
+impl FractionalScaleHandler for State {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        self.update_surface_fractional_scale(&surface);
+    }
+}
+
 impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        let negotiated = negotiated_xdg_decoration_mode();
         toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(Mode::ServerSide);
-        });
-        toplevel.send_configure();
-    }
-
-    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: Mode) {
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(mode);
+            state.decoration_mode = Some(negotiated);
         });
         toplevel.send_configure();
 
-        // Update our DecorationManager to match the client's preference.
         if let Some(window_id) = self.window_id_for_surface(toplevel.wl_surface()) {
-            let dm_mode = match mode {
-                Mode::ClientSide => crate::decoration::DecorationMode::ClientSide,
-                Mode::ServerSide => crate::decoration::DecorationMode::ServerSide,
-                _ => return,
-            };
             self.decoration_manager
                 .write()
-                .set_decoration_mode(window_id, dm_mode);
+                .set_decoration_mode(window_id, crate::decoration::DecorationMode::ClientSide);
+        }
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: Mode) {
+        let negotiated = negotiated_xdg_decoration_mode();
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(negotiated);
+        });
+        toplevel.send_configure();
+
+        if let Some(window_id) = self.window_id_for_surface(toplevel.wl_surface()) {
+            self.decoration_manager
+                .write()
+                .set_decoration_mode(window_id, crate::decoration::DecorationMode::ClientSide);
         }
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
-        // Revert to our default (ServerSide) when client unsets their preference.
+        let negotiated = negotiated_xdg_decoration_mode();
         toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(Mode::ServerSide);
+            state.decoration_mode = Some(negotiated);
         });
         toplevel.send_configure();
 
         if let Some(window_id) = self.window_id_for_surface(toplevel.wl_surface()) {
             self.decoration_manager
                 .write()
-                .set_decoration_mode(window_id, crate::decoration::DecorationMode::ServerSide);
+                .set_decoration_mode(window_id, crate::decoration::DecorationMode::ClientSide);
         }
     }
 }
@@ -777,6 +1015,7 @@ delegate_shm!(State);
 delegate_seat!(State);
 delegate_xdg_shell!(State);
 delegate_data_device!(State);
+smithay::delegate_fractional_scale!(State);
 smithay::delegate_xdg_decoration!(State);
 smithay::delegate_output!(State);
 
@@ -857,9 +1096,12 @@ impl AxiomSmithayBackendReal {
         let shm_state = ShmState::new::<State>(&dh, vec![]);
         let xdg_shell_state = XdgShellState::new::<State>(&dh);
         let data_device_state = DataDeviceState::new::<State>(&dh);
+        let fractional_scale_manager_state = FractionalScaleManagerState::new::<State>(&dh);
 
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(&dh, "axiom-test");
+
+        let (clipboard_update_tx, clipboard_update_rx) = mpsc::channel();
 
         let state = State {
             compositor_state,
@@ -868,6 +1110,7 @@ impl AxiomSmithayBackendReal {
             seat_state,
             data_device_state,
             xdg_decoration_state: None,
+            fractional_scale_manager_state,
             seat,
             config,
             window_manager,
@@ -897,6 +1140,8 @@ impl AxiomSmithayBackendReal {
             popups: HashMap::new(),
             active_popup_grab: None,
             clipboard_cache: None,
+            clipboard_update_tx,
+            clipboard_update_rx,
             clipboard_source: None,
             cursor_icon: None,
         };
@@ -941,6 +1186,7 @@ impl AxiomSmithayBackendReal {
         let shm_state = ShmState::new::<State>(&dh, vec![]);
         let xdg_shell_state = XdgShellState::new::<State>(&dh);
         let data_device_state = DataDeviceState::new::<State>(&dh);
+        let fractional_scale_manager_state = FractionalScaleManagerState::new::<State>(&dh);
 
         let xdg_decoration_state = if config.features.enable_xdg_decoration_protocol {
             info!("🌐 Registering zxdg_decoration_manager_v1 global");
@@ -951,6 +1197,7 @@ impl AxiomSmithayBackendReal {
 
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(&dh, "axiom");
+        let (clipboard_update_tx, clipboard_update_rx) = mpsc::channel();
 
         let output = Output::new(
             "Axiom-Output-0".into(),
@@ -980,6 +1227,7 @@ impl AxiomSmithayBackendReal {
             seat_state,
             data_device_state,
             xdg_decoration_state,
+            fractional_scale_manager_state,
             seat,
             config,
             window_manager,
@@ -1009,6 +1257,8 @@ impl AxiomSmithayBackendReal {
             popups: HashMap::new(),
             active_popup_grab: None,
             clipboard_cache: None,
+            clipboard_update_tx,
+            clipboard_update_rx,
             clipboard_source: None,
             cursor_icon: None,
         };
@@ -1071,13 +1321,37 @@ impl AxiomSmithayBackendReal {
 
         info!("✅ Winit backend initialized");
 
+        let window_size = backend.window_size();
+        let host_scale = backend.window().scale_factor().clamp(1.0, 4.0);
+
+        self.state.window_width = window_size.w as u32;
+        self.state.window_height = window_size.h as u32;
+        {
+            let mut wm = self.state.workspace_manager.write();
+            let tape = wm.ensure_tape("default");
+            tape.set_scale_factor(host_scale);
+            tape.set_viewport_size(window_size.w as f64, window_size.h as f64);
+        }
+        if let Some(output) = self.state.outputs.first().cloned() {
+            output.change_current_state(
+                Some(OutputMode {
+                    size: (window_size.w, window_size.h).into(),
+                    refresh: 60_000,
+                }),
+                Some(Transform::Normal),
+                Some(smithay_output_scale(host_scale)),
+                None,
+            );
+        }
+
         self.winit_backend = Some(backend);
         self.winit_event_loop = Some(event_loop);
 
+        let (repeat_delay, repeat_rate) = State::keyboard_repeat_settings(&self.state.config);
         let _keyboard = self
             .state
             .seat
-            .add_keyboard(XkbConfig::default(), 200, 200)?;
+            .add_keyboard(XkbConfig::default(), repeat_delay, repeat_rate)?;
 
         self.state.seat.add_pointer();
 
@@ -1112,17 +1386,17 @@ impl AxiomSmithayBackendReal {
         self.state.outputs.clear();
 
         // Create Smithay Output objects + workspace tapes per KMS output.
-        // The first output's dimensions become the primary pointer-clamping
-        // viewport; additional outputs extend the available workspace.
+        // Outputs are currently arranged as a simple horizontal virtual desktop.
         if let Some(ref drm) = self.drm_backend {
             let dh = self.display.handle();
             let outputs = drm.kms_outputs();
+            let output_names: Vec<String> = outputs
+                .iter()
+                .enumerate()
+                .map(|(i, kms_out)| normalized_output_name(&kms_out.name, i))
+                .collect();
             for (i, kms_out) in outputs.iter().enumerate() {
-                let output_name = if kms_out.name.is_empty() {
-                    format!("Axiom-Output-{}", i)
-                } else {
-                    kms_out.name.clone()
-                };
+                let output_name = output_names[i].clone();
 
                 let physical_mm_width = kms_out.physical_width_mm as i32;
                 let physical_mm_height = kms_out.physical_height_mm as i32;
@@ -1150,11 +1424,10 @@ impl AxiomSmithayBackendReal {
                     size: (kms_out.width as i32, kms_out.height as i32).into(),
                     refresh: kms_out.mode.vrefresh() as i32,
                 };
-                let scale_i32 = kms_out.scale_factor.round().max(1.0) as i32;
                 output.change_current_state(
                     Some(mode),
                     Some(Transform::Normal),
-                    Some(Scale::Integer(scale_i32)),
+                    Some(smithay_output_scale(kms_out.scale_factor)),
                     None,
                 );
                 output.create_global::<State>(&dh);
@@ -1164,12 +1437,13 @@ impl AxiomSmithayBackendReal {
                     .output_scale_factors
                     .insert(output_name.clone(), kms_out.scale_factor);
 
-                // Create a workspace tape for this output with the
-                // correct DPI scale factor.
+                // Create/update a workspace tape for this output with the
+                // correct DPI scale factor and per-output viewport size.
                 {
                     let mut wm = self.state.workspace_manager.write();
                     let tape = wm.ensure_tape(&output_name);
                     tape.set_scale_factor(kms_out.scale_factor);
+                    tape.set_viewport_size(kms_out.width as f64, kms_out.height as f64);
                 }
 
                 info!(
@@ -1183,38 +1457,32 @@ impl AxiomSmithayBackendReal {
                 );
             }
 
-            // Set the primary viewport from the first output.
-            if let Some(first) = outputs.first() {
-                self.state.window_width = first.width;
-                self.state.window_height = first.height;
-                self.state
-                    .workspace_manager
-                    .write()
-                    .set_viewport_size(first.width as f64, first.height as f64);
-                info!(
-                    "Primary display dimensions: {}x{}",
-                    first.width, first.height
-                );
-
-                // Set the focused output to the first one.
-                if !outputs.is_empty() {
-                    let first_name = if first.name.is_empty() {
-                        "Axiom-Output-0".to_string()
-                    } else {
-                        first.name.clone()
-                    };
-                    self.state.workspace_manager.write().focused_output = first_name;
-                }
+            {
+                let mut wm = self.state.workspace_manager.write();
+                wm.sync_tapes_with_outputs(&output_names);
             }
+
+            let focused_name = self.state.workspace_manager.read().focused_output.clone();
+            let (virtual_width, virtual_height) =
+                self.state.workspace_manager.read().virtual_desktop_size();
+            self.state.window_width = virtual_width;
+            self.state.window_height = virtual_height;
+            info!(
+                "Virtual desktop dimensions: {}x{} (focused output: {})",
+                virtual_width,
+                virtual_height,
+                focused_name,
+            );
         }
 
         info!("DRM backend initialized with libinput udev seat discovery");
 
         // Register a keyboard seat for compatibility even in DRM mode.
+        let (repeat_delay, repeat_rate) = State::keyboard_repeat_settings(&self.state.config);
         let _keyboard = self
             .state
             .seat
-            .add_keyboard(XkbConfig::default(), 200, 200)
+            .add_keyboard(XkbConfig::default(), repeat_delay, repeat_rate)
             .map_err(|e| anyhow::anyhow!("Failed to add DRM keyboard: {:?}", e))?;
 
         self.state.seat.add_pointer();
@@ -1239,9 +1507,10 @@ impl AxiomSmithayBackendReal {
     /// Synchronize Smithay Output objects and workspace tapes with the
     /// DRM KMS state after a hotplug event.
     ///
-    /// Clears all existing outputs and tapes, then re-creates them from
-    /// the current KMS state. This is simple and correct even when the
-    /// display topology changes dramatically.
+    /// Rebuilds the Smithay output list from the current KMS state and then
+    /// synchronizes workspace tapes against the set of live output IDs. Stale
+    /// tapes are removed, and any windows they contained are migrated into the
+    /// fallback live tape so hotplug does not silently orphan them.
     fn call_drm_reenumerate_and_sync(&mut self) {
         let Some(ref drm_backend) = self.drm_backend else {
             return;
@@ -1253,12 +1522,13 @@ impl AxiomSmithayBackendReal {
 
         let dh = self.display.handle();
         let kms_outputs = drm_backend.kms_outputs();
+        let output_names: Vec<String> = kms_outputs
+            .iter()
+            .enumerate()
+            .map(|(i, kms_out)| normalized_output_name(&kms_out.name, i))
+            .collect();
         for (i, kms_out) in kms_outputs.iter().enumerate() {
-            let output_name = if kms_out.name.is_empty() {
-                format!("Axiom-Output-{}", i)
-            } else {
-                kms_out.name.clone()
-            };
+            let output_name = output_names[i].clone();
 
             let phys_size = if kms_out.physical_width_mm > 0 && kms_out.physical_height_mm > 0 {
                 (
@@ -1287,11 +1557,10 @@ impl AxiomSmithayBackendReal {
                 size: (kms_out.width as i32, kms_out.height as i32).into(),
                 refresh: kms_out.mode.vrefresh() as i32,
             };
-            let scale_i32 = kms_out.scale_factor.round().max(1.0) as i32;
             output.change_current_state(
                 Some(mode),
                 Some(Transform::Normal),
-                Some(Scale::Integer(scale_i32)),
+                Some(smithay_output_scale(kms_out.scale_factor)),
                 None,
             );
             output.create_global::<State>(&dh);
@@ -1304,27 +1573,28 @@ impl AxiomSmithayBackendReal {
             let mut wm = self.state.workspace_manager.write();
             let tape = wm.ensure_tape(&output_name);
             tape.set_scale_factor(kms_out.scale_factor);
+            tape.set_viewport_size(kms_out.width as f64, kms_out.height as f64);
         }
 
-        // Update primary viewport from first output.
-        if let Some(first) = kms_outputs.first() {
-            self.state.window_width = first.width;
-            self.state.window_height = first.height;
-            self.state
-                .workspace_manager
-                .write()
-                .set_viewport_size(first.width as f64, first.height as f64);
-
-            let first_name = if first.name.is_empty() {
-                "Axiom-Output-0".to_string()
-            } else {
-                first.name.clone()
-            };
-            self.state.workspace_manager.write().focused_output = first_name;
+        {
+            let mut wm = self.state.workspace_manager.write();
+            wm.sync_tapes_with_outputs(&output_names);
         }
+
+        let focused_name = self.state.workspace_manager.read().focused_output.clone();
+        let (virtual_width, virtual_height) =
+            self.state.workspace_manager.read().virtual_desktop_size();
+        self.state.window_width = virtual_width;
+        self.state.window_height = virtual_height;
 
         self.state.needs_redraw = true;
-        info!("Output sync complete: {} display(s)", kms_outputs.len());
+        info!(
+            "Output sync complete: {} display(s), focused output '{}', virtual desktop {}x{}",
+            kms_outputs.len(),
+            focused_name,
+            virtual_width,
+            virtual_height,
+        );
     }
 
     /// Run one cycle of the event loop
@@ -1585,13 +1855,15 @@ impl AxiomSmithayBackendReal {
                     let serial = SERIAL_COUNTER.next_serial();
                     let time = motion.time();
 
+                    let floating = self.floating_rects();
+                    let under = self.state.workspace_manager.read().element_under(
+                        self.state.pointer_x,
+                        self.state.pointer_y,
+                        &floating,
+                    );
+                    self.maybe_focus_window_under_pointer(under, serial);
+
                     if let Some(pointer) = self.state.seat.get_pointer() {
-                        let floating = self.floating_rects();
-                        let under = self.state.workspace_manager.read().element_under(
-                            self.state.pointer_x,
-                            self.state.pointer_y,
-                            &floating,
-                        );
                         let focus = under.and_then(|(window_id, (sx, sy))| {
                             self.state
                                 .window_map
@@ -1636,13 +1908,15 @@ impl AxiomSmithayBackendReal {
                     let serial = SERIAL_COUNTER.next_serial();
                     let time = abs.time();
 
+                    let floating = self.floating_rects();
+                    let under = self
+                        .state
+                        .workspace_manager
+                        .read()
+                        .element_under(x, y, &floating);
+                    self.maybe_focus_window_under_pointer(under, serial);
+
                     if let Some(pointer) = self.state.seat.get_pointer() {
-                        let floating = self.floating_rects();
-                        let under = self
-                            .state
-                            .workspace_manager
-                            .read()
-                            .element_under(x, y, &floating);
                         let focus = under.and_then(|(window_id, (sx, sy))| {
                             self.state
                                 .window_map
@@ -1858,16 +2132,17 @@ impl AxiomSmithayBackendReal {
     fn run_one_cycle_common(&mut self) -> Result<()> {
         // Poll X11 events from XWayland (if XWM is wired).
         // The X11 selection/clipboard dispatch lives in xwayland_dispatch.rs.
-        self::xwayland_dispatch::poll_and_dispatch_events(&mut self.state)?;
+        let display_handle = self.display.handle();
+        self::xwayland_dispatch::poll_and_dispatch_events(&display_handle, &mut self.state)?;
 
         // Dispatch Wayland client events
         self.display.dispatch_clients(&mut self.state)?;
         self.display.flush_clients()?;
 
-        // After dispatch + flush, any new Wayland clipboard source is
-        // stored in `state.clipboard_source`. Full extraction requires
-        // acting as a Wayland client (wl_data_device.receive round-trip);
-        // see the doc comment on `State::clipboard_source` for details.
+        // Fold in any asynchronously-read clipboard payloads requested from the
+        // active Wayland selection source so X11 requests can be served from the
+        // compositor cache on the next pass.
+        self.state.drain_clipboard_updates();
 
         // Update animations after dispatch so newly-created windows (which
         // trigger animate_window_open() during dispatch) get their first
@@ -1879,16 +2154,12 @@ impl AxiomSmithayBackendReal {
         self.state.prune_dead_surfaces();
 
         // Render if needed — dispatch based on backend kind.
-        // Winit uses the GL render path; DRM uses GBM surface → set_crtc.
+        // Winit uses the nested GL bridge; DRM uses the standalone dumb-buffer
+        // scanout path backed by the same WGPU compositor frame.
         if self.state.needs_redraw {
             match self.backend_kind {
                 BackendKind::Drm => {
-                    if let Some(ref mut drm) = self.drm_backend {
-                        let rendered = drm.render_frame();
-                        if rendered == 0 {
-                            debug!("DRM render_frame: no outputs rendered (dumb-buffer only)");
-                        }
-                    }
+                    self.render_drm_frame()?;
                 }
                 _ => {
                     self.render()?;
@@ -1988,15 +2259,17 @@ impl AxiomSmithayBackendReal {
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = Event::time_msec(&event);
 
+                // Find the surface under the pointer and forward motion
+                // Skip dead surfaces (from disconnected clients)
+                let floating = self.floating_rects();
+                let under = self
+                    .state
+                    .workspace_manager
+                    .read()
+                    .element_under(x, y, &floating);
+                self.maybe_focus_window_under_pointer(under, serial);
+
                 if let Some(pointer) = self.state.seat.get_pointer() {
-                    // Find the surface under the pointer and forward motion
-                    // Skip dead surfaces (from disconnected clients)
-                    let floating = self.floating_rects();
-                    let under = self
-                        .state
-                        .workspace_manager
-                        .read()
-                        .element_under(x, y, &floating);
                     let focus = under.and_then(|(window_id, (sx, sy))| {
                         self.state
                             .window_map
@@ -2249,6 +2522,37 @@ impl AxiomSmithayBackendReal {
         rects
     }
 
+    /// If configured, move keyboard focus to the window under the pointer.
+    /// This keeps live backend focus behavior aligned with `window.focus_follows_mouse`.
+    fn maybe_focus_window_under_pointer(
+        &mut self,
+        under: Option<(u64, (f64, f64))>,
+        serial: Serial,
+    ) {
+        if !self.state.config.window.focus_follows_mouse {
+            return;
+        }
+
+        let target_window_id = under.map(|(window_id, _)| window_id);
+        if self.state.window_manager.read().focused_window_id() == target_window_id {
+            return;
+        }
+
+        let target_surface = target_window_id.and_then(|window_id| {
+            self.state
+                .window_map
+                .get(&window_id)
+                .and_then(|surface_id| self.state.surfaces.get(surface_id))
+                .and_then(|sd| sd.surface.as_ref())
+                .filter(|surface| surface.is_alive())
+                .cloned()
+        });
+
+        if let Some(keyboard) = self.state.seat.get_keyboard() {
+            keyboard.set_focus(&mut self.state, target_surface, serial);
+        }
+    }
+
     /// Decoration hit-testing for pointer button events. Returns `true` if
     /// the button press was consumed by a decoration (close/minimize/etc.),
     /// in which case the caller should **not** forward the event to Smithay's
@@ -2477,7 +2781,11 @@ impl AxiomSmithayBackendReal {
                                 // Convert physical-pixel window size to
                                 // logical pixels for the configure event,
                                 // matching the tiling reconfigure path.
-                                let scale = self.state.focused_output_scale();
+                                let scale = self
+                                    .state
+                                    .workspace_manager
+                                    .read()
+                                    .scale_factor_for_window(window_id);
                                 let logical_w = ((new_w as f64 / scale).round() as i32).max(1);
                                 let logical_h = ((new_h as f64 / scale).round() as i32).max(1);
                                 toplevel.with_pending_state(|state| {
@@ -2540,12 +2848,8 @@ impl AxiomSmithayBackendReal {
                     }
                 }
                 CompositorAction::MoveWindowLeft => {
-                    let windows = self
-                        .state
-                        .workspace_manager
-                        .read()
-                        .get_focused_column_windows();
-                    if let Some(&window_id) = windows.first() {
+                    let focused_id = self.state.window_manager.read().focused_window_id();
+                    if let Some(window_id) = focused_id {
                         self.state
                             .workspace_manager
                             .write()
@@ -2595,12 +2899,8 @@ impl AxiomSmithayBackendReal {
                     }
                 }
                 CompositorAction::MoveWindowRight => {
-                    let windows = self
-                        .state
-                        .workspace_manager
-                        .read()
-                        .get_focused_column_windows();
-                    if let Some(&window_id) = windows.first() {
+                    let focused_id = self.state.window_manager.read().focused_window_id();
+                    if let Some(window_id) = focused_id {
                         self.state
                             .workspace_manager
                             .write()
@@ -2647,33 +2947,15 @@ impl AxiomSmithayBackendReal {
         }
     }
 
-    /// Render the current frame via WGPU compositing + single GL blit.
-    ///
-    /// All window compositing and effects happen on the GPU via WGPU's
-    /// `compose_full_frame`. The result is uploaded as a single GL texture
-    /// and blitted to the framebuffer with one fullscreen quad draw.
-    fn render(&mut self) -> Result<()> {
-        let Some(backend) = self.winit_backend.as_mut() else {
-            return Ok(());
-        };
-
-        // Apply the latest cursor icon to the winit window.
-        if let Some(icon) = self.state.cursor_icon {
-            backend.window().set_cursor(icon);
-        }
-
-        let ww = self.state.window_width;
-        let wh = self.state.window_height;
-
-        // Calculate layouts from workspace manager (animations already updated in run_one_cycle)
+    /// Calculate workspace layouts, synchronize window geometry, and notify
+    /// Wayland clients of size changes. Shared by nested and DRM render paths.
+    fn prepare_render_scene(&mut self) -> HashMap<u64, crate::window::Rectangle> {
         let layouts = self
             .state
             .workspace_manager
             .read()
             .calculate_workspace_layouts();
 
-        // Update tiled window positions in window manager.
-        // Floating windows keep their manually-set position.
         {
             let mut wm = self.state.window_manager.write();
             for (window_id, layout_rect) in &layouts {
@@ -2688,17 +2970,15 @@ impl AxiomSmithayBackendReal {
             }
         }
 
-        // Send xdg_toplevel.configure events for windows whose tiling size changed.
-        // This notifies Wayland clients to resize their buffers to match the layout.
-        // Done before bind() so we don't hold GL context while doing Wayland protocol work.
-        //
-        // Physical-pixel layout dims are converted to logical pixels using the
-        // focused output's DPI scale factor. HiDPI-aware clients multiply by
-        // buffer_scale to allocate their actual pixel buffers.
-        let scale = self.state.focused_output_scale();
         for (window_id, rect) in &layouts {
             if let Some(&surface_id) = self.state.window_map.get(window_id) {
                 if let Some(toplevel) = self.state.toplevels.get(&surface_id) {
+                    self.state.update_surface_fractional_scale(toplevel.wl_surface());
+                    let scale = self
+                        .state
+                        .workspace_manager
+                        .read()
+                        .scale_factor_for_window(*window_id);
                     let new_w = ((rect.width as f64 / scale).round() as i32).max(1);
                     let new_h = ((rect.height as f64 / scale).round() as i32).max(1);
 
@@ -2707,8 +2987,6 @@ impl AxiomSmithayBackendReal {
                         .configured_sizes
                         .get(&surface_id)
                         .is_none_or(|&(cw, ch)| cw != new_w || ch != new_h);
-
-                    // Skip if client hasn't acknowledged the previous configure yet.
                     let pending = self.state.pending_configure.contains(&surface_id);
 
                     if needs_configure && !pending {
@@ -2730,174 +3008,227 @@ impl AxiomSmithayBackendReal {
             }
         }
 
-        // ── WGPU Compositing ────────────────────────────────────────────
-        // Drain the SHM buffer cache and upload each entry to the renderer
-        // as WGPU textures. This replaces the old GL texture upload path.
-        if let Some(ref renderer) = self.state.renderer {
-            let mut r = renderer.write();
+        layouts
+    }
 
-            // Build inverse map: surface_id → window_id for texture uploads.
-            let mut surface_to_window: HashMap<u32, u64> = HashMap::new();
-            for (&wid, &sid) in &self.state.window_map {
-                surface_to_window.insert(sid, wid);
-            }
+    /// Render the current frame.
+    ///
+    /// Composition is WGPU-first, but the nested winit path still presents
+    /// through an isolated WGPU → CPU readback → GL upload bridge. Keeping
+    /// that bridge in one place makes it easier to replace later without
+    /// spreading presentation logic across the whole backend.
+    fn render(&mut self) -> Result<()> {
+        if self.winit_backend.is_none() {
+            return Ok(());
+        }
 
-            // Drain buffer_cache and upload to renderer as WGPU textures.
-            let pending: Vec<(u32, Vec<u8>, (i32, i32))> = {
-                let cache = &mut self.state.buffer_cache;
-                let dims = &mut self.state.buffer_cache_dimensions;
-                let pending: Vec<_> = cache
-                    .drain()
-                    .filter_map(|(sid, data)| {
-                        let d = dims.remove(&sid).unwrap_or((0, 0));
-                        if d.0 > 0 && d.1 > 0 {
-                            Some((sid, data, d))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                pending
-            };
-
-            for (surface_id, data, (w, h)) in &pending {
-                if let Some(&window_id) = surface_to_window.get(surface_id) {
-                    r.update_window_texture(window_id, *w as u32, *h as u32, data);
-                }
-            }
-
-            // Sync window positions and sizes from layouts into the renderer.
-            // The compositor's prepare_frame_data() applies effects (scale,
-            // opacity, offset) and upserts rects, but the backend also needs
-            // to sync tiled layouts when the backend owns position updates.
-            for (window_id, rect) in &layouts {
-                let x = rect.x as f32;
-                let y = rect.y as f32;
-                let w = rect.width as f32;
-                let h = rect.height as f32;
-                r.upsert_window_rect(*window_id, (x, y), (w, h), 1.0);
-            }
-
-            // Add floating windows to the renderer's window list.
-            {
-                let wm = self.state.window_manager.read();
-                for &window_id in self
-                    .state
-                    .workspace_manager
-                    .read()
-                    .floating_window_ids()
-                    .iter()
-                {
-                    if let Some(w) = wm.get_window(window_id) {
-                        let fx = w.window.position.0 as f32;
-                        let fy = w.window.position.1 as f32;
-                        let fw = w.window.size.0 as f32;
-                        let fh = w.window.size.1 as f32;
-                        r.upsert_window_rect(window_id, (fx, fy), (fw, fh), 1.0);
-                    }
-                }
-            }
-
-            // Add popups as temporary render entries (high IDs to avoid conflicts).
-            // Popups are drawn as textured quads like windows.
-            let popup_ids: Vec<u32> = self.state.popups.keys().copied().collect();
-            for popup_id in &popup_ids {
-                let popup = &self.state.popups[popup_id];
-                if !popup.committed {
-                    continue;
-                }
-                // Find parent window position for absolute popup placement
-                let (parent_x, parent_y) = self
-                    .state
-                    .window_map
-                    .iter()
-                    .find_map(|(&wid, &sid)| {
-                        if sid == popup.parent_surface_id {
-                            self.state
-                                .window_manager
-                                .read()
-                                .get_window(wid)
-                                .map(|w| (w.window.position.0, w.window.position.1))
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or((0, 0));
-
-                let popup_x = parent_x + popup.x;
-                let popup_y = parent_y + popup.y;
-                let popup_w = popup.width.max(1) as f32;
-                let popup_h = popup.height.max(1) as f32;
-                // Use a high ID offset to avoid conflicts with real window IDs.
-                let popup_render_id = 0x8000_0000 + *popup_id as u64;
-                r.upsert_window_rect(
-                    popup_render_id,
-                    (popup_x as f32, popup_y as f32),
-                    (popup_w, popup_h),
-                    1.0,
-                );
-                // Upload popup texture if available in the buffer cache.
-                // (Popup SHM data goes through the same commit handler as windows.)
-            }
-
-            // Compose the full frame via WGPU (windows + effects).
-            match r.compose_full_frame(ww, wh) {
-                Ok(composed) => {
-                    drop(r); // Release renderer lock before GL work
-
-                    // ── GL Blit: upload WGPU result and draw fullscreen quad ──
-                    // SAFETY: GL context is current (backend.bind() succeeded above).
-                    backend.bind()?; // Re-acquire GL context
-
-                    // Lazily compile the blit shader.
-                    let shader = unsafe { ensure_blit_shader(&mut self.blit_shader) };
-
-                    // Upload composed frame to persistent GL texture.
-                    let tex =
-                        unsafe { update_blit_texture(&mut self.blit_texture, ww, wh, &composed) };
-
-                    // Clear and blit.
-                    // SAFETY: GL context is current after backend.bind().
-                    unsafe {
-                        gl::ClearColor(0.08, 0.08, 0.12, 1.0);
-                        gl::Clear(gl::COLOR_BUFFER_BIT);
-                        draw_blit_quad(shader, tex);
-                    }
-
-                    // Remove temporary popup entries from renderer.
-                    if let Some(ref renderer) = self.state.renderer {
-                        let mut r = renderer.write();
-                        for popup_id in &popup_ids {
-                            let popup_render_id = 0x8000_0000 + *popup_id as u64;
-                            r.remove_window(popup_render_id);
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("⚠️ WGPU compose failed: {}", e);
-                    drop(r);
-
-                    // Fallback: clear to dark background
-                    // SAFETY: GL context is current after backend.bind().
-                    backend.bind()?;
-                    unsafe {
-                        gl::ClearColor(0.08, 0.08, 0.12, 1.0);
-                        gl::Clear(gl::COLOR_BUFFER_BIT);
-                    }
-                }
+        if let Some(icon) = self.state.cursor_icon {
+            if let Some(backend) = self.winit_backend.as_mut() {
+                backend.window().set_cursor(icon);
             }
         }
 
-        backend.submit(None)?;
+        let ww = self.state.window_width;
+        let wh = self.state.window_height;
+        let layouts = self.prepare_render_scene();
+
+        let floating_window_ids = self.state.workspace_manager.read().floating_window_ids();
+        let (popup_ids, committed_popup_count) = self.stage_wgpu_scene_from_state(&layouts);
+
+        let should_bridge = should_use_wgpu_gl_bridge(
+            !layouts.is_empty(),
+            !floating_window_ids.is_empty(),
+            committed_popup_count,
+        );
+
+        if should_bridge {
+            self.compose_and_present_via_gl_bridge(ww, wh, &popup_ids)?;
+        } else {
+            debug!(
+                "Skipping WGPU→GL bridge for empty scene at {}x{}; clearing background directly",
+                ww, wh
+            );
+            self.present_clear_gl()?;
+        }
+
+        if let Some(backend) = self.winit_backend.as_mut() {
+            backend.submit(None)?;
+        }
 
         debug!(
-            "🎨 Rendered {} windows at {}x{} (WGPU compositing)",
+            "🎨 Rendered {} tiled windows, {} floating windows, {} committed popups at {}x{}",
             layouts.len(),
+            floating_window_ids.len(),
+            committed_popup_count,
             ww,
             wh
         );
 
         Ok(())
+    }
+
+    /// Standalone DRM render path. Uses the same WGPU scene composition as
+    /// nested mode, but presents the composed frame through the DRM dumb-buffer
+    /// scanout path instead of the nested GL bridge.
+    fn render_drm_frame(&mut self) -> Result<()> {
+        let ww = self.state.window_width;
+        let wh = self.state.window_height;
+        let layouts = self.prepare_render_scene();
+        let floating_window_ids = self.state.workspace_manager.read().floating_window_ids();
+        let (popup_ids, committed_popup_count) = self.stage_wgpu_scene_from_state(&layouts);
+
+        let mut presented = 0usize;
+        if should_use_wgpu_gl_bridge(
+            !layouts.is_empty(),
+            !floating_window_ids.is_empty(),
+            committed_popup_count,
+        ) {
+            if let Some(ref renderer) = self.state.renderer {
+                match renderer.write().compose_full_frame(ww, wh) {
+                    Ok(composed) => {
+                        if let Some(ref mut drm) = self.drm_backend {
+                            presented = drm.present_composited_frame(ww, wh, &composed)?;
+                        }
+                    }
+                    Err(e) => warn!("⚠️ DRM WGPU compose failed: {}", e),
+                }
+            }
+        }
+
+        if let Some(ref renderer) = self.state.renderer {
+            let mut r = renderer.write();
+            for popup_id in &popup_ids {
+                r.remove_window(popup_render_id(*popup_id));
+            }
+        }
+
+        if presented == 0 {
+            if let Some(ref mut drm) = self.drm_backend {
+                let legacy = drm.render_frame();
+                if legacy == 0 {
+                    debug!("DRM render_frame fallback produced no updated outputs");
+                }
+                presented = legacy;
+            }
+        }
+
+        debug!(
+            "🖥️ DRM rendered {} tiled windows, {} floating windows, {} committed popups at {}x{} -> {} outputs",
+            layouts.len(),
+            floating_window_ids.len(),
+            committed_popup_count,
+            ww,
+            wh,
+            presented,
+        );
+
+        Ok(())
+    }
+
+    /// Upload pending surface buffers and sync compositor geometry into the
+    /// renderer's scene graph. Returns the popup surface IDs staged for this
+    /// frame plus the number of committed popups actually inserted.
+    fn stage_wgpu_scene_from_state(&mut self, layouts: &HashMap<u64, crate::window::Rectangle>) -> (Vec<u32>, usize) {
+        let Some(ref renderer) = self.state.renderer else {
+            return (Vec::new(), 0);
+        };
+        let mut r = renderer.write();
+
+        // Build inverse map: surface_id → window_id for texture uploads.
+        let mut surface_to_window: HashMap<u32, u64> = HashMap::new();
+        for (&wid, &sid) in &self.state.window_map {
+            surface_to_window.insert(sid, wid);
+        }
+
+        // Drain buffer_cache and upload to renderer as WGPU textures.
+        let pending: Vec<(u32, Vec<u8>, (i32, i32))> = {
+            let cache = &mut self.state.buffer_cache;
+            let dims = &mut self.state.buffer_cache_dimensions;
+            cache
+                .drain()
+                .filter_map(|(sid, data)| {
+                    let d = dims.remove(&sid).unwrap_or((0, 0));
+                    if d.0 > 0 && d.1 > 0 {
+                        Some((sid, data, d))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        for (surface_id, data, (w, h)) in &pending {
+            if let Some(&window_id) = surface_to_window.get(surface_id) {
+                r.update_window_texture(window_id, *w as u32, *h as u32, data);
+            }
+        }
+
+        for (window_id, rect) in layouts {
+            let x = rect.x as f32;
+            let y = rect.y as f32;
+            let w = rect.width as f32;
+            let h = rect.height as f32;
+            r.upsert_window_rect(*window_id, (x, y), (w, h), 1.0);
+        }
+
+        {
+            let wm = self.state.window_manager.read();
+            for &window_id in self
+                .state
+                .workspace_manager
+                .read()
+                .floating_window_ids()
+                .iter()
+            {
+                if let Some(w) = wm.get_window(window_id) {
+                    let fx = w.window.position.0 as f32;
+                    let fy = w.window.position.1 as f32;
+                    let fw = w.window.size.0 as f32;
+                    let fh = w.window.size.1 as f32;
+                    r.upsert_window_rect(window_id, (fx, fy), (fw, fh), 1.0);
+                }
+            }
+        }
+
+        let popup_ids: Vec<u32> = self.state.popups.keys().copied().collect();
+        let mut committed_popup_count = 0usize;
+        for popup_id in &popup_ids {
+            let popup = &self.state.popups[popup_id];
+            if !popup.committed {
+                continue;
+            }
+            let (parent_x, parent_y) = self
+                .state
+                .window_map
+                .iter()
+                .find_map(|(&wid, &sid)| {
+                    if sid == popup.parent_surface_id {
+                        self.state
+                            .window_manager
+                            .read()
+                            .get_window(wid)
+                            .map(|w| (w.window.position.0, w.window.position.1))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or((0, 0));
+
+            let popup_x = parent_x + popup.x;
+            let popup_y = parent_y + popup.y;
+            let popup_w = popup.width.max(1) as f32;
+            let popup_h = popup.height.max(1) as f32;
+            let popup_render_id = popup_render_id(*popup_id);
+            r.upsert_window_rect(
+                popup_render_id,
+                (popup_x as f32, popup_y as f32),
+                (popup_w, popup_h),
+                1.0,
+            );
+            committed_popup_count += 1;
+        }
+
+        (popup_ids, committed_popup_count)
     }
 
     /// Process events (for compositor integration)
@@ -2919,9 +3250,22 @@ impl AxiomSmithayBackendReal {
     pub fn set_clipboard_data(&mut self, data: Vec<u8>) {
         debug!("📋 Clipboard cache populated ({} bytes)", data.len());
         self.state.clipboard_cache = Some(data);
+
+        // Expose the same compositor-owned clipboard payload to Wayland
+        // clients through smithay's server-side data-device selection path.
+        set_data_device_selection::<State>(
+            &self.display.handle(),
+            &self.state.seat,
+            vec![
+                "text/plain;charset=utf-8".to_string(),
+                "text/plain".to_string(),
+            ],
+            (),
+        );
+
         // If the XWM is active, claim X11 clipboard ownership so X11 apps
         // come to us for selection data rather than stale X11 owners.
-        if let Some(xwm) = self.state.xwm.as_ref() {
+        if let Some(xwm) = self.state.xwm.as_mut() {
             if let Err(e) = xwm.own_selection() {
                 warn!("⚠️ Failed to claim X11 clipboard: {}", e);
             }
@@ -2968,205 +3312,110 @@ impl AxiomSmithayBackendReal {
     }
 }
 
-// ── GL Blit Helpers ────────────────────────────────────────────────────────
-// Minimal GL code for the final fullscreen blit. The textured-quad shader is
-// compiled once and cached in `AxiomSmithayBackendReal::blit_shader`.
-
-/// Compile the minimal GLES 2.0 textured-quad shader used for the final
-/// fullscreen blit. Returns the cached program on subsequent calls.
-///
-/// # Safety
-/// Caller must ensure a GL context is current.
-unsafe fn ensure_blit_shader(shader: &mut Option<gl::types::GLuint>) -> Option<gl::types::GLuint> {
-    if let Some(prog) = *shader {
-        return Some(prog);
-    }
-
-    let vert_src = r#"
-        attribute vec2 a_position;
-        attribute vec2 a_texcoord;
-        varying vec2 v_texcoord;
-        void main() {
-            gl_Position = vec4(a_position, 0.0, 1.0);
-            v_texcoord = a_texcoord;
-        }
-    "#;
-
-    let frag_src = r#"
-        precision mediump float;
-        varying vec2 v_texcoord;
-        uniform sampler2D u_texture;
-        void main() {
-            gl_FragColor = texture2D(u_texture, v_texcoord);
-        }
-    "#;
-
-    unsafe fn compile_shader(ty: gl::types::GLenum, src: &str) -> Option<gl::types::GLuint> {
-        let s = gl::CreateShader(ty);
-        if s == 0 {
-            return None;
-        }
-        gl::ShaderSource(
-            s,
-            1,
-            &(src.as_ptr() as *const gl::types::GLchar),
-            &(src.len() as gl::types::GLint),
-        );
-        gl::CompileShader(s);
-        let mut ok: gl::types::GLint = 0;
-        gl::GetShaderiv(s, gl::COMPILE_STATUS, &mut ok);
-        if ok == 0 {
-            gl::DeleteShader(s);
-            return None;
-        }
-        Some(s)
-    }
-
-    let vs = compile_shader(gl::VERTEX_SHADER, vert_src);
-    let fs = compile_shader(gl::FRAGMENT_SHADER, frag_src);
-
-    if let (Some(vs), Some(fs)) = (vs, fs) {
-        let prog = gl::CreateProgram();
-        gl::AttachShader(prog, vs);
-        gl::AttachShader(prog, fs);
-        gl::LinkProgram(prog);
-        let mut linked: gl::types::GLint = 0;
-        gl::GetProgramiv(prog, gl::LINK_STATUS, &mut linked);
-        if linked != 0 {
-            *shader = Some(prog);
-        }
-        gl::DeleteShader(vs);
-        gl::DeleteShader(fs);
-        return *shader;
-    }
-
-    if let Some(v) = vs {
-        gl::DeleteShader(v);
-    }
-    if let Some(f) = fs {
-        gl::DeleteShader(f);
-    }
-    None
-}
-
-/// Upload RGBA data to a persistent GL texture, reusing it when dimensions match.
-///
-/// # Safety
-/// Caller must ensure a GL context is current.
-unsafe fn update_blit_texture(
-    cache: &mut Option<(gl::types::GLuint, u32, u32)>,
-    width: u32,
-    height: u32,
-    data: &[u8],
-) -> gl::types::GLuint {
-    unsafe {
-        if cache.is_none() {
-            let mut t: gl::types::GLuint = 0;
-            gl::GenTextures(1, &mut t);
-            gl::BindTexture(gl::TEXTURE_2D, t);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
-            gl::BindTexture(gl::TEXTURE_2D, 0);
-            *cache = Some((t, 0, 0));
-        }
-
-        let (tex, old_w, old_h) = cache.as_mut().expect("just initialized");
-
-        gl::BindTexture(gl::TEXTURE_2D, *tex);
-        if *old_w == width && *old_h == height {
-            gl::TexSubImage2D(
-                gl::TEXTURE_2D,
-                0,
-                0,
-                0,
-                width as i32,
-                height as i32,
-                gl::RGBA,
-                gl::UNSIGNED_BYTE,
-                data.as_ptr() as *const std::ffi::c_void,
-            );
-        } else {
-            gl::TexImage2D(
-                gl::TEXTURE_2D,
-                0,
-                gl::RGBA as i32,
-                width as i32,
-                height as i32,
-                0,
-                gl::RGBA,
-                gl::UNSIGNED_BYTE,
-                data.as_ptr() as *const std::ffi::c_void,
-            );
-            *old_w = width;
-            *old_h = height;
-        }
-        gl::BindTexture(gl::TEXTURE_2D, 0);
-        *tex
+fn normalized_output_name(raw_name: &str, index: usize) -> String {
+    if raw_name.is_empty() {
+        format!("Axiom-Output-{}", index)
+    } else {
+        raw_name.to_string()
     }
 }
 
-/// Draw a fullscreen textured quad for the final blit.
-///
-/// # Safety
-/// Caller must ensure a GL context is current and `tex` is a valid GL texture.
-unsafe fn draw_blit_quad(shader: Option<gl::types::GLuint>, tex: gl::types::GLuint) {
-    let Some(prog) = shader else {
-        return;
+fn smithay_output_scale(scale: f64) -> Scale {
+    if (scale.fract()).abs() < f64::EPSILON {
+        Scale::Integer(scale.round().max(1.0) as i32)
+    } else {
+        Scale::Fractional(scale)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        backend_prefers_server_side_decorations, negotiated_xdg_decoration_mode,
+        smithay_output_scale, State,
     };
+    use super::clipboard_bridge::{create_pipe, write_selection_bytes_to_fd};
+    use super::render_bridge::{popup_render_id, should_use_wgpu_gl_bridge};
+    use crate::config::AxiomConfig;
+    use smithay::output::Scale;
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+    use std::io::Read;
 
-    #[rustfmt::skip]
-    let vertices: [f32; 16] = [
-        -1.0,  1.0, 0.0, 1.0,
-         1.0,  1.0, 1.0, 1.0,
-        -1.0, -1.0, 0.0, 0.0,
-         1.0, -1.0, 1.0, 0.0,
-    ];
+    #[test]
+    fn test_keyboard_repeat_settings_follow_config_values() {
+        let mut cfg = AxiomConfig::default();
+        cfg.input.keyboard_repeat_delay = 600;
+        cfg.input.keyboard_repeat_rate = 25;
+        assert_eq!(State::keyboard_repeat_settings(&cfg), (600, 25));
+    }
 
-    unsafe {
-        gl::UseProgram(prog);
-        gl::ActiveTexture(gl::TEXTURE0);
-        gl::BindTexture(gl::TEXTURE_2D, tex);
+    #[test]
+    fn test_display_title_prefers_explicit_title() {
+        let title = State::display_title(Some("My App".into()), Some("org.example.App".into()));
+        assert_eq!(title, "My App");
+    }
 
-        let pos_loc = gl::GetAttribLocation(prog, c"a_position".as_ptr());
-        let tex_loc = gl::GetAttribLocation(prog, c"a_texcoord".as_ptr());
+    #[test]
+    fn test_display_title_falls_back_to_app_id() {
+        let title = State::display_title(Some("   ".into()), Some("org.example.App".into()));
+        assert_eq!(title, "org.example.App");
+    }
 
-        let stride = (4 * std::mem::size_of::<f32>()) as gl::types::GLsizei;
+    #[test]
+    fn test_display_title_falls_back_to_default() {
+        let title = State::display_title(None, None);
+        assert_eq!(title, "Wayland Client");
+    }
 
-        if pos_loc >= 0 {
-            gl::EnableVertexAttribArray(pos_loc as gl::types::GLuint);
-            gl::VertexAttribPointer(
-                pos_loc as gl::types::GLuint,
-                2,
-                gl::FLOAT,
-                gl::FALSE,
-                stride,
-                vertices.as_ptr() as *const std::ffi::c_void,
-            );
+    #[test]
+    fn test_backend_does_not_claim_visible_ssd_yet() {
+        assert!(!backend_prefers_server_side_decorations());
+        assert_eq!(negotiated_xdg_decoration_mode(), Mode::ClientSide);
+    }
+
+    #[test]
+    fn test_smithay_output_scale_supports_fractional_values() {
+        match smithay_output_scale(1.5) {
+            Scale::Fractional(scale) => assert!((scale - 1.5).abs() < f64::EPSILON),
+            other => panic!("expected fractional scale, got {:?}", other),
         }
-        if tex_loc >= 0 {
-            gl::EnableVertexAttribArray(tex_loc as gl::types::GLuint);
-            gl::VertexAttribPointer(
-                tex_loc as gl::types::GLuint,
-                2,
-                gl::FLOAT,
-                gl::FALSE,
-                stride,
-                vertices.as_ptr().add(2) as *const std::ffi::c_void,
-            );
-        }
+    }
 
-        gl::DrawArrays(gl::TRIANGLE_STRIP, 0, 4);
+    #[test]
+    fn test_preferred_text_mime_type_prefers_utf8_plain_text() {
+        let mime = State::preferred_text_mime_type(&[
+            "application/json".to_string(),
+            "text/plain;charset=utf-8".to_string(),
+        ]);
+        assert_eq!(mime.as_deref(), Some("text/plain;charset=utf-8"));
+    }
 
-        if pos_loc >= 0 {
-            gl::DisableVertexAttribArray(pos_loc as gl::types::GLuint);
-        }
-        if tex_loc >= 0 {
-            gl::DisableVertexAttribArray(tex_loc as gl::types::GLuint);
-        }
+    #[test]
+    fn test_write_selection_bytes_to_fd_round_trips() {
+        let (read_fd, write_fd) = create_pipe().expect("pipe");
+        write_selection_bytes_to_fd(write_fd, b"hello clipboard");
+        let mut file = std::fs::File::from(read_fd);
+        let mut data = Vec::new();
+        file.read_to_end(&mut data).expect("read pipe");
+        assert_eq!(data, b"hello clipboard");
+    }
 
-        gl::BindTexture(gl::TEXTURE_2D, 0);
-        gl::UseProgram(0);
+    #[test]
+    fn test_should_use_wgpu_gl_bridge_for_non_empty_scene() {
+        assert!(should_use_wgpu_gl_bridge(true, false, 0));
+        assert!(should_use_wgpu_gl_bridge(false, true, 0));
+        assert!(should_use_wgpu_gl_bridge(false, false, 1));
+    }
+
+    #[test]
+    fn test_should_skip_wgpu_gl_bridge_for_empty_scene() {
+        assert!(!should_use_wgpu_gl_bridge(false, false, 0));
+    }
+
+    #[test]
+    fn test_popup_render_id_is_in_reserved_namespace() {
+        let id = popup_render_id(42);
+        assert!(id >= 0x8000_0000);
+        assert_eq!(id, 0x8000_0000 + 42);
     }
 }
