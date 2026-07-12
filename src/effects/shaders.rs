@@ -235,28 +235,21 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
     return out;
 }
 
-// Gaussian weights for 9-tap blur
-let gaussian_weights = array<f32, 9>(
-    0.0947416, 0.118318, 0.0947416,
-    0.118318, 0.147761, 0.118318,  
-    0.0947416, 0.118318, 0.0947416
-);
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let tex_offset = 1.0 / blur.texture_size;
     let step = tex_offset * blur.radius * blur.direction;
     
-    var result = vec4<f32>(0.0);
-    
-    // 9-tap Gaussian blur
-    for (var i: i32 = -4; i <= 4; i++) {
-        let offset = step * f32(i);
-        let sample_coords = input.tex_coords + offset;
-        let sample_color = textureSample(input_texture, input_sampler, sample_coords);
-        
-        result += sample_color * gaussian_weights[i + 4];
-    }
+    var result = textureSample(input_texture, input_sampler, input.tex_coords + step * -4.0) * 0.0947416;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -3.0) * 0.118318;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -2.0) * 0.0947416;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -1.0) * 0.118318;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 0.0) * 0.147761;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 1.0) * 0.118318;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 2.0) * 0.0947416;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 3.0) * 0.118318;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 4.0) * 0.0947416;
     
     return mix(textureSample(input_texture, input_sampler, input.tex_coords), result, blur.intensity);
 }
@@ -296,28 +289,20 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
     return out;
 }
 
-// Gaussian weights for 9-tap blur
-let gaussian_weights = array<f32, 9>(
-    0.0947416, 0.118318, 0.0947416,
-    0.118318, 0.147761, 0.118318,  
-    0.0947416, 0.118318, 0.0947416
-);
-
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let tex_offset = 1.0 / blur.texture_size;
     let step = tex_offset * blur.radius * blur.direction;
     
-    var result = vec4<f32>(0.0);
-    
-    // 9-tap Gaussian blur
-    for (var i: i32 = -4; i <= 4; i++) {
-        let offset = step * f32(i);
-        let sample_coords = input.tex_coords + offset;
-        let sample_color = textureSample(input_texture, input_sampler, sample_coords);
-        
-        result += sample_color * gaussian_weights[i + 4];
-    }
+    var result = textureSample(input_texture, input_sampler, input.tex_coords + step * -4.0) * 0.0947416;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -3.0) * 0.118318;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -2.0) * 0.0947416;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -1.0) * 0.118318;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 0.0) * 0.147761;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 1.0) * 0.118318;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 2.0) * 0.0947416;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 3.0) * 0.118318;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 4.0) * 0.0947416;
     
     return mix(textureSample(input_texture, input_sampler, input.tex_coords), result, blur.intensity);
 }
