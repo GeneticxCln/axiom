@@ -5,4 +5,4 @@ Comment=Start the Axiom Wayland compositor prototype session
 Exec=axiom-session
 TryExec=axiom-session
 Icon=axiom
-DesktopNames=Axiom
+X-DesktopNames=Axiom

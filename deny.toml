@@ -5,6 +5,14 @@
 # Ignore specific advisories that don't affect this project
 ignore = [
     "RUSTSEC-2024-0436",  # paste: unmaintained, no dependents in tree
+    # quick-xml DoS: transitive dep from wayland-scanner, build-time only XML parsing
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0194",
+    # cgmath unmaintained + minor UB in unused function
+    "RUSTSEC-2026-0196",
+    "RUSTSEC-2026-0197",
+    # anyhow unsoundness in downcast_mut (unused in this crate)
+    "RUSTSEC-2026-0190",
 ]
 # Treat advisory database errors as warnings, not hard failures
 db-urls = ["https://github.com/rustsec/advisory-db"]

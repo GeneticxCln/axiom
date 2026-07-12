@@ -1,2 +1,12 @@
 [advisories]
-ignore = ["RUSTSEC-2024-0436"]  # paste: unmaintained, no dependents in tree
+ignore = [
+    "RUSTSEC-2024-0436",  # paste: unmaintained
+    # quick-xml DoS: transitive from wayland-scanner, build-time only
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0194",
+    # cgmath unmaintained + minor UB in unused function
+    "RUSTSEC-2026-0196",
+    "RUSTSEC-2026-0197",
+    # anyhow downcast_mut unsoundness (unused)
+    "RUSTSEC-2026-0190",
+]

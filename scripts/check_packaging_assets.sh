@@ -32,7 +32,7 @@ require_contains() {
 
 require_file "packaging/arch/PKGBUILD"
 require_file "packaging/axiom.desktop"
-require_file "packaging/axiom.session"
+require_file "packaging/axiom-wayland.desktop"
 require_file "packaging/axiom-session"
 require_file "assets/logo.svg"
 require_file "config/axiom.toml"
@@ -44,7 +44,7 @@ bash -n packaging/axiom-session
 
 log "Checking desktop entry metadata"
 if command -v desktop-file-validate >/dev/null 2>&1; then
-    desktop-file-validate packaging/axiom.desktop packaging/axiom.session
+    desktop-file-validate packaging/axiom.desktop packaging/axiom-wayland.desktop
 else
     log "desktop-file-validate not installed; skipping spec validation"
 fi
@@ -53,10 +53,10 @@ require_contains "packaging/axiom.desktop" "Exec=axiom --windowed"
 require_contains "packaging/axiom.desktop" "TryExec=axiom"
 require_contains "packaging/axiom.desktop" "Icon=axiom"
 
-require_contains "packaging/axiom.session" "Exec=axiom-session"
-require_contains "packaging/axiom.session" "TryExec=axiom-session"
-require_contains "packaging/axiom.session" "DesktopNames=Axiom"
-require_contains "packaging/axiom.session" "Icon=axiom"
+require_contains "packaging/axiom-wayland.desktop" "Exec=axiom-session"
+require_contains "packaging/axiom-wayland.desktop" "TryExec=axiom-session"
+require_contains "packaging/axiom-wayland.desktop" "DesktopNames=Axiom"
+require_contains "packaging/axiom-wayland.desktop" "Icon=axiom"
 
 log "Checking session launcher behavior"
 require_contains "packaging/axiom-session" "XDG_RUNTIME_DIR"
@@ -68,7 +68,7 @@ log "Checking PKGBUILD install payload"
 require_contains "packaging/arch/PKGBUILD" 'install -Dm755 "target/release/axiom" "$pkgdir/usr/bin/axiom"'
 require_contains "packaging/arch/PKGBUILD" 'install -Dm755 "packaging/axiom-session" "$pkgdir/usr/bin/axiom-session"'
 require_contains "packaging/arch/PKGBUILD" 'install -Dm644 "packaging/axiom.desktop" "$pkgdir/usr/share/applications/axiom.desktop"'
-require_contains "packaging/arch/PKGBUILD" 'install -Dm644 "packaging/axiom.session" "$pkgdir/usr/share/wayland-sessions/axiom.desktop"'
+require_contains "packaging/arch/PKGBUILD" 'install -Dm644 "packaging/axiom-wayland.desktop" "$pkgdir/usr/share/wayland-sessions/axiom.desktop"'
 require_contains "packaging/arch/PKGBUILD" 'install -Dm644 "assets/logo.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/axiom.svg"'
 require_contains "packaging/arch/PKGBUILD" 'install -Dm644 "config/axiom.toml" "$pkgdir/etc/axiom/axiom.toml"'
 require_contains "packaging/arch/PKGBUILD" 'install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"'

@@ -64,7 +64,7 @@ package() {
     install -Dm644 "packaging/axiom.desktop" "$pkgdir/usr/share/applications/axiom.desktop"
 
     # Session entry for display managers / manual session launchers
-    install -Dm644 "packaging/axiom.session" "$pkgdir/usr/share/wayland-sessions/axiom.desktop"
+    install -Dm644 "packaging/axiom-wayland.desktop" "$pkgdir/usr/share/wayland-sessions/axiom.desktop"
 
     # Shared app icon used by the nested desktop entry and session file
     install -Dm644 "assets/logo.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/axiom.svg"
