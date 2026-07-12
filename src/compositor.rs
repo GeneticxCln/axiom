@@ -76,8 +76,8 @@ impl AxiomCompositor {
         backend: &mut AxiomSmithayBackendReal,
         xwayland_manager: &Arc<AsyncRwLock<XWaylandManager>>,
     ) -> Result<()> {
-        let (xwm_stream, xwayland_stream) = UnixStream::pair()
-            .context("Failed to create XWM/XWayland socket pair")?;
+        let (xwm_stream, xwayland_stream) =
+            UnixStream::pair().context("Failed to create XWM/XWayland socket pair")?;
 
         let wayland_display = backend.socket_name.clone();
         xwayland_manager
@@ -794,9 +794,11 @@ impl AxiomCompositor {
         wm.scroll_left();
         let new_idx = wm.focused_column_index();
         drop(wm);
-        let _ = self
-            .ipc_server
-            .broadcast_state_change("workspace", &old_idx.to_string(), &new_idx.to_string());
+        let _ = self.ipc_server.broadcast_state_change(
+            "workspace",
+            &old_idx.to_string(),
+            &new_idx.to_string(),
+        );
     }
 
     /// Scroll workspace right (for input handling)
@@ -807,9 +809,11 @@ impl AxiomCompositor {
         wm.scroll_right();
         let new_idx = wm.focused_column_index();
         drop(wm);
-        let _ = self
-            .ipc_server
-            .broadcast_state_change("workspace", &old_idx.to_string(), &new_idx.to_string());
+        let _ = self.ipc_server.broadcast_state_change(
+            "workspace",
+            &old_idx.to_string(),
+            &new_idx.to_string(),
+        );
     }
 
     /// Add a new window to the current workspace.
@@ -862,7 +866,11 @@ impl AxiomCompositor {
             .write()
             .remove_window(window_id)
             .is_some();
-        let removed_from_windows = self.window_manager.write().remove_window(window_id).is_some();
+        let removed_from_windows = self
+            .window_manager
+            .write()
+            .remove_window(window_id)
+            .is_some();
         let removed_from_effects = self.effects_engine.write().remove_window(window_id);
 
         let removed = removed_from_workspace || removed_from_windows || removed_from_effects;

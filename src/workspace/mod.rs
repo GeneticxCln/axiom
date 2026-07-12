@@ -822,7 +822,10 @@ impl ScrollableWorkspaces {
             }
         }
         if total_width == 0 || max_height == 0 {
-            (DEFAULT_VIEWPORT_WIDTH as u32, DEFAULT_VIEWPORT_HEIGHT as u32)
+            (
+                DEFAULT_VIEWPORT_WIDTH as u32,
+                DEFAULT_VIEWPORT_HEIGHT as u32,
+            )
         } else {
             (total_width, max_height)
         }
@@ -1091,8 +1094,8 @@ impl ScrollableWorkspaces {
     /// Calculate layout rectangles for all visible windows across all tapes.
     pub fn calculate_workspace_layouts(&self) -> HashMap<u64, Rectangle> {
         let signature = self.layout_cache_signature();
-        if let Some((cached_sig, ref cached)) = *self.cached_layouts.lock() {
-            if cached_sig == signature {
+        if let Some((cached_sig, ref cached)) = &*self.cached_layouts.lock() {
+            if *cached_sig == signature {
                 return cached.clone();
             }
         }
@@ -1108,7 +1111,8 @@ impl ScrollableWorkspaces {
 
             for column in visible_columns {
                 let column_offset = column.position - tape.current_position;
-                let column_left = output_origin_x as f64 + (tape.viewport_width / 2.0) + column_offset;
+                let column_left =
+                    output_origin_x as f64 + (tape.viewport_width / 2.0) + column_offset;
 
                 if column_left + tape.config.workspace_width as f64 >= output_origin_x as f64
                     && column_left <= output_origin_x as f64 + tape.viewport_width
@@ -1123,7 +1127,8 @@ impl ScrollableWorkspaces {
                     if !column.windows.is_empty() {
                         let gap = tape.config.gaps as i32;
                         let total_gap_space = gap * (column.windows.len() as i32 + 1);
-                        let available = (column_bounds.height as i32).saturating_sub(total_gap_space);
+                        let available =
+                            (column_bounds.height as i32).saturating_sub(total_gap_space);
                         let window_count = column.windows.len() as i32;
                         let window_height = if window_count > 0 && available > 0 {
                             available / window_count

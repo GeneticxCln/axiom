@@ -1337,7 +1337,10 @@ async fn test_headless_readback_buffer_cache_reuse() -> Result<()> {
     renderer.add_window(1, (0.0, 0.0), (64.0, 64.0));
     renderer.update_window_texture(1, 32, 32, &tex);
 
-    assert!(!renderer.has_cached_readback(), "readback cache starts cold");
+    assert!(
+        !renderer.has_cached_readback(),
+        "readback cache starts cold"
+    );
 
     let _pixels = renderer.render_to_headless_target(128, 128)?;
     assert!(

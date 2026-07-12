@@ -144,7 +144,8 @@ impl XWaylandManager {
     /// Restart or start XWayland with a compositor-side XWM stream wired into
     /// the `-wm <fd>` socket expected by rootless XWayland.
     pub async fn restart_with_wm_stream(&mut self, wm_stream: UnixStream) -> Result<()> {
-        self.restart_with_wm_stream_for_display(wm_stream, None).await
+        self.restart_with_wm_stream_for_display(wm_stream, None)
+            .await
     }
 
     /// Same as [`restart_with_wm_stream`], but forces the child XWayland
@@ -157,7 +158,8 @@ impl XWaylandManager {
         if self.xwayland_process.is_some() {
             self.stop_server().await?;
         }
-        self.start_server_inner(Some(wm_stream), wayland_display).await
+        self.start_server_inner(Some(wm_stream), wayland_display)
+            .await
     }
 
     async fn start_server_inner(

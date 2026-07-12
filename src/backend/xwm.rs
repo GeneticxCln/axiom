@@ -7,8 +7,8 @@ use log::info;
 
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    Atom, ChangeWindowAttributesAux, ConfigureWindowAux, ConnectionExt, EventMask,
-    MapRequestEvent, Window,
+    Atom, ChangeWindowAttributesAux, ConfigureWindowAux, ConnectionExt, EventMask, MapRequestEvent,
+    Window,
 };
 use x11rb::rust_connection::{DefaultStream, RustConnection};
 use x11rb::wrapper::ConnectionExt as _; // Validation trait
@@ -90,9 +90,18 @@ impl Atoms {
             .intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_HORZ")?
             .reply()?
             .atom;
-        let net_active_window = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
-        let net_frame_extents = conn.intern_atom(false, b"_NET_FRAME_EXTENTS")?.reply()?.atom;
-        let net_wm_moveresize = conn.intern_atom(false, b"_NET_WM_MOVERESIZE")?.reply()?.atom;
+        let net_active_window = conn
+            .intern_atom(false, b"_NET_ACTIVE_WINDOW")?
+            .reply()?
+            .atom;
+        let net_frame_extents = conn
+            .intern_atom(false, b"_NET_FRAME_EXTENTS")?
+            .reply()?
+            .atom;
+        let net_wm_moveresize = conn
+            .intern_atom(false, b"_NET_WM_MOVERESIZE")?
+            .reply()?
+            .atom;
         let wm_s0 = conn.intern_atom(false, b"WM_S0")?.reply()?.atom;
         let net_wm_cm_s0 = conn.intern_atom(false, b"_NET_WM_CM_S0")?.reply()?.atom;
         let axiom_clipboard_transfer = conn
@@ -336,7 +345,11 @@ impl AxiomXwm {
     /// Poll the current X11 clipboard owner and request the payload when an
     /// external owner takes over.
     pub fn poll_external_clipboard_owner(&mut self) -> Result<Option<XwmEvent>> {
-        let owner = self.conn.get_selection_owner(self.atoms.CLIPBOARD)?.reply()?.owner;
+        let owner = self
+            .conn
+            .get_selection_owner(self.atoms.CLIPBOARD)?
+            .reply()?
+            .owner;
 
         if owner == x11rb::NONE {
             let should_clear = self.last_clipboard_owner != x11rb::NONE;

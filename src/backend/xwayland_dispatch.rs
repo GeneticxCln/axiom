@@ -28,7 +28,10 @@ use super::State;
 ///
 /// Returns `Ok(())` if no XWM is wired (no-op). Propagates errors from
 /// `xwm.handle_event`, clipboard owner polling, or `xwm.handle_selection_request`.
-pub(super) fn poll_and_dispatch_events(display_handle: &DisplayHandle, state: &mut State) -> Result<()> {
+pub(super) fn poll_and_dispatch_events(
+    display_handle: &DisplayHandle,
+    state: &mut State,
+) -> Result<()> {
     let mut clipboard_requests: Vec<(
         x11rb::protocol::xproto::Window,
         x11rb::protocol::xproto::Atom,

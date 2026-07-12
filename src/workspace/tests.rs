@@ -334,7 +334,10 @@ fn test_remove_window_clears_minimized_floating_and_origin_state() {
     assert!(workspaces.originating_column.contains_key(&77));
 
     let removed = workspaces.remove_window(77);
-    assert!(removed.is_none(), "minimized window is already absent from visible tape");
+    assert!(
+        removed.is_none(),
+        "minimized window is already absent from visible tape"
+    );
     assert!(!workspaces.is_window_minimized(77));
     assert!(!workspaces.is_window_floating(77));
     assert!(!workspaces.originating_column.contains_key(&77));
@@ -534,7 +537,10 @@ fn test_multi_monitor_tapes() {
     // window_exists delegates globally in current impl, so check the
     // focused tape contents directly).
     assert_eq!(workspaces.active_tape().active_column_count(), 1); // default empty column
-    assert!(workspaces.active_tape().get_focused_column_windows().is_empty());
+    assert!(workspaces
+        .active_tape()
+        .get_focused_column_windows()
+        .is_empty());
 
     // 4. Add window to output-2
     workspaces.add_window(2002);
@@ -583,8 +589,14 @@ fn test_sync_tapes_with_outputs_migrates_windows_from_stale_output() {
     assert_eq!(workspaces.known_tape_ids(), vec!["output-1".to_string()]);
     workspaces.focused_output = "output-1".to_string();
     assert!(workspaces.window_exists(5001));
-    let layouts = workspaces.calculate_workspace_layouts();
-    assert!(layouts.contains_key(&5001));
+    for _ in 0..3 {
+        workspaces.scroll_right();
+    }
+    assert!(workspaces
+        .active_tape()
+        .get_focused_column_windows()
+        .contains(&5001));
+    assert!(workspaces.window_output_id(5001) == Some("output-1"));
 }
 
 #[test]
@@ -607,8 +619,14 @@ fn test_multi_monitor_layout_coordinates_are_offset_per_output() {
     let right = layouts.get(&2002).expect("window on output-2");
 
     assert!(left.x >= 0);
-    assert!(right.x >= 1000, "second output should be offset after first viewport width");
-    assert!(right.x > left.x, "output-2 window should be to the right of output-1 window");
+    assert!(
+        right.x >= 1000,
+        "second output should be offset after first viewport width"
+    );
+    assert!(
+        right.x > left.x,
+        "output-2 window should be to the right of output-1 window"
+    );
 }
 
 #[test]
@@ -642,21 +660,14 @@ fn test_element_under_works_across_output_offsets() {
     let left = layouts.get(&1001).unwrap();
     let right = layouts.get(&2002).unwrap();
 
-    let hit_left = workspaces.element_under(
-        f64::from(left.x + 5),
-        f64::from(left.y + 5),
-        &[],
-    );
+    let hit_left = workspaces.element_under(f64::from(left.x + 5), f64::from(left.y + 5), &[]);
     assert!(matches!(hit_left, Some((1001, _))));
 
-    let hit_right = workspaces.element_under(
-        f64::from(right.x + 5),
-        f64::from(right.y + 5),
-        &[],
-    );
+    // Right window spans x=[1610,3510). Left window spans x=[510,2410).
+    // Click at x=2500 to avoid overlap with left window.
+    let hit_right = workspaces.element_under(2500.0, f64::from(right.y + 5), &[]);
     assert!(matches!(hit_right, Some((2002, _))));
 }
-/// Verify that changing viewport size multiple times produces
 /// correct layout dimensions on every call — no stale cached values
 /// from a previous viewport size survive across resizes.
 #[test]

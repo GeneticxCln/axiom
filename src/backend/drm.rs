@@ -787,10 +787,13 @@ impl KmsState {
                 output_origin_x = output_origin_x.saturating_add(output.width);
                 continue;
             };
+            let pitch = drm::buffer::Buffer::pitch(&scanout.buffer);
             let mut mapping = self
                 .card
                 .map_dumb_buffer(&mut scanout.buffer)
-                .map_err(|e| anyhow::anyhow!("Failed to map dumb buffer for '{}': {}", output.name, e))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to map dumb buffer for '{}': {}", output.name, e)
+                })?;
             copy_bgra_to_xrgb8888(
                 bgra,
                 src_width,
@@ -800,7 +803,7 @@ impl KmsState {
                 &mut mapping,
                 output.width,
                 output.height,
-                drm::buffer::Buffer::pitch(&scanout.buffer),
+                pitch,
             );
             output_origin_x = output_origin_x.saturating_add(output.width);
             presented += 1;
@@ -1496,10 +1499,7 @@ mod tests {
 
     #[test]
     fn test_copy_bgra_to_xrgb8888_crops_to_destination() {
-        let src = vec![
-            1, 2, 3, 4, 5, 6, 7, 8,
-            9, 10, 11, 12, 13, 14, 15, 16,
-        ];
+        let src = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let mut dst = vec![0u8; 4];
         copy_bgra_to_xrgb8888(&src, 2, 2, 0, 0, &mut dst, 1, 1, 4);
         assert_eq!(dst, vec![1, 2, 3, 255]);
@@ -1507,10 +1507,7 @@ mod tests {
 
     #[test]
     fn test_copy_bgra_to_xrgb8888_respects_source_origin() {
-        let src = vec![
-            1, 2, 3, 4, 5, 6, 7, 8,
-            9, 10, 11, 12, 13, 14, 15, 16,
-        ];
+        let src = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let mut dst = vec![0u8; 4];
         copy_bgra_to_xrgb8888(&src, 2, 2, 1, 0, &mut dst, 1, 1, 4);
         assert_eq!(dst, vec![5, 6, 7, 255]);

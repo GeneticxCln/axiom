@@ -11,7 +11,9 @@
 
 #![allow(clippy::too_many_lines)]
 
-use anyhow::{Context, Result};
+#[cfg(debug_assertions)]
+use anyhow::Context;
+use anyhow::Result;
 use log::{debug, info};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1200,7 +1202,7 @@ impl AxiomRenderer {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::ImageCopyBuffer {
-                buffer: staging,
+                buffer: &staging,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
                     bytes_per_row: Some(4 * width),

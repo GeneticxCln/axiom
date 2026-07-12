@@ -41,7 +41,7 @@ use tokio::sync::RwLock as AsyncRwLock;
 #[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// Path to configuration file
-    #[arg(short, long, default_value = "$HOME/.config/axiom/axiom.toml")]
+    #[arg(short, long, default_value = "~/.config/axiom/axiom.toml")]
     config: String,
 
     /// Enable debug logging
@@ -105,19 +105,8 @@ async fn main() -> Result<()> {
     info!("🚀 Starting Axiom - Hybrid Wayland Compositor");
     info!("📄 Version: {}", env!("CARGO_PKG_VERSION"));
 
-    // Expand $HOME in the config path before loading.
-    // The CLI default uses $HOME; AxiomConfig::load handles ~,
-    // but we expand $HOME here so the literal default works on all
-    // shells that may not export HOME.
-    let config_path = if cli.config.contains("$HOME") {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        cli.config.replace("$HOME", &home)
-    } else {
-        cli.config.clone()
-    };
-
-    // Load configuration
-    let config = match AxiomConfig::load(&config_path) {
+    // Load configuration (AxiomConfig::load handles ~ expansion)
+    let config = match AxiomConfig::load(&cli.config) {
         Ok(config) => {
             info!("✅ Configuration loaded from: {}", cli.config);
             config
@@ -180,7 +169,11 @@ async fn main() -> Result<()> {
         .map(|r| Arc::new(RwLock::new(r)))
         .map_err(|e| anyhow::anyhow!("Failed to initialize headless renderer: {}", e))?;
 
-    let compositor = AxiomCompositor::new(
+    // The `mut` is required when `demo` feature is active so
+    // run_comprehensive_test and run_phase4_effects_demo can
+    // borrow the compositor mutably.
+    #[allow(unused_mut)]
+    let mut compositor = AxiomCompositor::new(
         config.clone(),
         cli.windowed,
         workspace_manager.clone(),

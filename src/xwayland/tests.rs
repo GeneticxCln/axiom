@@ -63,14 +63,9 @@ fn read_window_title(
     atoms: &TestAtoms,
     window: Window,
 ) -> Option<String> {
-    if let Ok(reply) = conn.get_property(
-        false,
-        window,
-        atoms.net_wm_name,
-        atoms.utf8_string,
-        0,
-        1024,
-    ) {
+    if let Ok(reply) =
+        conn.get_property(false, window, atoms.net_wm_name, atoms.utf8_string, 0, 1024)
+    {
         if let Ok(prop) = reply.reply() {
             if let Some(title) = decode_text_property(&prop.value) {
                 return Some(title);
@@ -94,8 +89,7 @@ fn read_window_class(
     atoms: &TestAtoms,
     window: Window,
 ) -> Option<String> {
-    if let Ok(reply) = conn.get_property(false, window, atoms.wm_class, AtomEnum::STRING, 0, 1024)
-    {
+    if let Ok(reply) = conn.get_property(false, window, atoms.wm_class, AtomEnum::STRING, 0, 1024) {
         if let Ok(prop) = reply.reply() {
             return decode_wm_class(&prop.value);
         }
@@ -334,11 +328,16 @@ async fn test_xwayland_real_x11_client_metadata() {
         .expect("failed to inspect X11 window metadata");
 
     let (_window, title, class) = metadata.expect("timed out waiting for xmessage window metadata");
-    assert_eq!(title, expected_title, "window title should round-trip through XWayland");
+    assert_eq!(
+        title, expected_title,
+        "window title should round-trip through XWayland"
+    );
 
     let class = class.expect("WM_CLASS should be present for xmessage window");
     assert!(
-        class.contains(expected_instance) || class.contains("Xmessage") || class.contains("xmessage"),
+        class.contains(expected_instance)
+            || class.contains("Xmessage")
+            || class.contains("xmessage"),
         "decoded WM_CLASS should expose the instance/class identity, got: {}",
         class
     );
@@ -419,7 +418,9 @@ async fn test_xwayland_manager_wired_xwm_receives_map_events() {
         mapped.1, expected_title,
         "mapped X11 title should match the real client title"
     );
-    let class = mapped.2.expect("mapped X11 client should carry a WM_CLASS value");
+    let class = mapped
+        .2
+        .expect("mapped X11 client should carry a WM_CLASS value");
     assert!(
         class.contains("axiom-xwm-smoke")
             || class.contains("Xmessage")

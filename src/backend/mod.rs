@@ -83,7 +83,9 @@ pub mod drm;
 mod render_bridge;
 mod xwayland_dispatch;
 pub mod xwm;
-use self::clipboard_bridge::{create_pipe, spawn_clipboard_read_worker, write_selection_bytes_to_fd};
+use self::clipboard_bridge::{
+    create_pipe, spawn_clipboard_read_worker, write_selection_bytes_to_fd,
+};
 use self::render_bridge::{popup_render_id, should_use_wgpu_gl_bridge};
 use self::xwm::AxiomXwm;
 
@@ -298,7 +300,10 @@ impl State {
 
     fn drain_clipboard_updates(&mut self) {
         while let Ok(data) = self.clipboard_update_rx.try_recv() {
-            debug!("📋 Clipboard cache refreshed from Wayland selection ({} bytes)", data.len());
+            debug!(
+                "📋 Clipboard cache refreshed from Wayland selection ({} bytes)",
+                data.len()
+            );
             self.clipboard_cache = Some(data);
             if let Some(xwm) = self.xwm.as_mut() {
                 if let Err(e) = xwm.own_selection() {
@@ -320,7 +325,11 @@ impl State {
             states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
-                .and_then(|data| data.lock().ok().map(|role| (role.title.clone(), role.app_id.clone())))
+                .and_then(|data| {
+                    data.lock()
+                        .ok()
+                        .map(|role| (role.title.clone(), role.app_id.clone()))
+                })
                 .unwrap_or((None, None))
         })
     }
@@ -342,7 +351,11 @@ impl State {
     fn update_surface_fractional_scale(&self, surface: &WlSurface) {
         let preferred_scale = self
             .window_id_for_surface(surface)
-            .map(|window_id| self.workspace_manager.read().scale_factor_for_window(window_id))
+            .map(|window_id| {
+                self.workspace_manager
+                    .read()
+                    .scale_factor_for_window(window_id)
+            })
             .unwrap_or_else(|| self.focused_output_scale())
             .clamp(1.0, 4.0);
 
@@ -360,7 +373,10 @@ impl State {
         app_id: Option<String>,
     ) {
         let effective_title = Self::display_title(title.clone(), app_id.clone());
-        let window_id = self.surfaces.get(&surface_id).and_then(|data| data.window_id);
+        let window_id = self
+            .surfaces
+            .get(&surface_id)
+            .and_then(|data| data.window_id);
 
         if let Some(surface_data) = self.surfaces.get_mut(&surface_id) {
             surface_data.title = effective_title.clone();
@@ -391,7 +407,10 @@ impl State {
         );
 
         let visible_title = title.clone();
-        let window_id = self.window_manager.write().add_window(visible_title.clone());
+        let window_id = self
+            .window_manager
+            .write()
+            .add_window(visible_title.clone());
         self.workspace_manager.write().add_window(window_id);
 
         // Trigger window open animation (spring-physics scale + fade-in)
@@ -437,7 +456,10 @@ impl State {
             title.clone()
         };
 
-        let window_id = self.window_manager.write().add_window(visible_title.clone());
+        let window_id = self
+            .window_manager
+            .write()
+            .add_window(visible_title.clone());
         self.workspace_manager.write().add_window(window_id);
         self.effects_engine.write().animate_window_open(window_id);
 
@@ -885,7 +907,11 @@ impl SelectionHandler for State {
                     if let Some(mime) = Self::preferred_text_mime_type(&mime_types) {
                         match create_pipe() {
                             Ok((read_fd, write_fd)) => {
-                                match request_data_device_client_selection(&seat, mime.clone(), write_fd) {
+                                match request_data_device_client_selection(
+                                    &seat,
+                                    mime.clone(),
+                                    write_fd,
+                                ) {
                                     Ok(()) => {
                                         debug!(
                                             "📋 Requested Wayland clipboard payload for X11 bridge via MIME {}",
@@ -1348,10 +1374,10 @@ impl AxiomSmithayBackendReal {
         self.winit_event_loop = Some(event_loop);
 
         let (repeat_delay, repeat_rate) = State::keyboard_repeat_settings(&self.state.config);
-        let _keyboard = self
-            .state
-            .seat
-            .add_keyboard(XkbConfig::default(), repeat_delay, repeat_rate)?;
+        let _keyboard =
+            self.state
+                .seat
+                .add_keyboard(XkbConfig::default(), repeat_delay, repeat_rate)?;
 
         self.state.seat.add_pointer();
 
@@ -1469,9 +1495,7 @@ impl AxiomSmithayBackendReal {
             self.state.window_height = virtual_height;
             info!(
                 "Virtual desktop dimensions: {}x{} (focused output: {})",
-                virtual_width,
-                virtual_height,
-                focused_name,
+                virtual_width, virtual_height, focused_name,
             );
         }
 
@@ -2973,7 +2997,8 @@ impl AxiomSmithayBackendReal {
         for (window_id, rect) in &layouts {
             if let Some(&surface_id) = self.state.window_map.get(window_id) {
                 if let Some(toplevel) = self.state.toplevels.get(&surface_id) {
-                    self.state.update_surface_fractional_scale(toplevel.wl_surface());
+                    self.state
+                        .update_surface_fractional_scale(toplevel.wl_surface());
                     let scale = self
                         .state
                         .workspace_manager
@@ -3128,7 +3153,10 @@ impl AxiomSmithayBackendReal {
     /// Upload pending surface buffers and sync compositor geometry into the
     /// renderer's scene graph. Returns the popup surface IDs staged for this
     /// frame plus the number of committed popups actually inserted.
-    fn stage_wgpu_scene_from_state(&mut self, layouts: &HashMap<u64, crate::window::Rectangle>) -> (Vec<u32>, usize) {
+    fn stage_wgpu_scene_from_state(
+        &mut self,
+        layouts: &HashMap<u64, crate::window::Rectangle>,
+    ) -> (Vec<u32>, usize) {
         let Some(ref renderer) = self.state.renderer else {
             return (Vec::new(), 0);
         };
