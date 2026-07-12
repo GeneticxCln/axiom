@@ -7,6 +7,8 @@ use crate::config::XWaylandConfig;
 use anyhow::Result;
 use log::info;
 use std::collections::HashMap;
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 use tokio::process::Child as TokioChild;
 
@@ -136,6 +138,33 @@ impl XWaylandManager {
     /// the configured display number first, then scans `:0..:32` for a
     /// free slot. Sets the `DISPLAY` env var on success.
     pub async fn start_server(&mut self) -> Result<()> {
+        self.start_server_inner(None, None).await
+    }
+
+    /// Restart or start XWayland with a compositor-side XWM stream wired into
+    /// the `-wm <fd>` socket expected by rootless XWayland.
+    pub async fn restart_with_wm_stream(&mut self, wm_stream: UnixStream) -> Result<()> {
+        self.restart_with_wm_stream_for_display(wm_stream, None).await
+    }
+
+    /// Same as [`restart_with_wm_stream`], but forces the child XWayland
+    /// process to connect to the specified parent Wayland display.
+    pub async fn restart_with_wm_stream_for_display(
+        &mut self,
+        wm_stream: UnixStream,
+        wayland_display: Option<String>,
+    ) -> Result<()> {
+        if self.xwayland_process.is_some() {
+            self.stop_server().await?;
+        }
+        self.start_server_inner(Some(wm_stream), wayland_display).await
+    }
+
+    async fn start_server_inner(
+        &mut self,
+        wm_stream: Option<UnixStream>,
+        wayland_display: Option<String>,
+    ) -> Result<()> {
         if self.xwayland_process.is_some() {
             info!("⚠️ XWayland server already running");
             return Ok(());
@@ -151,17 +180,35 @@ impl XWaylandManager {
         // 2. Prepare XWayland command
         let mut cmd = tokio::process::Command::new("Xwayland");
         cmd.arg(format!(":{}", display))
-            .arg("-rootless") // Integrate with Wayland compositor
+            .arg("-rootless") // Integrate with the parent Wayland compositor
             .arg("-terminate") // Terminate when last client disconnects
-            .arg("-core") // Core dump on fault
-            .arg("-wm") // Window manager mode
-            .arg("20"); // File descriptor for Wayland socket (simulated for now)
+            .arg("-core"); // Core dump on fault
+
+        if let Some(ref parent_wayland_display) = wayland_display {
+            cmd.env("WAYLAND_DISPLAY", parent_wayland_display);
+            info!(
+                "Starting XWayland against parent Wayland display '{}'",
+                parent_wayland_display
+            );
+        }
+
+        // When a compositor-side XWM connection is supplied, pass the inherited
+        // FD number to XWayland so rootless X11 windows can be managed by the
+        // compositor's XWM path.
+        let wm_stream = if let Some(wm_stream) = wm_stream {
+            clear_cloexec(wm_stream.as_raw_fd())?;
+            cmd.arg("-wm").arg(wm_stream.as_raw_fd().to_string());
+            Some(wm_stream)
+        } else {
+            None
+        };
 
         // 3. Spawn the process
         match cmd.spawn() {
             Ok(child) => {
                 self.xwayland_process = Some(child);
                 self.display_number = Some(display);
+                drop(wm_stream);
 
                 // 4. Wait for display to be ready
                 if self.wait_for_display(display).await {
@@ -295,6 +342,30 @@ impl XWaylandManager {
 
         Ok(())
     }
+}
+
+fn clear_cloexec(fd: std::os::fd::RawFd) -> Result<()> {
+    // SAFETY: `fcntl` only inspects/modifies the descriptor flags for the
+    // provided valid fd; it does not dereference arbitrary memory.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(anyhow::anyhow!(
+            "fcntl(F_GETFD) failed for wm fd {}: {}",
+            fd,
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: same rationale as above; clears the close-on-exec bit so the
+    // child XWayland process inherits the fd specified via `-wm`.
+    let rc = unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
+    if rc < 0 {
+        return Err(anyhow::anyhow!(
+            "fcntl(F_SETFD) failed for wm fd {}: {}",
+            fd,
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

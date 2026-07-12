@@ -48,7 +48,7 @@ struct Cli {
     #[arg(short, long)]
     debug: bool,
 
-    /// Run in windowed mode (for development)
+    /// Run in nested/windowed mode (recommended alpha target)
     #[arg(short, long)]
     windowed: bool,
 
@@ -66,10 +66,12 @@ struct Cli {
     #[arg(long)]
     effects_demo: bool,
 
-    /// Backend selection
-    /// `drm` (real KMS/udev/libinput session compositor),
-    /// or `noop` (tests / headless). Persisted into
-    /// `config.backend.kind` so downstream subsystems see one source of truth.
+    /// Backend selection.
+    /// `winit` is the recommended alpha target.
+    /// `drm` is still a development/standalone path in progress.
+    /// `noop` is for tests/headless flows.
+    /// Persisted into `config.backend.kind` so downstream subsystems
+    /// see one source of truth.
     #[arg(long, value_name = "KIND", default_value = "winit")]
     backend: String,
 }

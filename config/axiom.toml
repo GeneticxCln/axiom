@@ -93,11 +93,12 @@ vsync = true
 #   1. draw / click-handle a minimize titlebar button (Wayland has no
 #      standard minimize protocol; supporting it well requires deeper
 #      synthetic-surface plumbing deferred to a follow-up PR).
-#   2. expose `zxdg_decoration_manager_v1` for client SSD/CSD negotiation
-#      (we unilaterally render internal SSDs via DecorationManager; the
-#      proper protocol handler is deferred to a follow-up PR).
-# Flip either to `true` to opt back in (the matching implementation must
-# already exist or the flag is currently a no-op).
+#   2. expose `zxdg_decoration_manager_v1` for client SSD/CSD negotiation.
+#      When enabled today, Axiom still negotiates *client-side decorations*
+#      because visible server-side decoration rendering is not yet part of the
+#      live compositor output path.
+# Flip either to `true` only when you want to exercise the current alpha
+# behavior deliberately.
 [features]
 enable_minimize = false
 enable_xdg_decoration_protocol = false

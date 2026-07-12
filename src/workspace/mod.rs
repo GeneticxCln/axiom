@@ -628,20 +628,18 @@ pub struct ScrollableWorkspaces {
     pub focused_output: String,
 
     /// Cached layout map from `calculate_workspace_layouts`, invalidated
-    /// whenever the scroll position changes. This avoids recomputing all
-    /// window rectangles on every pointer motion (the hot path for
-    /// `element_under`).
+    /// whenever scroll positions, viewport sizes, or output topology change.
+    /// This avoids recomputing all window rectangles on every pointer motion
+    /// (the hot path for `element_under`).
     ///
-    /// Uses `parking_lot::Mutex` rather than `RefCell` because the
-    /// outer `Arc<parking_lot::RwLock<ScrollableWorkspaces>>` is held
-    /// under a *read* guard by multiple backend/pointer paths in
-    /// parallel (e.g. `backend::render` and `process_events` both
-    /// acquire the workspace_manager read lock). With `RefCell`,
-    /// `borrow_mut()` would panic when two readers competed. The
-    /// mutex serialises correctly — and since both call sites
-    /// (`calculate_workspace_layouts` and `update_animations`) do
-    /// not recurse, there is no risk of self-deadlock.
-    cached_layouts: parking_lot::Mutex<Option<(f64, HashMap<u64, Rectangle>)>>,
+    /// The cache key is a lightweight string signature spanning all known
+    /// output tapes instead of just the focused tape's scroll position, which
+    /// makes the cache safe for multi-monitor layouts.
+    cached_layouts: parking_lot::Mutex<Option<(String, HashMap<u64, Rectangle>)>>,
+
+    /// Stable left-to-right output ordering used by multi-monitor layout
+    /// calculation. Each tape occupies a horizontal segment in this order.
+    output_order: Vec<String>,
 
     /// Set of window IDs that are currently minimized (hidden). Such
     /// windows are still owned (the compositor can restore them) but
@@ -680,6 +678,7 @@ impl ScrollableWorkspaces {
             tapes: HashMap::new(),
             focused_output: "default".to_string(),
             cached_layouts: parking_lot::Mutex::new(None),
+            output_order: vec!["default".to_string()],
             minimized_windows: HashSet::new(),
             originating_column: HashMap::new(),
             floating_windows: HashSet::new(),
@@ -789,21 +788,144 @@ impl ScrollableWorkspaces {
 
     /// Ensure a tape exists for the given output
     pub fn ensure_tape(&mut self, output_id: &str) -> &mut WorkspaceTape {
+        if !self.output_order.iter().any(|id| id == output_id) {
+            self.output_order.push(output_id.to_string());
+        }
         self.tapes.entry(output_id.to_string()).or_insert_with(|| {
             info!("Creating workspace tape for output: {}", output_id);
             WorkspaceTape::new(&self.config)
         })
     }
 
+    /// Return the known tape IDs in sorted order.
+    pub fn known_tape_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.tapes.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    /// Set the viewport size for a specific output tape.
+    pub fn set_output_viewport(&mut self, output_id: &str, width: f64, height: f64) {
+        self.ensure_tape(output_id).set_viewport_size(width, height);
+        *self.cached_layouts.lock() = None;
+    }
+
+    /// Return the total virtual desktop size when all outputs are laid out in a
+    /// simple horizontal strip using `output_order`.
+    pub fn virtual_desktop_size(&self) -> (u32, u32) {
+        let mut total_width = 0u32;
+        let mut max_height = 0u32;
+        for output_id in &self.output_order {
+            if let Some(tape) = self.tapes.get(output_id) {
+                total_width = total_width.saturating_add(tape.viewport_width as u32);
+                max_height = max_height.max(tape.viewport_height as u32);
+            }
+        }
+        if total_width == 0 || max_height == 0 {
+            (DEFAULT_VIEWPORT_WIDTH as u32, DEFAULT_VIEWPORT_HEIGHT as u32)
+        } else {
+            (total_width, max_height)
+        }
+    }
+
+    fn layout_cache_signature(&self) -> String {
+        let mut parts = Vec::new();
+        for output_id in &self.output_order {
+            if let Some(tape) = self.tapes.get(output_id) {
+                parts.push(format!(
+                    "{}:{:.3}:{:.0}x{:.0}",
+                    output_id, tape.current_position, tape.viewport_width, tape.viewport_height
+                ));
+            }
+        }
+        parts.join("|")
+    }
+
+    /// Synchronize workspace tapes with the currently live output IDs.
+    ///
+    /// - Ensures every live output has a tape.
+    /// - Removes stale tapes that no longer map to a live output.
+    /// - Migrates any windows from removed tapes into the fallback live tape,
+    ///   preserving per-column order as much as possible.
+    /// - Preserves focused output when it still exists; otherwise focuses the
+    ///   first live output. If no live outputs exist, falls back to `default`.
+    pub fn sync_tapes_with_outputs(&mut self, live_output_ids: &[String]) {
+        if live_output_ids.is_empty() {
+            self.ensure_tape("default");
+            self.output_order = vec!["default".to_string()];
+            self.focused_output = "default".to_string();
+            *self.cached_layouts.lock() = None;
+            return;
+        }
+
+        self.output_order = live_output_ids.to_vec();
+        for output_id in live_output_ids {
+            self.ensure_tape(output_id);
+        }
+
+        let fallback_focus = if live_output_ids.contains(&self.focused_output) {
+            self.focused_output.clone()
+        } else {
+            live_output_ids[0].clone()
+        };
+
+        let live: std::collections::HashSet<&str> =
+            live_output_ids.iter().map(String::as_str).collect();
+        let stale_ids: Vec<String> = self
+            .tapes
+            .keys()
+            .filter(|id| !live.contains(id.as_str()))
+            .cloned()
+            .collect();
+
+        for stale_id in stale_ids {
+            if stale_id == fallback_focus {
+                continue;
+            }
+            let Some(stale_tape) = self.tapes.remove(&stale_id) else {
+                continue;
+            };
+
+            let mut columns: Vec<(i32, Vec<u64>)> = stale_tape
+                .columns
+                .into_iter()
+                .filter_map(|(idx, column)| {
+                    if column.windows.is_empty() {
+                        None
+                    } else {
+                        Some((idx, column.windows))
+                    }
+                })
+                .collect();
+            columns.sort_by_key(|(idx, _)| *idx);
+
+            let moved_count: usize = columns.iter().map(|(_, windows)| windows.len()).sum();
+            if moved_count > 0 {
+                info!(
+                    "Migrating {} window(s) from stale output tape '{}' to '{}'",
+                    moved_count, stale_id, fallback_focus
+                );
+            }
+
+            for (idx, windows) in columns {
+                for window_id in windows {
+                    self.ensure_tape(&fallback_focus)
+                        .add_window_to_column(window_id, idx);
+                }
+            }
+        }
+
+        self.focused_output = fallback_focus;
+        *self.cached_layouts.lock() = None;
+    }
+
     /// Get the active tape (read-only reference).
     pub fn active_tape(&self) -> &WorkspaceTape {
-        // Fallback: return the first tape if focused_output is stale.
-        // `new()` always creates the "default" tape, and `ensure_tape`
-        // guarantees at least one tape exists after any call path.
         self.tapes.get(&self.focused_output).unwrap_or_else(|| {
-            self.tapes
-                .values()
-                .next()
+            self.output_order
+                .iter()
+                .find_map(|id| self.tapes.get(id))
+                .or_else(|| self.tapes.values().next())
                 .expect("at least one tape exists — new() creates 'default'")
         })
     }
@@ -811,9 +933,12 @@ impl ScrollableWorkspaces {
     /// Return the active tape, or `None` when the tape map is empty
     /// (defense-in-depth against hypothetical empty-state bugs).
     pub fn active_tape_opt(&self) -> Option<&WorkspaceTape> {
-        self.tapes
-            .get(&self.focused_output)
-            .or_else(|| self.tapes.values().next())
+        self.tapes.get(&self.focused_output).or_else(|| {
+            self.output_order
+                .iter()
+                .find_map(|id| self.tapes.get(id))
+                .or_else(|| self.tapes.values().next())
+        })
     }
 
     /// Update configuration
@@ -839,6 +964,32 @@ impl ScrollableWorkspaces {
     /// Check if a window exists in any tape.
     pub fn window_exists(&self, window_id: u64) -> bool {
         self.tapes.values().any(|t| t.window_exists(window_id))
+    }
+
+    /// Return the output/tape ID currently containing the given window.
+    pub fn window_output_id(&self, window_id: u64) -> Option<&str> {
+        self.output_order
+            .iter()
+            .find_map(|output_id| {
+                self.tapes
+                    .get(output_id)
+                    .filter(|t| t.window_exists(window_id))
+                    .map(|_| output_id.as_str())
+            })
+            .or_else(|| {
+                self.tapes
+                    .iter()
+                    .find_map(|(id, tape)| tape.window_exists(window_id).then_some(id.as_str()))
+            })
+    }
+
+    /// Return the scale factor for the output/tape containing the window.
+    /// Falls back to 1.0 if the window is not currently assigned to a tape.
+    pub fn scale_factor_for_window(&self, window_id: u64) -> f64 {
+        self.window_output_id(window_id)
+            .and_then(|id| self.tapes.get(id))
+            .map(WorkspaceTape::scale_factor)
+            .unwrap_or(1.0)
     }
 
     /// Check if infinite scrolling is enabled.
@@ -894,12 +1045,23 @@ impl ScrollableWorkspaces {
     /// Remove a window from all tapes. Returns the column index if found.
     pub fn remove_window(&mut self, window_id: u64) -> Option<i32> {
         // Search all tapes (a window is unique across all workspaces)
+        let mut removed_from = None;
         for tape in self.tapes.values_mut() {
             if let Some(col) = tape.remove_window(window_id) {
-                return Some(col);
+                removed_from = Some(col);
+                break;
             }
         }
-        None
+
+        // Always clean auxiliary state too. A window can have stale
+        // floating/minimized bookkeeping even if it was already absent from
+        // the visible tape (e.g. minimized before destruction).
+        self.minimized_windows.remove(&window_id);
+        self.originating_column.remove(&window_id);
+        self.floating_windows.remove(&window_id);
+        *self.cached_layouts.lock() = None;
+
+        removed_from
     }
 
     /// Move a window left on the active tape.
@@ -928,82 +1090,73 @@ impl ScrollableWorkspaces {
 
     /// Calculate layout rectangles for all visible windows across all tapes.
     pub fn calculate_workspace_layouts(&self) -> HashMap<u64, Rectangle> {
-        // Return cached layouts if still valid. `parking_lot::Mutex::lock`
-        // returns a guard that derefs to the inner value via the `Deref`
-        // target — couple it with the deref-coerce pattern to keep the
-        // single-read cost down.
-        let tape = self.active_tape();
-        if let Some((cached_pos, ref cached)) = *self.cached_layouts.lock() {
-            if (cached_pos - tape.current_position).abs() < f64::EPSILON {
+        let signature = self.layout_cache_signature();
+        if let Some((cached_sig, ref cached)) = *self.cached_layouts.lock() {
+            if cached_sig == signature {
                 return cached.clone();
             }
         }
 
-        // Collect layouts from ALL tapes (outputs)
-        // Note: For now, we assume a single viewport for backwards compatibility or just return relative coords.
-        // In real multi-monitor, this would offset by output position.
-
-        let tape = self.active_tape();
         let mut layouts = HashMap::new();
-        let visible_columns = tape.get_visible_columns();
+        let mut output_origin_x: i32 = 0;
 
-        for column in visible_columns {
-            let column_offset = column.position - tape.current_position;
-            let column_left = (tape.viewport_width / 2.0) + column_offset;
+        for output_id in &self.output_order {
+            let Some(tape) = self.tapes.get(output_id) else {
+                continue;
+            };
+            let visible_columns = tape.get_visible_columns();
 
-            if column_left + tape.config.workspace_width as f64 >= 0.0
-                && column_left <= tape.viewport_width
-            {
-                let column_bounds = Rectangle {
-                    x: column_left as i32,
-                    y: 0,
-                    width: tape.config.workspace_width,
-                    height: tape.viewport_height as u32,
-                };
+            for column in visible_columns {
+                let column_offset = column.position - tape.current_position;
+                let column_left = output_origin_x as f64 + (tape.viewport_width / 2.0) + column_offset;
 
-                if !column.windows.is_empty() {
-                    let gap = tape.config.gaps as i32;
-                    let total_gap_space = gap * (column.windows.len() as i32 + 1);
-                    let available = (column_bounds.height as i32).saturating_sub(total_gap_space);
-                    let window_count = column.windows.len() as i32;
-                    let window_height = if window_count > 0 && available > 0 {
-                        available / window_count
-                    } else {
-                        1 // minimum 1-pixel window so it's at least visible
+                if column_left + tape.config.workspace_width as f64 >= output_origin_x as f64
+                    && column_left <= output_origin_x as f64 + tape.viewport_width
+                {
+                    let column_bounds = Rectangle {
+                        x: column_left as i32,
+                        y: 0,
+                        width: tape.config.workspace_width,
+                        height: tape.viewport_height as u32,
                     };
 
-                    for (i, &window_id) in column.windows.iter().enumerate() {
-                        // Skip minimized windows — the renderer should not
-                        // allocate a rectangle for them because they are
-                        // hidden behind the compositor and excluded from
-                        // pointer hit-testing by `element_under` (which
-                        // reads the same returned map). The hidden window
-                        // still lives in `minimized_windows` for the
-                        // restore path.
-                        if self.minimized_windows.contains(&window_id) {
-                            continue;
-                        }
-                        // Floating windows are manually positioned and must
-                        // not receive a tiled layout rect.
-                        if self.floating_windows.contains(&window_id) {
-                            continue;
-                        }
-                        let y = gap + i as i32 * (window_height + gap);
-                        let width = column_bounds.width.saturating_sub(2 * gap as u32).max(1);
-                        let height = (window_height as u32).max(1);
-                        let window_rect = Rectangle {
-                            x: column_bounds.x + gap,
-                            y,
-                            width,
-                            height,
+                    if !column.windows.is_empty() {
+                        let gap = tape.config.gaps as i32;
+                        let total_gap_space = gap * (column.windows.len() as i32 + 1);
+                        let available = (column_bounds.height as i32).saturating_sub(total_gap_space);
+                        let window_count = column.windows.len() as i32;
+                        let window_height = if window_count > 0 && available > 0 {
+                            available / window_count
+                        } else {
+                            1
                         };
-                        layouts.insert(window_id, window_rect);
+
+                        for (i, &window_id) in column.windows.iter().enumerate() {
+                            if self.minimized_windows.contains(&window_id) {
+                                continue;
+                            }
+                            if self.floating_windows.contains(&window_id) {
+                                continue;
+                            }
+                            let y = gap + i as i32 * (window_height + gap);
+                            let width = column_bounds.width.saturating_sub(2 * gap as u32).max(1);
+                            let height = (window_height as u32).max(1);
+                            let window_rect = Rectangle {
+                                x: column_bounds.x + gap,
+                                y,
+                                width,
+                                height,
+                            };
+                            layouts.insert(window_id, window_rect);
+                        }
                     }
                 }
             }
+
+            output_origin_x = output_origin_x.saturating_add(tape.viewport_width as i32);
         }
 
-        *self.cached_layouts.lock() = Some((tape.current_position, layouts.clone()));
+        *self.cached_layouts.lock() = Some((signature, layouts.clone()));
         layouts
     }
 
@@ -1126,6 +1279,7 @@ impl ScrollableWorkspaces {
     pub fn shutdown(&mut self) {
         info!("🔽 Shutting down scrollable workspaces...");
         self.tapes.clear();
+        self.output_order.clear();
         self.minimized_windows.clear();
         self.originating_column.clear();
         *self.cached_layouts.lock() = None;

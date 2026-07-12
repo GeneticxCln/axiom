@@ -84,6 +84,21 @@ test-ci: ## Run CI test suite
 	@echo "$(BLUE)Running CI test suite$(NC)"
 	VERBOSE=$(VERBOSE) HEADLESS=$(HEADLESS) ./$(SCRIPTS_DIR)/test.sh ci
 
+.PHONY: test-package
+test-package: ## Run real PKGBUILD stage validation and installed-artifact smoke checks
+	@echo "$(BLUE)Running packaging build validation$(NC)"
+	./$(SCRIPTS_DIR)/test.sh package
+
+.PHONY: memory-check
+memory-check: ## Run valgrind-based memory safety checks
+	@echo "$(BLUE)Running memory safety checks$(NC)"
+	./$(SCRIPTS_DIR)/test.sh memory
+
+.PHONY: test-xwayland
+test-xwayland: ## Run XWayland validation
+	@echo "$(BLUE)Running XWayland validation$(NC)"
+	./$(SCRIPTS_DIR)/test.sh xwayland
+
 # Code quality targets
 .PHONY: lint
 lint: ## Run code linting (fmt + clippy)
@@ -168,13 +183,29 @@ test-doc: ## Run documentation tests
 
 # Benchmark targets
 .PHONY: bench
-bench: ## Run benchmarks
+bench: ## Run Criterion benchmarks
 	@echo "$(BLUE)Running benchmarks$(NC)"
 	@if [ -d "benches" ]; then \
-		HEADLESS=$(HEADLESS) $(CARGO) bench; \
+		bash ./$(SCRIPTS_DIR)/benchmark.sh run; \
 	else \
 		echo "$(YELLOW)No benchmark directory found$(NC)"; \
 	fi
+
+.PHONY: bench-save-baseline
+bench-save-baseline: ## Save a named Criterion benchmark baseline (set BASELINE=<name>)
+	@if [ -z "$(BASELINE)" ]; then \
+		echo "$(RED)BASELINE is required, e.g. make bench-save-baseline BASELINE=local-main$(NC)"; \
+		exit 1; \
+	fi
+	bash ./$(SCRIPTS_DIR)/benchmark.sh save-baseline $(BASELINE)
+
+.PHONY: bench-compare
+bench-compare: ## Compare benchmarks against a saved baseline (set BASELINE=<name>)
+	@if [ -z "$(BASELINE)" ]; then \
+		echo "$(RED)BASELINE is required, e.g. make bench-compare BASELINE=local-main$(NC)"; \
+		exit 1; \
+	fi
+	bash ./$(SCRIPTS_DIR)/benchmark.sh compare $(BASELINE)
 
 # Development convenience targets
 .PHONY: check
@@ -186,8 +217,9 @@ pre-commit: fmt clippy test-quick ## Pre-commit hook (format, lint, quick tests)
 .PHONY: install-deps
 install-deps: ## Install development dependencies
 	@echo "$(BLUE)Installing development dependencies$(NC)"
-	cargo install cargo-tarpaulin || true
-	cargo install cargo-audit || true
+	cargo install --locked cargo-tarpaulin || true
+	cargo install --locked cargo-audit || true
+	cargo install --locked cargo-deny || true
 	cargo install cargo-license || true
 
 .PHONY: setup
@@ -213,7 +245,16 @@ release-check: ## Validate release readiness
 	$(MAKE) clean
 	$(MAKE) test
 	$(MAKE) build-release
+	$(MAKE) test-package
 	$(CARGO) package --dry-run
+
+.PHONY: release-prep
+release-prep: ## Prepare alpha release notes and publish commands (set TAG=vX.Y.Z-alpha.N)
+	@if [ -z "$(TAG)" ]; then \
+		echo "$(RED)TAG is required, e.g. make release-prep TAG=v0.1.0-alpha.1$(NC)"; \
+		exit 1; \
+	fi
+	bash ./$(SCRIPTS_DIR)/release_prep.sh all $(TAG)
 
 # Maintenance targets
 .PHONY: update

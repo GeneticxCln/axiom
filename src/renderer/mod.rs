@@ -120,6 +120,13 @@ pub struct AxiomRenderer {
     cached_projection_buffer: Option<Buffer>,
     cached_projection_dims: (u32, u32),
 
+    /// Cached staging buffer for GPU→CPU readback in the bridge / headless
+    /// paths. Reused whenever the target dimensions (and therefore byte size)
+    /// are unchanged so `compose_full_frame` does not allocate a fresh staging
+    /// buffer every frame.
+    cached_readback_buffer: Option<Buffer>,
+    cached_readback_dims: (u32, u32),
+
     /// Border width in pixels for window decoration
     border_width: f32,
     /// Cached border width used in the last per-window uniform buffer writes.
@@ -377,6 +384,8 @@ impl AxiomRenderer {
             sampler,
             cached_projection_buffer: None,
             cached_projection_dims: (0, 0),
+            cached_readback_buffer: None,
+            cached_readback_dims: (0, 0),
             border_width: 2.0,
             cached_border_width: 2.0,
             device_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -548,6 +557,8 @@ impl AxiomRenderer {
             sampler,
             cached_projection_buffer: None,
             cached_projection_dims: (0, 0),
+            cached_readback_buffer: None,
+            cached_readback_dims: (0, 0),
             border_width: 2.0,
             cached_border_width: 2.0,
             device_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1189,7 +1200,7 @@ impl AxiomRenderer {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::ImageCopyBuffer {
-                buffer: &staging,
+                buffer: staging,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
                     bytes_per_row: Some(4 * width),
@@ -1453,24 +1464,17 @@ impl AxiomRenderer {
             }
         }
 
-        // Read back the composited result via a staging buffer.
+        // Read back the composited result via a cached staging buffer.
         let bytes_per_row = std::num::NonZeroU32::new(4 * width);
-        let buffer_size = (width as u64)
-            .saturating_mul(height as u64)
-            .saturating_mul(4);
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Compose Readback Staging"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let staging = ensure_readback_buffer(
+            &self.device,
+            &mut self.cached_readback_buffer,
+            &mut self.cached_readback_dims,
+            width,
+            height,
+        );
 
-        let mut copy_encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Compose Copy Encoder"),
-                });
-        copy_encoder.copy_texture_to_buffer(
+        encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
                 texture: target,
                 mip_level: 0,
@@ -1478,7 +1482,7 @@ impl AxiomRenderer {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::ImageCopyBuffer {
-                buffer: &staging,
+                buffer: staging,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
                     bytes_per_row: bytes_per_row.map(std::num::NonZeroU32::get),
@@ -1492,9 +1496,7 @@ impl AxiomRenderer {
             },
         );
 
-        self.queue.submit(
-            std::iter::once(encoder.finish()).chain(std::iter::once(copy_encoder.finish())),
-        );
+        self.queue.submit(std::iter::once(encoder.finish()));
 
         // Poll for completion and read back to CPU.
         let slice = staging.slice(..);
@@ -1698,16 +1700,14 @@ impl AxiomRenderer {
             }
         }
 
-        // Staging buffer for GPU→CPU readback
-        let buffer_size = (width as u64)
-            .saturating_mul(height as u64)
-            .saturating_mul(4);
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Headless Readback Buffer"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        // Reuse the shared readback staging buffer when dimensions match.
+        let staging = ensure_readback_buffer(
+            &self.device,
+            &mut self.cached_readback_buffer,
+            &mut self.cached_readback_dims,
+            width,
+            height,
+        );
 
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
@@ -1717,7 +1717,7 @@ impl AxiomRenderer {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::ImageCopyBuffer {
-                buffer: &staging,
+                buffer: staging,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
                     bytes_per_row: Some(4 * width),
@@ -1960,6 +1960,16 @@ impl AxiomRenderer {
         self.cached_projection_dims
     }
 
+    /// Check whether the shared readback staging buffer cache is populated.
+    pub fn has_cached_readback(&self) -> bool {
+        self.cached_readback_buffer.is_some()
+    }
+
+    /// Get the cached readback dimensions, or `(0, 0)` when empty.
+    pub fn cached_readback_dims(&self) -> (u32, u32) {
+        self.cached_readback_dims
+    }
+
     /// Check whether a window has a queued shadow effect.
     /// Used by integration tests to verify queue lifecycle.
     pub fn has_window_shadow(&self, id: u64) -> bool {
@@ -2053,6 +2063,35 @@ fn ensure_headless_target<'a>(
         anyhow::anyhow!("headless_target must be initialized before ensure_headless_target returns")
     })?;
     Ok((tex, view))
+}
+
+/// Get or create a staging buffer sized for `width × height × 4` bytes of
+/// readback data. The same buffer is reused across repeated bridge / headless
+/// readbacks at identical dimensions to avoid per-frame allocation churn.
+fn ensure_readback_buffer<'a>(
+    device: &Device,
+    cached_readback_buffer: &'a mut Option<Buffer>,
+    cached_readback_dims: &mut (u32, u32),
+    width: u32,
+    height: u32,
+) -> &'a Buffer {
+    let dims = (width, height);
+    if cached_readback_buffer.is_none() || *cached_readback_dims != dims {
+        let buffer_size = (width as u64)
+            .saturating_mul(height as u64)
+            .saturating_mul(4);
+        *cached_readback_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cached Readback Buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        }));
+        *cached_readback_dims = dims;
+    }
+
+    cached_readback_buffer
+        .as_ref()
+        .expect("readback buffer must exist after ensure_readback_buffer")
 }
 
 /// Build a 4×4 column-major orthographic projection matrix for a surface

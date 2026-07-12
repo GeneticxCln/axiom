@@ -1,8 +1,16 @@
-//! Server-side decoration system for Axiom compositor
+//! Internal decoration state for the Axiom compositor.
 #![allow(clippy::approx_constant)]
 //!
-//! This module handles drawing window decorations (titlebars, borders, buttons)
-//! when clients request server-side decorations (SSD).
+//! This module owns titlebar/button geometry, hit-testing, and render-data
+//! generation for future server-side decoration (SSD) support.
+//!
+//! Important current policy:
+//! - the live compositor output path still does **not** render visible SSD
+//!   chrome end-to-end
+//! - Wayland xdg-decoration negotiation currently prefers **client-side
+//!   decorations (CSD)**
+//! - the structures here remain useful for tests, interaction policy, and
+//!   future visible SSD integration
 
 use anyhow::Result;
 use log::{debug, info};

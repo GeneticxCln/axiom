@@ -1,227 +1,188 @@
 # Axiom 🚀
 
-**The next-generation Wayland compositor combining niri's scrollable workspaces with Hyprland's visual effects, enhanced by AI optimization.**
+**A hybrid Wayland compositor prototype combining scrollable workspaces with visual effects.**
 
 <div align="center">
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](#)
 [![Rust Version](https://img.shields.io/badge/rust-1.70%2B-orange)](#)
 [![License](https://img.shields.io/badge/license-GPLv3-blue)](#)
-[![AI Optimized](https://img.shields.io/badge/AI-optimized-purple)](#)
-[![Phase](https://img.shields.io/badge/phase-7%20production%20polish-blueviolet)](#)
+[![Status](https://img.shields.io/badge/status-alpha-yellow)](#)
 
 **Where productivity meets beauty.**
 
 </div>
 
-## ✨ Vision
+## Current Status
 
-Axiom bridges the gap between productivity-focused tiling window managers and visually stunning compositors. Why choose between infinite scrollable workspaces OR beautiful animations when you can have both?
+Axiom is currently an **alpha-stage compositor prototype**.
 
-## 🎯 Features
+What is true today:
+- The project has a real Smithay-based compositor backend.
+- The **nested / windowed (`--windowed`) path is the most complete development target**.
+- Scrollable workspace logic, configuration parsing, IPC, and renderer/effects infrastructure are implemented.
+- The standalone DRM/KMS path now has an early compositor output path, but is **not yet release-ready**.
 
-### Scrollable Workspaces (niri-inspired)
-- **Infinite horizontal scrolling** - No artificial workspace limits
-- **Smart window placement** - Automatic, intelligent tiling
-- **Smooth navigation** - Keyboard and gesture-based scrolling
-- **Dynamic layouts** - Adapts to your workflow
+What is not true yet:
+- Axiom is **not** in “production polish”.
+- Packaging and release assets are still incomplete.
+- Multi-monitor, fractional scaling, XWayland compatibility, and the render pipeline still need more work.
 
-### Visual Effects (Hyprland-inspired)  
-- **Smooth animations** - Buttery 60fps window operations
-- **Blur effects** - Configurable background and border blur
-- **Rounded corners** - Anti-aliased, customizable radius
-- **Drop shadows** - Realistic lighting effects
-- **Workspace transitions** - Animated scrolling between spaces
+For the detailed project status and roadmap, see [MASTER_DEVELOPMENT_PLAN.md](MASTER_DEVELOPMENT_PLAN.md).
 
-### Hybrid Innovations (Axiom-exclusive)
-- **Animated workspace scrolling** - Smooth visual transitions while scrolling
-- **Context-aware effects** - Smart performance scaling during intensive operations
-- **Unified configuration** - Single config for both tiling and effects
-- **AI-driven optimization** - Intelligent performance tuning via Lazy UI integration
+## Vision
 
-## 🏗️ Architecture
+Axiom explores a compositor UX that combines:
+- **Scrollable workspaces** inspired by niri
+- **Visual effects** inspired by Hyprland
+- **Structured IPC** for external tooling / optimization clients
 
-### Core Technologies
-- **Language**: Rust (memory safety + performance)
-- **Async Runtime**: Tokio for high-performance I/O
-- **Graphics**: wgpu for modern GPU acceleration
-- **Wayland**: Smithay compositor framework
-- **Configuration**: TOML with serde serialization
+## What Works Today
 
-### Codebase Structure
-```
+### Core logic
+- Scrollable workspace/tape model
+- Window registry and basic lifecycle management
+- TOML configuration loading/validation
+- JSON IPC over Unix sockets
+- Animation/effects state management
+
+### Development compositor path
+- Smithay-based Wayland socket
+- XDG toplevel/popup handling
+- Nested development mode via `--windowed`
+- Input routing and compositor shortcuts
+- WGPU renderer plus transitional GL presentation path
+- Explicit **client-side decoration negotiation** in the live runtime path until visible SSD rendering is integrated
+
+## What Is Still Incomplete
+
+- Fully finished standalone DRM/KMS compositor path
+- Unified render/present architecture
+- Robust multi-monitor behavior
+- Fractional scaling / HiDPI polish
+- Visible server-side decoration rendering in the live compositor output path (current live policy remains CSD-first)
+- Complete XWayland clipboard and compatibility flow
+- Release-ready packaging and session assets
+
+## Repository Layout
+
+```text
 axiom/
 ├── src/
-│   ├── main.rs              # Entry point and CLI
-│   ├── compositor.rs        # Main event loop and orchestration
-│   ├── config/              # TOML configuration system
-│   ├── workspace/           # Scrollable workspace management
-│   ├── effects/             # Visual effects engine
-│   ├── window/              # Window lifecycle management
-│   ├── input/               # Input handling (keyboard/mouse/gestures)
-│   ├── xwayland/            # X11 compatibility layer
-│   └── ipc/                 # AI integration and IPC communication
-├── Cargo.toml              # Dependencies and metadata
-├── axiom.toml              # Default configuration
-├── test_ipc.py             # IPC testing script
-└── MASTER_DEVELOPMENT_PLAN.md               # Detailed development status
+│   ├── main.rs
+│   ├── compositor.rs
+│   ├── backend/
+│   ├── config/
+│   ├── workspace/
+│   ├── effects/
+│   ├── renderer/
+│   ├── window/
+│   ├── input/
+│   ├── ipc/
+│   └── xwayland/
+├── docs/
+├── config/axiom.toml
+├── test_ipc.py
+└── MASTER_DEVELOPMENT_PLAN.md
 ```
 
-## 🚀 Development Status
+## Quick Start
 
-**Current Status**: 🚀 **Phase 7 (Production Polish)**
-
-The Smithay-based real compositor integration (Phase 6) is complete; we're now stabilizing for distribution.
-
-For detailed status, roadmap, and progress, please see [MASTER_DEVELOPMENT_PLAN.md](MASTER_DEVELOPMENT_PLAN.md).
-
-## 📚 Documentation
-
-Detailed documentation is available in the `docs/` directory:
-
-### User Guide
--   [**Installation**](docs/user/INSTALL.md) - How to build and install
--   [**Running**](docs/user/RUNNING.md) - How to start the compositor
--   [**Configuration**](docs/user/CONFIGURATION.md) - Customizing Axiom
-
-### Developer Resources
--   [**Backend Selection**](docs/dev/BACKEND_SELECTION.md) - Understanding backend options
--   [**Building**](docs/dev/BUILD.md) - Compile flags and targets
--   [**Contributing**](docs/dev/CONTRIBUTING.md) - Project structure and guidelines
-
-
-## ⚙️ Configuration
-
-Axiom uses a single TOML configuration file. Below is a minimal, valid example including all required sections/fields so it parses cleanly:
-
-```toml
-# ~/.config/axiom/axiom.toml
-[workspace]
-scroll_speed = 1.0
-infinite_scroll = true
-auto_scroll = true
-workspace_width = 1920
-gaps = 10
-smooth_scrolling = true
-
-[effects]
-enabled = true
-
-[effects.animations]
-enabled = true
-duration = 300
-curve = "ease-out"
-workspace_transition = 250
-window_animation = 200
-
-[effects.blur]
-enabled = true
-radius = 10
-intensity = 0.8
-window_backgrounds = true
-
-[effects.rounded_corners]
-enabled = true
-radius = 8
-antialiasing = 2
-
-[effects.shadows]
-enabled = true
-size = 20
-blur_radius = 15
-opacity = 0.6
-color = "#000000"
-
-[window]
-placement = "smart"
-focus_follows_mouse = false
-border_width = 2
-active_border_color = "#7C3AED"
-inactive_border_color = "#374151"
-gap = 10
-default_layout = "horizontal"
-
-[input]
-keyboard_repeat_delay = 600
-keyboard_repeat_rate = 25
-mouse_accel = 0.0
-touchpad_tap = true
-natural_scrolling = true
-
-[bindings]
-scroll_left = "Super+Left"
-scroll_right = "Super+Right"
-move_window_left = "Super+Shift+Left"
-move_window_right = "Super+Shift+Right"
-close_window = "Super+q"
-toggle_fullscreen = "Super+f"
-launch_terminal = "Super+Enter"
-launch_launcher = "Super+Space"
-toggle_effects = "Super+e"
-quit = "Super+Shift+q"
-
-[xwayland]
-enabled = true
-
-[general]
-debug = false
-max_fps = 60
-vsync = true
-```
-
-## 🤖 AI Integration
-
-Axiom seamlessly integrates with the **Lazy UI** optimization system:
-
-### Features
-- **Real-time performance monitoring** - CPU, memory, GPU usage tracking
-- **Intelligent configuration optimization** - AI-driven parameter tuning
-- **Adaptive effects scaling** - Automatic performance adjustments
-- **Usage pattern learning** - Optimization based on your workflow
-
-### IPC Communication
-- **Unix socket**: `$XDG_RUNTIME_DIR/axiom/axiom.sock` (fallback `/tmp/axiom-lazy-ui.sock`)
-- **JSON protocol**: Structured message exchange
-- **Async messaging**: Non-blocking optimization updates
-
-### Testing IPC
+### Build
 ```bash
-# Start Axiom in one terminal
-./target/debug/axiom --debug --windowed
+cargo build
+```
 
-# Test IPC communication in another terminal
+### Run the recommended alpha target
+```bash
+cargo run -- --windowed --debug
+```
+
+The nested/windowed path is the recommended way to evaluate Axiom right now.
+
+Automated nested smoke test (uses a real Wayland client such as `weston-terminal`):
+
+```bash
+cargo build
+xvfb-run -a ./scripts/nested_smoke_test.sh ./target/debug/axiom
+```
+
+## Configuration
+
+Axiom uses a single TOML config file at:
+
+```text
+~/.config/axiom/axiom.toml
+```
+
+A default example is shipped in:
+
+```text
+config/axiom.toml
+```
+
+See [docs/user/CONFIGURATION.md](docs/user/CONFIGURATION.md) for details.
+
+## IPC / Lazy UI Integration
+
+Axiom exposes a Unix socket for external clients.
+
+### Socket paths
+- Preferred: `$XDG_RUNTIME_DIR/axiom/axiom.sock`
+- Fallback (when `XDG_RUNTIME_DIR` is unavailable): `/tmp/axiom-<pid>/axiom-lazy-ui.sock`
+
+Because the fallback path is process-specific, helper clients in this repo support manual override via `AXIOM_SOCKET_PATH` and also scan the fallback pattern automatically.
+
+### Currently supported optimization surface
+
+Persistent config mutations via `OptimizeConfig` / `SetConfig` are currently limited to:
+- `effects.blur.radius`
+- `effects.animations.duration`
+- `workspace.scroll_speed`
+
+Runtime effects tuning via `EffectsControl` currently supports:
+- `enabled`
+- `blur_radius`
+- `animation_speed`
+
+Helper clients in this repository now restrict themselves to those supported keys/fields.
+
+### Try the test client
+```bash
 python3 test_ipc.py
 ```
 
-## 🤝 Contributing
+## Documentation
 
-Axiom is designed to be welcoming to contributors of all skill levels:
+### User docs
+- [Installation](docs/user/INSTALL.md)
+- [Running](docs/user/RUNNING.md)
+- [Configuration](docs/user/CONFIGURATION.md)
+- [Known Limitations](docs/user/LIMITATIONS.md)
 
-- **🐛 Bug Reports**: Help us identify issues
-- **💡 Feature Ideas**: Share your vision
-- **📝 Code**: Rust developers welcome!
-- **📚 Documentation**: Help others understand Axiom
+### Developer docs
+- [Backend Selection](docs/dev/BACKEND_SELECTION.md)
+- [Render Architecture](docs/dev/RENDER_ARCHITECTURE.md)
+- [Config Support Matrix](docs/dev/CONFIG_SUPPORT.md)
+- [Build Notes](docs/dev/BUILD.md)
+- [DRM Hardware Validation](docs/dev/DRM_HARDWARE_VALIDATION.md)
+- [Release Checklist](docs/dev/RELEASE_CHECKLIST.md)
+- [Release Process](docs/dev/RELEASE_PROCESS.md)
+- [Release Notes Template](docs/dev/RELEASE_NOTES_TEMPLATE.md)
+- [Contributing](docs/dev/CONTRIBUTING.md)
+- [Setup](docs/dev/SETUP.md)
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+## Contributing
 
-## 🎨 Inspiration
+Contributions are welcome, but please treat the project as an active alpha.
 
-Axiom stands on the shoulders of giants:
+See [docs/dev/CONTRIBUTING.md](docs/dev/CONTRIBUTING.md).
 
-- **[niri](https://github.com/YaLTeR/niri)** - Revolutionary scrollable workspace concept
-- **[Hyprland](https://github.com/hyprwm/Hyprland)** - Beautiful animations and effects
-- **[wlroots](https://gitlab.freedesktop.org/wlroots/wlroots)** - Solid compositor foundation
+## Inspiration
 
-## 📄 License
+- [niri](https://github.com/YaLTeR/niri)
+- [Hyprland](https://github.com/hyprwm/Hyprland)
+- [Smithay](https://github.com/Smithay/smithay)
 
-GPLv3 - keeping the Linux desktop ecosystem open and free.
+## License
 
-## 🌟 Why Axiom?
-
-*"An axiom is a statement that is taken to be true, serving as a premise for further reasoning."*
-
-Our axiom: **You shouldn't have to choose between productivity and beauty.**
-
----
-
-**Star this repo if you're excited about the future of Wayland compositors! ⭐**
+GPL-3.0

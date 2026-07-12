@@ -4,6 +4,48 @@ Axiom uses a TOML configuration file.
 
 **Location:** `~/.config/axiom/axiom.toml`
 
+## Support status
+
+Because Axiom is still in alpha, not every parsed setting is fully wired into runtime behavior yet.
+
+### High-value settings that are currently applied
+- `window.focus_follows_mouse`
+- `input.keyboard_repeat_delay`
+- `input.keyboard_repeat_rate`
+- `workspace.scroll_speed`
+- `workspace.gaps`
+- `effects.enabled`
+- `effects.blur.radius`
+- `general.max_fps`
+
+### Settings that are accepted but still incomplete or informational in some paths
+Examples include:
+- `window.placement`
+- `window.default_layout`
+- `input.mouse_accel`
+- `input.touchpad_tap`
+- `input.natural_scrolling`
+- `general.vsync`
+
+### Decoration-related feature flags
+
+Axiom currently exposes two feature-gated decoration toggles in the config:
+
+```toml
+[features]
+enable_minimize = false
+enable_xdg_decoration_protocol = false
+```
+
+Important current behavior:
+- `enable_minimize = true` enables the compositor-side minimize affordance.
+- `enable_xdg_decoration_protocol = true` can register the xdg-decoration protocol global.
+- **However, enabling the decoration protocol does not mean Axiom renders visible live server-side decorations yet.**
+- In the current alpha, the compositor still negotiates **client-side decorations** in the live runtime path.
+
+For the full field-by-field matrix, see:
+- [Developer config support matrix](../dev/CONFIG_SUPPORT.md)
+
 ## Example Configuration
 
 ```toml

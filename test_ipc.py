@@ -6,16 +6,40 @@ This script demonstrates how Lazy UI can communicate with the Axiom compositor
 via Unix sockets using the JSON message protocol.
 """
 
+import glob
 import json
+import os
 import socket
-import time
 import sys
+import time
+
+
+def discover_socket_path() -> str:
+    """Find the Axiom IPC socket used by the current compositor instance."""
+    override = os.environ.get("AXIOM_SOCKET_PATH")
+    if override:
+        return override
+
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        candidate = os.path.join(runtime_dir, "axiom", "axiom.sock")
+        if os.path.exists(candidate):
+            return candidate
+
+    # Fallback path used by the compositor when XDG_RUNTIME_DIR is unavailable.
+    matches = sorted(glob.glob("/tmp/axiom-*/axiom-lazy-ui.sock"))
+    if matches:
+        return matches[-1]
+
+    # Return the preferred path for error messages even if it doesn't exist.
+    if runtime_dir:
+        return os.path.join(runtime_dir, "axiom", "axiom.sock")
+    return "/tmp/axiom-<pid>/axiom-lazy-ui.sock"
+
 
 def test_axiom_ipc():
     """Test communication with Axiom compositor via IPC."""
-    import os
-    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
-    socket_path = os.path.join(runtime_dir, "axiom", "axiom.sock")
+    socket_path = discover_socket_path()
     
     print("🔍 Testing Axiom IPC communication...")
     
@@ -43,7 +67,7 @@ def test_axiom_ipc():
         
         # Test 2: Send configuration query
         print("\n⚙️ Testing configuration query...")
-        config_query = {"type": "GetConfig", "key": "workspace.count"}
+        config_query = {"type": "GetConfig", "key": "workspace.scroll_speed"}
         sock.send((json.dumps(config_query) + "\n").encode())
         
         response = sock.recv(4096).decode().strip()
@@ -56,8 +80,8 @@ def test_axiom_ipc():
         optimization = {
             "type": "OptimizeConfig",
             "changes": {
-                "effects.blur_radius": 5.0,
-                "workspace.animation_speed": 0.8
+                "effects.blur.radius": 5.0,
+                "workspace.scroll_speed": 0.8
             },
             "reason": "AI performance optimization based on usage patterns"
         }
@@ -79,7 +103,10 @@ def test_axiom_ipc():
         print(f"❌ IPC test failed: {e}")
         return False
     finally:
-        sock.shutdown(socket.SHUT_RDWR)
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         sock.close()
     
     return True
@@ -88,17 +115,15 @@ def main():
     """Main test function."""
     print("🚀 Axiom IPC Communication Test")
     print("=" * 40)
-    
-    # Test if socket exists
-    import os
-    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
-    socket_path = os.path.join(runtime_dir, "axiom", "axiom.sock")
-    
+
+    socket_path = discover_socket_path()
+
     if not os.path.exists(socket_path):
         print(f"⚠️  Socket file not found: {socket_path}")
         print("   To test IPC communication:")
         print("   1. Start Axiom in one terminal: ./target/debug/axiom --debug --windowed")
-        print("   2. Run this test in another terminal: python3 test_ipc.py")
+        print("   2. If needed, export AXIOM_SOCKET_PATH=/actual/socket/path")
+        print("   3. Run this test in another terminal: python3 test_ipc.py")
         return 1
     
     success = test_axiom_ipc()

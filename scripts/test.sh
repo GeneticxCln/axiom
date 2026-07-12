@@ -136,6 +136,44 @@ run_integration_tests() {
     fi
 }
 
+run_nested_smoke_tests() {
+    print_section "Nested Wayland Smoke Test"
+
+    if ! command -v weston-terminal &> /dev/null; then
+        echo -e "${YELLOW}ℹ️  weston-terminal not found, skipping nested smoke test${NC}"
+        echo "Install with: sudo apt-get install weston"
+        return 0
+    fi
+
+    if [[ "$HEADLESS" == "true" ]]; then
+        if command -v xvfb-run &> /dev/null; then
+            run_test "Nested Smoke Test" "xvfb-run -a bash ./scripts/nested_smoke_test.sh ./target/debug/axiom"
+        elif [[ -n "${DISPLAY:-}" ]]; then
+            echo -e "${YELLOW}ℹ️  xvfb-run not found, using existing DISPLAY for nested smoke test${NC}"
+            run_test "Nested Smoke Test" "bash ./scripts/nested_smoke_test.sh ./target/debug/axiom"
+        else
+            echo -e "${YELLOW}ℹ️  No xvfb-run or DISPLAY available, skipping nested smoke test${NC}"
+        fi
+    else
+        run_test "Nested Smoke Test" "bash ./scripts/nested_smoke_test.sh ./target/debug/axiom"
+    fi
+}
+
+run_packaging_checks() {
+    print_section "Packaging Build + Installed-Artifact Validation"
+    run_test "Packaging Build + Installed-Artifact Validation" "bash ./scripts/build_arch_package.sh run"
+}
+
+run_memory_safety_checks() {
+    print_section "Memory Safety Checks"
+    run_test "Memory Safety Checks" "bash ./scripts/memory_profile.sh valgrind-tests"
+}
+
+run_xwayland_checks() {
+    print_section "XWayland Validation"
+    run_test "XWayland Validation" "bash ./scripts/check_xwayland.sh all ./target/debug/axiom"
+}
+
 run_doc_tests() {
     print_section "Documentation Tests"
     run_test "Doc Tests" "cargo test --doc"
@@ -145,7 +183,7 @@ run_benchmark_tests() {
     print_section "Benchmark Tests"
     
     if [[ -d "benches" ]]; then
-        run_test "Benchmarks" "cargo bench --no-run" true
+        run_test "Benchmarks" "bash ./scripts/benchmark.sh run" true
     else
         echo -e "${YELLOW}ℹ️  No benchmark directory found, skipping${NC}"
     fi
@@ -163,13 +201,7 @@ run_clippy_check() {
 
 run_security_audit() {
     print_section "Security Audit"
-    
-    if command -v cargo-audit &> /dev/null; then
-        run_test "Security Audit" "cargo audit" true
-    else
-        echo -e "${YELLOW}ℹ️  cargo-audit not installed, skipping${NC}"
-        echo "Install with: cargo install cargo-audit"
-    fi
+    run_test "Security Audit" "bash ./scripts/check_security.sh all"
 }
 
 # Function to generate test report
@@ -211,9 +243,21 @@ main() {
         "integration")
             run_integration_tests
             ;;
+        "nested-smoke")
+            run_nested_smoke_tests
+            ;;
         "lint")
             run_format_check
             run_clippy_check
+            ;;
+        "package")
+            run_packaging_checks
+            ;;
+        "memory")
+            run_memory_safety_checks
+            ;;
+        "xwayland")
+            run_xwayland_checks
             ;;
         "security")
             run_security_audit
@@ -237,6 +281,9 @@ main() {
             run_unit_tests
             run_property_tests
             run_integration_tests
+            run_nested_smoke_tests
+            run_packaging_checks
+            run_xwayland_checks
             run_doc_tests
             run_security_audit
             ;;
@@ -247,6 +294,9 @@ main() {
             run_unit_tests
             run_property_tests
             run_integration_tests
+            run_nested_smoke_tests
+            run_packaging_checks
+            run_xwayland_checks
             run_doc_tests
             run_benchmark_tests
             run_security_audit
@@ -270,7 +320,11 @@ show_help() {
     echo "  unit         - Unit tests only"
     echo "  property     - Property-based tests only"
     echo "  integration  - Integration tests only"
+    echo "  nested-smoke - Launch Axiom in nested mode and connect a real Wayland client"
     echo "  lint         - Code formatting and linting"
+    echo "  package      - Run real PKGBUILD stage validation"
+    echo "  memory       - Run valgrind-based memory safety checks"
+    echo "  xwayland     - Run XWayland validation (lifecycle + real-client smoke)"
     echo "  security     - Security audit"
     echo "  docs         - Documentation tests"
     echo "  bench        - Benchmark tests"
