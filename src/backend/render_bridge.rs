@@ -8,6 +8,32 @@
 use super::AxiomSmithayBackendReal;
 use anyhow::Result;
 use log::warn;
+use std::sync::OnceLock;
+
+fn ensure_gl_loaded() {
+    static LOADED: OnceLock<()> = OnceLock::new();
+    LOADED.get_or_init(|| {
+        unsafe {
+            gl::load_with(|name| {
+                let name_c = std::ffi::CString::new(name).unwrap();
+                let ptr = egl_get_proc_address(name_c.as_ptr());
+                std::mem::transmute::<*const std::ffi::c_void, *const std::ffi::c_void>(ptr)
+            });
+        }
+    });
+}
+fn egl_get_proc_address(name: *const i8) -> *const std::ffi::c_void {
+    // Load libEGL at runtime (already loaded by smithay's EGL context)
+    unsafe {
+        static EGL_LIB: std::sync::OnceLock<libloading::Library> = std::sync::OnceLock::new();
+        let lib = EGL_LIB.get_or_init(|| {
+            libloading::Library::new("libEGL.so.1").expect("Failed to load libEGL.so.1")
+        });
+        let func: libloading::Symbol<extern "C" fn(*const i8) -> *const std::ffi::c_void> =
+            lib.get(b"eglGetProcAddress").expect("eglGetProcAddress not found");
+        func(name)
+    }
+}
 
 impl AxiomSmithayBackendReal {
     /// Transitional nested presentation path: WGPU composes the full frame,
@@ -47,6 +73,10 @@ impl AxiomSmithayBackendReal {
     }
 
     /// Present a fully-composed RGBA frame through the temporary GL bridge.
+    /// Currently a no-op (just binds and returns) — the raw GL blit code
+    /// is temporarily disabled because NVIDIA's EGL implementation doesn't
+    /// support the gl::* calls from a smithay-managed context. A future
+    /// commit will restore this using smithay's GlesRenderer.
     pub(super) fn present_rgba_via_gl_bridge(
         &mut self,
         width: u32,
@@ -57,21 +87,6 @@ impl AxiomSmithayBackendReal {
             return Ok(());
         };
         backend.bind()?;
-
-        // SAFETY: the winit backend bound the current GL context above, so the
-        // cached shader/texture uploads below are valid GL operations.
-        let shader = unsafe { ensure_blit_shader(&mut self.blit_shader) };
-        // SAFETY: same current-context guarantee as above.
-        let tex = unsafe { update_blit_texture(&mut self.blit_texture, width, height, composed) };
-
-        // SAFETY: GL context is current and the uploaded texture/program are
-        // owned by this backend instance.
-        unsafe {
-            gl::ClearColor(0.08, 0.08, 0.12, 1.0);
-            gl::Clear(gl::COLOR_BUFFER_BIT);
-            draw_blit_quad(shader, tex);
-        }
-
         Ok(())
     }
 
@@ -80,12 +95,10 @@ impl AxiomSmithayBackendReal {
         let Some(backend) = self.winit_backend.as_mut() else {
             return Ok(());
         };
+        // Bind and submit without any GL calls — smithay's GlesRenderer
+        // already set up the framebuffer. A bare submit is enough to
+        // present the last rendered frame (or empty dark background).
         backend.bind()?;
-        // SAFETY: `backend.bind()` above made the GL context current.
-        unsafe {
-            gl::ClearColor(0.08, 0.08, 0.12, 1.0);
-            gl::Clear(gl::COLOR_BUFFER_BIT);
-        }
         Ok(())
     }
 }

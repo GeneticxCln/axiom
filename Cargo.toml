@@ -67,6 +67,7 @@ cgmath = "0.18"
 xkbcommon = "0.8"  # Smithay 0.7 backend uses xkbcommon for keyboard handling
 libc = "0.2"
 x11rb = "0.13"
+libloading = "0.8"
 gl = "0.14"  # OpenGL bindings for GLES 2.0 rendering pipeline (raw gl::* in backend)
 
 # Graphics and rendering

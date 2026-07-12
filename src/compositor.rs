@@ -79,11 +79,11 @@ impl AxiomCompositor {
         let (xwm_stream, xwayland_stream) =
             UnixStream::pair().context("Failed to create XWM/XWayland socket pair")?;
 
-        let wayland_display = backend.socket_name.clone();
+        let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
         xwayland_manager
             .write()
             .await
-            .restart_with_wm_stream_for_display(xwayland_stream, Some(wayland_display))
+            .restart_with_wm_stream_for_display(xwayland_stream, wayland_display)
             .await
             .context("Failed to restart XWayland with compositor XWM stream")?;
 

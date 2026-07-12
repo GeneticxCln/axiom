@@ -199,6 +199,7 @@ dependencies = [
  "gl",
  "input",
  "libc",
+ "libloading 0.8.9",
  "log",
  "mockall",
  "parking_lot",
