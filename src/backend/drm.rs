@@ -18,12 +18,14 @@
 use calloop::generic::Generic;
 use calloop::{EventLoop, Interest, LoopHandle, Mode as CalloopMode, PostAction};
 use drm::control::{
-    connector, crtc, encoder, framebuffer, Device as ControlDevice, Event, Mode, ResourceHandles,
+    connector, crtc, encoder, framebuffer, Device as ControlDevice, Event, Mode, PageFlipFlags,
+    ResourceHandles,
 };
 use drm::Device;
 use gbm::{BufferObjectFlags, Device as GbmDevice, Format as GbmFormat};
 use input::{Libinput, LibinputInterface};
 use log::{debug, info, warn};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
@@ -268,6 +270,11 @@ pub struct KmsOutput {
     cpu_scanout: Option<CpuScanoutBuffer>,
     /// Currently displayed DRM framebuffer handle.
     current_fb: framebuffer::Handle,
+    /// FIFO of framebuffers still being scanned out by a previous page-flip.
+    /// Must be kept alive until the flip completes (DRM retains a GEM ref
+    /// during scanout, but dropping the `gbm::BufferObject` would release
+    /// the underlying GEM object, creating a dangling FB reference).
+    pending_fbs: VecDeque<framebuffer::Handle>,
     /// Saved CRTC state for restoration on shutdown.
     saved_crtc: Option<crtc::Info>,
 }
@@ -508,6 +515,7 @@ impl KmsState {
                     cpu_scanout,
                     current_fb: scanout_fb,
                     saved_crtc,
+                    pending_fbs: VecDeque::new(),
                 });
             } else if let Some(ref gbm_state) = gbm {
                 // SAFETY: Initial modeset — no prior EGL rendering.
@@ -530,6 +538,7 @@ impl KmsState {
                     cpu_scanout: None,
                     current_fb: fb,
                     saved_crtc,
+                    pending_fbs: VecDeque::new(),
                 });
             } else {
                 let (fb, _dumb) = Self::create_dumb_framebuffer(&card, width, height)?;
@@ -550,6 +559,7 @@ impl KmsState {
                     cpu_scanout: None,
                     current_fb: fb,
                     saved_crtc,
+                    pending_fbs: VecDeque::new(),
                 });
             }
 
@@ -643,11 +653,12 @@ impl KmsState {
         Ok(results)
     }
 
-    /// Render frames to ALL outputs. Iterates every [`KmsOutput`], locks
-    /// the GBM front buffer, creates a new framebuffer, and performs a
-    /// synchronous CRTC mode set. Dumb-buffer outputs are skipped (no-op).
+    /// Render frames to ALL outputs. Lock a new GBM front buffer, create a DRM
+    /// framebuffer, and issue an asynchronous page-flip. The old framebuffer is
+    /// kept alive in `pending_fbs` until the page-flip completes (see
+    /// [`receive_events`]).
     ///
-    /// Returns the count of outputs that were actually rendered (GBM path).
+    /// Returns the count of outputs that were actually flipped (GBM path).
     pub fn render_all_frames(&mut self) -> usize {
         let mut rendered = 0usize;
         for output in &mut self.outputs {
@@ -656,9 +667,6 @@ impl KmsState {
                 None => continue,
             };
 
-            // SAFETY: Synchronous set_crtc ensures the previous frame's
-            // buffer is no longer being scanned out before we lock the
-            // next one. The kernel holds a GEM reference across frames.
             let (new_fb, _front) = match unsafe { gbm.lock_and_create_fb(&self.card) } {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -667,29 +675,30 @@ impl KmsState {
                 }
             };
 
-            let old_fb = output.current_fb;
-            if let Err(e) = self.card.set_crtc(
-                output.crtc,
-                Some(new_fb),
-                (0, 0),
-                &[output.connector],
-                Some(output.mode),
-            ) {
-                warn!("set_crtc failed for '{}': {}", output.name, e);
+            let old_fb = std::mem::replace(&mut output.current_fb, new_fb);
+            output.pending_fbs.push_back(old_fb);
+
+            if let Err(e) = self
+                .card
+                .page_flip(output.crtc, new_fb, PageFlipFlags::EVENT, None)
+            {
+                warn!("page_flip failed for '{}': {}", output.name, e);
+                output.pending_fbs.pop_back();
+                output.current_fb = old_fb;
                 continue;
             }
 
-            let _ = self.card.destroy_framebuffer(old_fb);
-            output.current_fb = new_fb;
             rendered += 1;
         }
         if rendered > 0 {
-            debug!("Rendered {} output(s)", rendered);
+            debug!("Page-flip queued for {} output(s)", rendered);
         }
         rendered
     }
 
     /// Drain pending DRM events (page-flip, vblank) from the card.
+    /// On page-flip completion, the oldest pending framebuffer for that
+    /// CRTC is freed.
     pub fn receive_events(&mut self) -> Result<Vec<Event>, anyhow::Error> {
         let fd = self.card.raw_fd();
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -705,7 +714,19 @@ impl KmsState {
                 for ev in ev_iter {
                     match &ev {
                         Event::PageFlip(flip) => {
-                            debug!("Page flip complete (frame: {})", flip.frame);
+                            debug!(
+                                "Page flip complete (crtc: {}, frame: {})",
+                                u32::from(flip.crtc),
+                                flip.frame
+                            );
+                            for output in &mut self.outputs {
+                                if output.crtc == flip.crtc {
+                                    if let Some(old_fb) = output.pending_fbs.pop_front() {
+                                        let _ = self.card.destroy_framebuffer(old_fb);
+                                    }
+                                    break;
+                                }
+                            }
                         }
                         Event::Vblank(vb) => {
                             debug!("Vblank (frame: {})", vb.frame);
@@ -732,6 +753,13 @@ impl KmsState {
         info!("Cleaning up KMS state ({} outputs)", self.outputs.len());
 
         for output in &mut self.outputs {
+            // Drain any remaining pending FBs (from uncompleted page-flips)
+            while let Some(pending_fb) = output.pending_fbs.pop_front() {
+                if pending_fb != output.current_fb {
+                    let _ = self.card.destroy_framebuffer(pending_fb);
+                }
+            }
+
             if let Some(ref saved) = output.saved_crtc {
                 if let Some(fb_handle) = saved.framebuffer() {
                     let (saved_x, saved_y) = saved.position();
