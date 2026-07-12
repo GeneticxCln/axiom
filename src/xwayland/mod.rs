@@ -100,12 +100,6 @@ impl XWaylandManager {
             start_time: Instant::now(),
         };
 
-        if config.enabled {
-            if let Err(e) = manager.start_server().await {
-                log::error!("Failed to auto-start XWayland: {}", e);
-            }
-        }
-
         Ok(manager)
     }
 
