@@ -289,6 +289,44 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {{
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gaussian_weights_sum_to_one() {
+        for sigma in [0.5, 1.0, 2.0, 3.0, 5.0] {
+            let w = compute_gaussian_weights(sigma, 4);
+            let sum: f32 = w.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_gaussian_weights_symmetric() {
+        let w = compute_gaussian_weights(2.0, 4);
+        let n = w.len();
+        for i in 0..n {
+            assert!((w[i] - w[n - 1 - i]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_generates_correct_sample_count() {
+        let w = compute_gaussian_weights(2.0, 2);
+        let s = generate_blur_wgsl("H", &w);
+        assert_eq!(s.matches("step *").count(), 5);
+    }
+
+    #[test]
+    fn test_generated_wgsl_has_required_functions() {
+        let w = compute_gaussian_weights(2.0, 4);
+        let s = generate_blur_wgsl("H", &w);
+        assert!(s.contains("vs_main"));
+        assert!(s.contains("fs_main"));
+    }
+}
+
 /// Drop shadow shader
 const DROP_SHADOW_SHADER: &str = r"
 // Drop shadow rendering shader — fullscreen quad vertex + distance-field fragment

@@ -732,7 +732,7 @@ async fn test_prepare_window_resources_opacity_recreation() -> Result<()> {
     assert_eq!(renderer.windows[0].cached_opacity, 1.0, "initial opacity");
 
     // Mutate opacity — should leave cache stale
-    renderer.upsert_window_rect(1, (100.0, 200.0), (400.0, 300.0), 0.5);
+    renderer.upsert_window_rect(1, (100.0, 200.0), (400.0, 300.0), 0.5, [0.0, 0.0, 0.0, 0.0]);
     assert!((renderer.windows[0].opacity - 0.5).abs() < f32::EPSILON);
     assert!(
         (renderer.windows[0].cached_opacity - 1.0).abs() < f32::EPSILON,
@@ -783,7 +783,7 @@ async fn test_prepare_window_resources_size_recreation() -> Result<()> {
     renderer.prepare_window_resources();
 
     // Change size — position stays the same
-    renderer.upsert_window_rect(1, (100.0, 200.0), (600.0, 450.0), 1.0);
+    renderer.upsert_window_rect(1, (100.0, 200.0), (600.0, 450.0), 1.0, [0.0, 0.0, 0.0, 0.0]);
 
     // Caches should be stale
     assert_eq!(renderer.windows[0].size, (600.0, 450.0));
@@ -835,7 +835,7 @@ async fn test_prepare_window_resources_position_recreation() -> Result<()> {
     renderer.prepare_window_resources();
 
     // Move the window — position changes, size stays the same
-    renderer.upsert_window_rect(1, (300.0, 500.0), (400.0, 300.0), 1.0);
+    renderer.upsert_window_rect(1, (300.0, 500.0), (400.0, 300.0), 1.0, [0.0, 0.0, 0.0, 0.0]);
 
     assert_eq!(renderer.windows[0].position, (300.0, 500.0));
     assert_eq!(
@@ -927,7 +927,7 @@ async fn test_prepare_window_resources_creates_buffers_for_placeholder_window() 
 
     let mut renderer = AxiomRenderer::new_headless().await?;
     // upsert_window_rect does NOT set a texture — only geometry
-    renderer.upsert_window_rect(1, (100.0, 200.0), (400.0, 300.0), 1.0);
+    renderer.upsert_window_rect(1, (100.0, 200.0), (400.0, 300.0), 1.0, [0.0, 0.0, 0.0, 0.0]);
 
     assert!(
         renderer.windows[0].texture_view.is_none(),
@@ -1001,7 +1001,7 @@ async fn test_compose_full_frame_with_mixed_windows() -> Result<()> {
 
     // ── Window 2: placeholder (no committed texture), offset so it
     //     does not overlap window 1. ─────────────────────────────
-    renderer.upsert_window_rect(2, (64.0, 16.0), (32.0, 32.0), 0.75);
+    renderer.upsert_window_rect(2, (64.0, 16.0), (32.0, 32.0), 0.75, [0.0, 0.0, 0.0, 0.0]);
 
     let composed = renderer.compose_full_frame(128, 64)?;
 
@@ -1098,7 +1098,7 @@ async fn test_compose_full_frame_skips_untextured_windows() -> Result<()> {
     renderer.update_window_texture(1, 32, 32, &red_tex);
 
     // ── Window 2: untextured — must NOT draw in release ──────────
-    renderer.upsert_window_rect(2, (64.0, 16.0), (32.0, 32.0), 1.0);
+    renderer.upsert_window_rect(2, (64.0, 16.0), (32.0, 32.0), 1.0, [0.0, 0.0, 0.0, 0.0]);
 
     let composed = renderer.compose_full_frame(128, 64)?;
 
@@ -1165,7 +1165,7 @@ async fn test_prepare_window_resources_skips_untextured_window() -> Result<()> {
 
     let mut renderer = AxiomRenderer::new_headless().await?;
     // upsert_window_rect does NOT set a texture — only geometry.
-    renderer.upsert_window_rect(1, (100.0, 200.0), (400.0, 300.0), 1.0);
+    renderer.upsert_window_rect(1, (100.0, 200.0), (400.0, 300.0), 1.0, [0.0, 0.0, 0.0, 0.0]);
 
     assert!(
         renderer.windows[0].texture_view.is_none(),
@@ -1628,7 +1628,7 @@ async fn test_two_overlapping_windows_alpha_blend() -> Result<()> {
     let green_tex = make_solid_texture_rgba(0, 255, 0, 255);
     // Use upsert for window 2 so we can set opacity=0.5 directly.
     // add_window would default to opacity=1.0.
-    renderer.upsert_window_rect(2, (32.0, 32.0), (64.0, 64.0), 0.5);
+    renderer.upsert_window_rect(2, (32.0, 32.0), (64.0, 64.0), 0.5, [0.0, 0.0, 0.0, 0.0]);
     renderer.update_window_texture(2, 32, 32, &green_tex);
 
     // ── Composite via render pipeline ─────────────────────────────
@@ -1735,7 +1735,7 @@ async fn test_reverse_draw_order_red_dominant_blend() -> Result<()> {
     // ── Window 1: solid green, half-opacity, at top-left (bottom) ──
     // Use upsert for window 1 with opacity=0.5.
     let green_tex = make_solid_texture_rgba(0, 255, 0, 255);
-    renderer.upsert_window_rect(1, (0.0, 0.0), (64.0, 64.0), 0.5);
+    renderer.upsert_window_rect(1, (0.0, 0.0), (64.0, 64.0), 0.5, [0.0, 0.0, 0.0, 0.0]);
     renderer.update_window_texture(1, 32, 32, &green_tex);
 
     // ── Window 2: solid red, fully opaque, offset to overlap (top) ──

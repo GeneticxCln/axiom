@@ -1262,7 +1262,7 @@ impl AxiomRenderer {
     /// Composite the full frame to a headless target and read back to CPU.
     /// Only used in tests now — production uses render_output (winit) or
     /// software composite (DRM).
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn compose_full_frame(&mut self, width: u32, height: u32) -> Result<Vec<u8>> {
         use cgmath::Vector2;
 
