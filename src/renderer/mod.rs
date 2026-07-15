@@ -751,23 +751,26 @@ impl AxiomRenderer {
     /// way out. The `Surface` itself isn't `Clone` in wgpu 0.19, so this
     /// swap pattern is the simplest correct fix.
     pub fn render_output(&mut self, output_name: &str) -> Result<()> {
-        if let Some((key, (surface, config))) = self.surfaces.remove_entry(output_name) {
-            let config_clone = config.clone();
-            let result = match surface.get_current_texture() {
-                Ok(frame) => {
-                    let render_result = self.render_to_surface_auto(&surface, &frame);
-                    if render_result.is_ok() {
-                        frame.present();
+        if let Some((key, (mut surface, config))) = self.surfaces.remove_entry(output_name) {
+            let result = loop {
+                match surface.get_current_texture() {
+                    Ok(frame) => {
+                        let render_result = self.render_to_surface_auto(&surface, &frame);
+                        if render_result.is_ok() {
+                            frame.present();
+                        }
+                        break render_result;
                     }
-                    render_result
-                }
-                Err(e) => {
-                    log::warn!("Failed to get current texture for output {}: {}", key, e);
-                    Err(anyhow::anyhow!(e))
+                    Err(wgpu::SurfaceError::Outdated) => {
+                        let new_config = config.clone();
+                        surface.configure(self.device(), &new_config);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to get current texture for {}: {}", key, e);
+                        break Err(anyhow::anyhow!(e));
+                    }
                 }
             };
-            // Always re-insert so the surface survives the call regardless
-            // of whether rendering succeeded.
             self.surfaces.insert(key, (surface, config));
             result
         } else {
