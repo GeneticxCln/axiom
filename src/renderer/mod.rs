@@ -1259,6 +1259,10 @@ impl AxiomRenderer {
     ///
     /// The per-frame shadow and blur queues are consumed by this call.
     /// Returns `width * height * 4` bytes of RGBA8.
+    /// Composite the full frame to a headless target and read back to CPU.
+    /// Only used in tests now — production uses render_output (winit) or
+    /// software composite (DRM).
+    #[cfg(test)]
     pub fn compose_full_frame(&mut self, width: u32, height: u32) -> Result<Vec<u8>> {
         use cgmath::Vector2;
 
