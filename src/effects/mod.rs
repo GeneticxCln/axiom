@@ -983,7 +983,6 @@ impl EffectsEngine {
             self.blur_renderer = Some(blur::BlurRenderer::new(
                 device.clone(),
                 queue.clone(),
-                shader_manager.clone(),
                 blur_params,
             )?);
             debug!("🌊 GPU blur renderer initialized");

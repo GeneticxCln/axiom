@@ -54,12 +54,10 @@ pub struct BlurParams {
 pub struct BlurRenderer {
     device: Arc<Device>,
     queue: Arc<Queue>,
-    shader_manager: Arc<ShaderManager>,
 
     // Render pipelines for different blur passes
     horizontal_blur_pipeline: Option<RenderPipeline>,
     vertical_blur_pipeline: Option<RenderPipeline>,
-
     // Cached bind group layout (shared by both H/V pipelines)
     blur_bind_group_layout: Option<wgpu::BindGroupLayout>,
 
@@ -100,7 +98,6 @@ impl BlurRenderer {
     pub fn new(
         device: Arc<Device>,
         queue: Arc<Queue>,
-        shader_manager: Arc<ShaderManager>,
         initial_params: BlurParams,
     ) -> Result<Self> {
         info!("🌊 Initializing GPU Blur Renderer...");
@@ -132,7 +129,6 @@ impl BlurRenderer {
         let mut renderer = Self {
             device,
             queue,
-            shader_manager,
             horizontal_blur_pipeline: None,
             vertical_blur_pipeline: None,
             blur_bind_group_layout: None,
@@ -155,15 +151,30 @@ impl BlurRenderer {
     fn create_blur_pipelines(&mut self) -> Result<()> {
         debug!("🔧 Creating blur render pipelines...");
 
-        // Get compiled shaders
-        let horizontal_shader = self
-            .shader_manager
-            .get_shader(&ShaderType::BlurHorizontal)
-            .ok_or_else(|| anyhow::anyhow!("Horizontal blur shader not found"))?;
-        let vertical_shader = self
-            .shader_manager
-            .get_shader(&ShaderType::BlurVertical)
-            .ok_or_else(|| anyhow::anyhow!("Vertical blur shader not found"))?;
+        // Compute Gaussian weights from current sigma
+        let radius = match &self.current_params.blur_type {
+            BlurType::Gaussian { radius, .. }
+            | BlurType::Background { radius, .. }
+            | BlurType::Window { radius, .. }
+            | BlurType::Bokeh { radius, .. } => *radius,
+        };
+        let sigma = (radius / 2.0).max(0.5);
+        let weights = super::shaders::compute_gaussian_weights(sigma, 4);
+        let wgsl_h = super::shaders::generate_blur_wgsl("Horizontal", &weights);
+        let wgsl_v = super::shaders::generate_blur_wgsl("Vertical", &weights);
+
+        let horizontal_shader = self.device.create_shader_module(
+            wgpu::ShaderModuleDescriptor {
+                label: Some("Horizontal Blur (dynamic sigma)"),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(wgsl_h)),
+            }
+        );
+        let vertical_shader = self.device.create_shader_module(
+            wgpu::ShaderModuleDescriptor {
+                label: Some("Vertical Blur (dynamic sigma)"),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(wgsl_v)),
+            }
+        );
 
         // Create bind group layout for blur uniforms and textures
         let bind_group_layout =
@@ -220,12 +231,12 @@ impl BlurRenderer {
                 label: Some("Horizontal Blur Pipeline"),
                 layout: Some(&pipeline_layout),
                 vertex: VertexState {
-                    module: horizontal_shader,
+                    module: &horizontal_shader,
                     entry_point: "vs_main",
                     buffers: &[],
                 },
                 fragment: Some(FragmentState {
-                    module: horizontal_shader,
+                    module: &horizontal_shader,
                     entry_point: "fs_main",
                     targets: &[Some(ColorTargetState {
                         format: TextureFormat::Bgra8UnormSrgb,
@@ -246,12 +257,12 @@ impl BlurRenderer {
                 label: Some("Vertical Blur Pipeline"),
                 layout: Some(&pipeline_layout),
                 vertex: VertexState {
-                    module: vertical_shader,
+                    module: &vertical_shader,
                     entry_point: "vs_main",
                     buffers: &[],
                 },
                 fragment: Some(FragmentState {
-                    module: vertical_shader,
+                    module: &vertical_shader,
                     entry_point: "fs_main",
                     targets: &[Some(ColorTargetState {
                         format: TextureFormat::Bgra8UnormSrgb,

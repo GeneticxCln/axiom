@@ -201,20 +201,57 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 ";
 
-/// Horizontal blur pass shader
-const BLUR_HORIZONTAL_SHADER: &str = r"
-// Horizontal Gaussian blur pass — fullscreen triangle vertex + 9-tap fragment
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) tex_coords: vec2<f32>,
+/// Horizontal blur pass shader (weights generated dynamically at runtime).
+/// Use [`generate_blur_wgsl`] instead.
+pub const BLUR_HORIZONTAL_SHADER: &str = "// replaced by generate_blur_wgsl";
+
+/// Vertical blur pass shader (weights generated dynamically at runtime).
+/// Use [`generate_blur_wgsl`] instead.
+pub const BLUR_VERTICAL_SHADER: &str = "// replaced by generate_blur_wgsl";
+
+/// Compute normalized Gaussian weights for a 1D kernel.
+pub fn compute_gaussian_weights(sigma: f32, taps: i32) -> Vec<f32> {
+    let mut weights = Vec::with_capacity((taps * 2 + 1) as usize);
+    let sigma2 = sigma * sigma;
+    let mut sum = 0.0f64;
+    for i in -(taps)..=taps {
+        let w = (-(i * i) as f64 / (2.0 * sigma2 as f64)).exp();
+        weights.push(w as f32);
+        sum += w;
+    }
+    // Normalize
+    for w in &mut weights {
+        *w /= sum as f32;
+    }
+    weights
 }
 
-struct BlurUniforms {
+/// Generate a WGSL blur fragment shader with the given direction and weights.
+pub fn generate_blur_wgsl(direction: &str, weights: &[f32]) -> String {
+    let taps = (weights.len() as i32 - 1) / 2;
+    let mut body = String::new();
+    for i in -(taps)..=taps {
+        let w = weights[(i + taps) as usize];
+        body.push_str(&format!(
+            "    result += textureSample(input_texture, input_sampler, input.tex_coords + step * {}.0) * {:.6};",
+            i, w
+        ));
+        body.push('\n');
+    }
+    format!(
+        r"
+// {} Gaussian blur pass — fullscreen triangle vertex + {} tap fragment
+struct VertexOutput {{
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) tex_coords: vec2<f32>,
+}}
+
+struct BlurUniforms {{
     radius: f32,
     intensity: f32,
     direction: vec2<f32>,
     texture_size: vec2<f32>,
-}
+}}
 
 @group(0) @binding(0)
 var<uniform> blur: BlurUniforms;
@@ -226,87 +263,31 @@ var input_texture: texture_2d<f32>;
 var input_sampler: sampler;
 
 @vertex
-fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {{
     var out: VertexOutput;
     let x = select(-1.0, 3.0, idx == 1u);
     let y = select(-1.0, 3.0, idx == 2u);
     out.clip_position = vec4<f32>(x, y, 0.0, 1.0);
     out.tex_coords = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
     return out;
-}
-
+}}
 
 @fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {{
     let tex_offset = 1.0 / blur.texture_size;
     let step = tex_offset * blur.radius * blur.direction;
     
-    var result = textureSample(input_texture, input_sampler, input.tex_coords + step * -4.0) * 0.0276;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -3.0) * 0.0663;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -2.0) * 0.1239;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -1.0) * 0.1801;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 0.0) * 0.2041;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 1.0) * 0.1801;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 2.0) * 0.1239;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 3.0) * 0.0663;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 4.0) * 0.0276;
+    var result = textureSample(input_texture, input_sampler, input.tex_coords);
+    {}
     
     return mix(textureSample(input_texture, input_sampler, input.tex_coords), result, blur.intensity);
+}}
+",
+        direction,
+        weights.len(),
+        body
+    )
 }
-";
-
-/// Vertical blur pass shader (same vertex shader as horizontal, fullscreen triangle)
-const BLUR_VERTICAL_SHADER: &str = r"
-// Vertical Gaussian blur pass — fullscreen triangle vertex + 9-tap fragment
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) tex_coords: vec2<f32>,
-}
-
-struct BlurUniforms {
-    radius: f32,
-    intensity: f32,
-    direction: vec2<f32>,
-    texture_size: vec2<f32>,
-}
-
-@group(0) @binding(0)
-var<uniform> blur: BlurUniforms;
-
-@group(0) @binding(1)
-var input_texture: texture_2d<f32>;
-
-@group(0) @binding(2)
-var input_sampler: sampler;
-
-@vertex
-fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
-    var out: VertexOutput;
-    let x = select(-1.0, 3.0, idx == 1u);
-    let y = select(-1.0, 3.0, idx == 2u);
-    out.clip_position = vec4<f32>(x, y, 0.0, 1.0);
-    out.tex_coords = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
-    return out;
-}
-
-@fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let tex_offset = 1.0 / blur.texture_size;
-    let step = tex_offset * blur.radius * blur.direction;
-    
-    var result = textureSample(input_texture, input_sampler, input.tex_coords + step * -4.0) * 0.0947416;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -3.0) * 0.118318;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -2.0) * 0.0947416;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -1.0) * 0.118318;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 0.0) * 0.147761;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 1.0) * 0.118318;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 2.0) * 0.0947416;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 3.0) * 0.118318;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 4.0) * 0.0947416;
-    
-    return mix(textureSample(input_texture, input_sampler, input.tex_coords), result, blur.intensity);
-}
-";
 
 /// Drop shadow shader
 const DROP_SHADOW_SHADER: &str = r"
