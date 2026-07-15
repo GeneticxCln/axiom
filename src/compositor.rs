@@ -558,12 +558,12 @@ impl AxiomCompositor {
         self.apply_global_effects();
 
         // Performance monitoring for effects
-        let (frame_time, effects_quality, active_effects) =
+        let (effects_time, effects_quality, active_effects) =
             self.effects_engine.read().get_performance_stats();
-        if frame_time.as_millis() > 20 {
+        if effects_time.as_millis() > 20 {
             debug!(
-                "Frame time: {:.1}ms, effects quality: {:.1}, active effects: {}",
-                frame_time.as_secs_f64() * 1000.0,
+                "Effects time: {:.1}ms, quality: {:.1}, active: {}",
+                effects_time.as_secs_f64() * 1000.0,
                 effects_quality,
                 active_effects
             );

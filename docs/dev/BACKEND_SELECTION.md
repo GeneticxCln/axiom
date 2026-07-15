@@ -2,6 +2,37 @@
 
 Axiom currently supports three runtime backend modes.
 
+## 1. Winit backend (--windowed / --backend=winit) — recommended
+
+WGPU surface rendering: windows + effects rendered directly to the winit window via a wgpu::Surface. Zero CPU readback.
+
+The transitional GL bridge has been removed.
+
+### Example
+cargo run -- --windowed --debug
+
+## 2. DRM/KMS backend (--backend=drm) — alpha
+
+CPU software composite from buffer_cache to dumb-buffer. No WGPU, no effects. Multi-output, fractional scale.
+
+### Example
+cargo run -- --backend=drm
+
+## 3. Noop backend (--backend=noop) — headless/test
+
+## Accepted backend values
+
+winit (windowed, dev) | drm (kms, session, tty) | noop (test, headless)
+
+## Feature flags
+
+default | examples | demo
+
+xdg_decoration_protocol: off by default, negotiates CSD when enabled.
+enable_minimize: off by default.
+
+Axiom currently supports three runtime backend modes.
+
 ## 1. Winit backend (`--windowed` / `--backend=winit`)
 
 This is the **recommended alpha target**.

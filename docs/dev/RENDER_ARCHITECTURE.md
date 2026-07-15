@@ -1,5 +1,40 @@
 # Render Architecture
 
+## Current state (post-refactor)
+
+**WGPU is the compositor.** The GL bridge has been removed.
+
+### Winit path
+
+buffer_cache → WGPU texture upload → WGPU render (windows + effects) → WGPU surface → winit window
+
+Zero-copy GPU-only. Each frame:
+1. stage_wgpu_scene_from_state() uploads new window pixel data and updates rects
+2. render_output("primary") calls render_to_surface_auto() with effects
+3. frame.present() submits to the window system
+
+No CPU readback, no GL upload, no EGL swap.
+
+### DRM/KMS path
+
+buffer_cache → CPU software composite (RGBA→BGRA) → dumb-buffer → KMS page-flip
+
+GPU-free. No WGPU, no GPU stall. Effects not available in DRM mode.
+
+### Headless/test path
+
+compose_full_frame() still exists for integration test use only.
+
+## Scope boundaries
+
+WGPU: frame composition, effects, resource lifecycle.
+Backend: input/events, Wayland protocol, output setup, WGPU surface creation.
+DRM: device discovery, modesetting, software composite.
+
+## Non-goals
+
+DRM path is alpha (no effects, software composite). dma-buf zero-copy pending wgpu upstream.
+
 ## Decision
 
 **Axiom's primary compositor architecture is WGPU-first.**
