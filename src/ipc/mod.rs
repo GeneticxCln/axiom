@@ -56,6 +56,7 @@ const KNOWN_WORKSPACE_ACTIONS: &[&str] = &[
 /// mentions `0..=32` so an off-by-one normalised float gets caught early.
 const MAX_EFFECTS_BLUR_RADIUS_PX: f32 = 32.0;
 /// Maximum accepted animation speed multiplier (1.0 = realtime, >1 faster).
+#[cfg(test)]
 const MAX_EFFECTS_ANIMATION_SPEED: f32 = 10.0;
 /// Maximum accepted animation duration in milliseconds.
 const MAX_ANIMATION_DURATION_MS: u32 = 10_000;
@@ -371,10 +372,10 @@ impl AxiomIPCServer {
     /// tick) or refresh it after each tick. The compositor devolves to
     /// `set_live_metrics_snapshot` on the same handle from inside `tick()`.
     pub fn set_live_metrics_snapshot(&mut self, snapshot: LiveMetrics) {
-        let handle = self
+        *self
             .live_metrics_handle
-            .get_or_insert_with(|| Arc::new(parking_lot::RwLock::new(LiveMetrics::default())));
-        *handle.write() = snapshot;
+            .get_or_insert_with(|| Arc::new(parking_lot::RwLock::new(LiveMetrics::default())))
+            .write() = snapshot;
     }
 
     /// Build the WorkspaceCommand ACK UserEvent for the per-client handler.
@@ -390,8 +391,8 @@ impl AxiomIPCServer {
     /// forwards to `cmd_tx` and the compositor's dispatch arm owns the
     /// lifecycle). This constructor remains available for tests and
     /// any future code path that wants to emit a typed ACK without
-    /// going through the IPC channel.
-    #[allow(dead_code)]
+    /// without going through the IPC channel.
+    #[cfg(test)]
     pub(super) fn build_workspace_command_ack(action: &str, accepted: bool) -> AxiomMessage {
         AxiomMessage::UserEvent {
             // Fail loudly on a pre-1970 system clock rather than silently
@@ -426,7 +427,7 @@ impl AxiomIPCServer {
     /// lifecycle). This constructor remains available for tests and
     /// any future code path that wants to emit a typed ACK without
     /// going through the IPC channel.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn build_effects_control_ack(
         accepted: Vec<String>,
         rejected: Vec<(String, String)>,
@@ -995,17 +996,38 @@ impl AxiomIPCServer {
                 let mut rejected: Vec<(String, String)> = Vec::new();
                 for (key, value) in changes {
                     debug!("  📝 Setting {}: {:?}", key, value);
-                    // For now accept only whitelisted keys
-                    let ok = matches!(
-                        key.as_str(),
-                        "effects.blur.radius"
-                            | "effects.animations.duration"
-                            | "workspace.scroll_speed"
-                    );
-                    if ok {
-                        applied.push(key);
-                    } else {
-                        rejected.push((key, "unsupported_key".into()));
+                    let val_f64 = value.as_f64();
+                    match (key.as_str(), val_f64) {
+                        ("effects.blur.radius", Some(v))
+                            if v.is_finite()
+                                && (0.0..=MAX_EFFECTS_BLUR_RADIUS_PX as f64).contains(&v) =>
+                        {
+                            applied.push(key);
+                        }
+                        ("effects.animations.duration", Some(v))
+                            if v.is_finite()
+                                && (1.0..=MAX_ANIMATION_DURATION_MS as f64).contains(&v) =>
+                        {
+                            applied.push(key);
+                        }
+                        ("workspace.scroll_speed", Some(v))
+                            if v.is_finite() && v >= 0.0 && v <= MAX_SCROLL_SPEED =>
+                        {
+                            applied.push(key);
+                        }
+                        (k, _)
+                            if matches!(
+                                k,
+                                "effects.blur.radius"
+                                    | "effects.animations.duration"
+                                    | "workspace.scroll_speed"
+                            ) =>
+                        {
+                            rejected.push((key, "invalid_or_out_of_range_value".into()));
+                        }
+                        _ => {
+                            rejected.push((key, "unsupported_key".into()));
+                        }
                     }
                 }
                 // Send a simple acknowledgment as UserEvent for now
