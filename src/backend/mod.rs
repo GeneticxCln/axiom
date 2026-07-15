@@ -3240,7 +3240,13 @@ impl AxiomSmithayBackendReal {
             let y = rect.y as f32;
             let w = rect.width as f32;
             let h = rect.height as f32;
-            r.upsert_window_rect(*window_id, (x, y), (w, h), 1.0);
+            let focused = self.state.window_manager.read().focused_window_id() == Some(*window_id);
+            let border_color = if focused {
+                [0.3, 0.6, 1.0, 0.9]
+            } else {
+                [0.0, 0.0, 0.0, 0.0]
+            };
+            r.upsert_window_rect(*window_id, (x, y), (w, h), 1.0, border_color);
         }
 
         {
@@ -3257,7 +3263,9 @@ impl AxiomSmithayBackendReal {
                     let fy = w.window.position.1 as f32;
                     let fw = w.window.size.0 as f32;
                     let fh = w.window.size.1 as f32;
-                    r.upsert_window_rect(window_id, (fx, fy), (fw, fh), 1.0);
+                    let focused = wm.focused_window_id() == Some(window_id);
+                    let bc = if focused { [0.3, 0.6, 1.0, 0.9] } else { [0.0, 0.0, 0.0, 0.0] };
+                    r.upsert_window_rect(window_id, (fx, fy), (fw, fh), 1.0, bc);
                 }
             }
         }
@@ -3296,6 +3304,7 @@ impl AxiomSmithayBackendReal {
                 (popup_x as f32, popup_y as f32),
                 (popup_w, popup_h),
                 1.0,
+                [0.0, 0.0, 0.0, 0.0],
             );
             committed_popup_count += 1;
         }

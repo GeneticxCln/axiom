@@ -31,6 +31,7 @@ struct WindowUniforms {
     border_width: f32,
     window_width: f32,
     window_height: f32,
+    border_color: vec4<f32>,
 }
 
 @group(0) @binding(0)
@@ -49,11 +50,6 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Border region mirrors the textured shader so a freshly-committed
-    // window and a placeholder window look visually identical in their
-    // border. The "body" color matches the legacy scissor fallback in
-    // src/backend/mod.rs so visual parity is preserved during the
-    // refactor.
     let bw = window_uniforms.border_width;
     let ww = window_uniforms.window_width;
     let wh = window_uniforms.window_height;
@@ -62,7 +58,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         || input.tex_coords.y < bw / wh
         || input.tex_coords.y > 1.0 - bw / wh;
 
-    let border_color = vec4<f32>(0.15, 0.15, 0.15, 1.0);
+    let border_color = window_uniforms.border_color;
     let body_color = vec4<f32>(0.15, 0.15, 0.18, 1.0);
     let base = select(body_color, border_color, in_border);
     return vec4<f32>(base.rgb, base.a * window_uniforms.opacity);

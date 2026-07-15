@@ -161,6 +161,8 @@ pub struct RenderedWindow {
     pub dirty: bool,
     /// Window opacity
     pub opacity: f32,
+    /// Per-window border color for focus highlighting (RGBA)
+    pub border_color: [f32; 4],
 
     /// Cached uniform buffer — reused across frames to avoid per-frame GPU
     /// allocation. Recreated when opacity, size, or border width changes.
@@ -193,6 +195,7 @@ struct WindowUniforms {
     border_width: f32,
     window_width: f32,
     window_height: f32,
+    border_color: [f32; 4],
 }
 
 impl AxiomRenderer {
@@ -640,6 +643,7 @@ impl AxiomRenderer {
             texture_view: None,
             dirty: true,
             opacity: 1.0,
+            border_color: [0.0, 0.0, 0.0, 0.0],
             cached_uniform_buffer: None,
             cached_opacity: f32::NAN,
             cached_uniform_size: (f32::NAN, f32::NAN),
@@ -658,11 +662,13 @@ impl AxiomRenderer {
         position: (f32, f32),
         size: (f32, f32),
         opacity: f32,
+        border_color: [f32; 4],
     ) {
         if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
             w.position = position;
             w.size = size;
             w.opacity = opacity;
+            w.border_color = border_color;
             w.dirty = true;
         } else {
             let window = RenderedWindow {
@@ -673,6 +679,7 @@ impl AxiomRenderer {
                 texture_view: None,
                 dirty: true,
                 opacity,
+                border_color,
                 cached_uniform_buffer: None,
                 cached_opacity: f32::NAN,
                 cached_uniform_size: (f32::NAN, f32::NAN),
@@ -835,6 +842,7 @@ impl AxiomRenderer {
                     border_width: self.border_width,
                     window_width: window.size.0,
                     window_height: window.size.1,
+                    border_color: window.border_color,
                 };
                 window.cached_uniform_buffer = Some(self.device.create_buffer_init(
                     &wgpu::util::BufferInitDescriptor {
@@ -2244,6 +2252,7 @@ mod tests {
             texture_view: None,
             dirty: true,
             opacity: 1.0,
+            border_color: [0.0, 0.0, 0.0, 0.0],
             cached_uniform_buffer: None,
             cached_opacity: f32::NAN,
             cached_uniform_size: (f32::NAN, f32::NAN),
@@ -2403,7 +2412,7 @@ mod tests {
         renderer.windows[0].cached_uniform_size = (400.0, 300.0);
 
         // Resize the window (as the compositor does each frame)
-        renderer.upsert_window_rect(1, (0.0, 0.0), (600.0, 400.0), 1.0);
+        renderer.upsert_window_rect(1, (0.0, 0.0), (600.0, 400.0), 1.0, [0.0, 0.0, 0.0, 0.0]);
 
         let w = &renderer.windows[0];
         assert_eq!(w.size, (600.0, 400.0), "size should be updated");
@@ -2430,7 +2439,7 @@ mod tests {
         renderer.windows[0].cached_opacity = 1.0;
 
         // Change opacity via upsert
-        renderer.upsert_window_rect(1, (0.0, 0.0), (400.0, 300.0), 0.5);
+        renderer.upsert_window_rect(1, (0.0, 0.0), (400.0, 300.0), 0.5, [0.0, 0.0, 0.0, 0.0]);
 
         let w = &renderer.windows[0];
         assert!(

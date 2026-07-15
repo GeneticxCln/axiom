@@ -20,6 +20,7 @@ struct WindowUniforms {
     border_width: f32,
     window_width: f32,
     window_height: f32,
+    border_color: vec4<f32>,
 }
 
 @group(0) @binding(0)
@@ -44,18 +45,12 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Sample the window texture
     let color = textureSample(window_texture, window_sampler, input.tex_coords);
     
-    // Compute border region (in normalized texture coordinates)
     let bw = window_uniforms.border_width;
     let ww = window_uniforms.window_width;
     let wh = window_uniforms.window_height;
 
-    // Border color: semi-transparent dark border
-    let border_color = vec4<f32>(0.15, 0.15, 0.15, 0.9);
-
-    // Check if fragment is in border region
     let in_border = input.tex_coords.x < bw / ww
         || input.tex_coords.x > 1.0 - bw / ww
         || input.tex_coords.y < bw / wh
@@ -64,9 +59,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let opacity = window_uniforms.opacity;
 
     if (in_border) {
-        return vec4<f32>(border_color.rgb, border_color.a * opacity);
+        return vec4<f32>(window_uniforms.border_color.rgb, window_uniforms.border_color.a * opacity);
     } else {
-        // Apply gamma correction and opacity
         return vec4<f32>(pow(color.rgb, vec3<f32>(2.2)), color.a * opacity);
     }
 }

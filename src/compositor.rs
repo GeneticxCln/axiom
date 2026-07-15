@@ -543,7 +543,7 @@ impl AxiomCompositor {
                 let y = win_data.layout_rect.y as f32 + offset.1;
                 let w = win_data.layout_rect.width as f32 * scale;
                 let h = win_data.layout_rect.height as f32 * scale;
-                r.upsert_window_rect(win_data.id, (x, y), (w, h), opacity);
+                r.upsert_window_rect(win_data.id, (x, y), (w, h), opacity, [0.0, 0.0, 0.0, 0.0]);
             }
         }
 
