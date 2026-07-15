@@ -127,8 +127,8 @@ impl AxiomCompositor {
             // Arc::clone takes &Arc<T> and produces Arc<T> — both compile
             // cleanly with the `&self.device` borrow that survives until
             // the read guard is dropped at the bottom of this block.
-            let device_arc: Arc<wgpu::Device> = Arc::clone(renderer.read().device_arc());
-            let queue_arc: Arc<wgpu::Queue> = Arc::clone(renderer.read().queue_arc());
+            let device_arc: Arc<wgpu::Device> = Arc::clone(r.device_arc());
+            let queue_arc: Arc<wgpu::Queue> = Arc::clone(r.queue_arc());
             // Drop the renderer guard BEFORE acquiring the effects write.
             // The `Arc`s now own the GPU context; the read guard is gone
             // before `effects_engine.write()` is held, so renderer.write()

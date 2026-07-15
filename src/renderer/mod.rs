@@ -243,7 +243,7 @@ impl AxiomRenderer {
             .unwrap_or(surface_caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             format: surface_format,
             width,
             height,
@@ -590,7 +590,9 @@ impl AxiomRenderer {
             .unwrap_or(surface_caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
             format: surface_format,
             width,
             height,
@@ -753,7 +755,7 @@ impl AxiomRenderer {
             let config_clone = config.clone();
             let result = match surface.get_current_texture() {
                 Ok(frame) => {
-                    let render_result = self.render_to_surface(&surface, &config_clone, &frame);
+                    let render_result = self.render_to_surface_auto(&surface, &frame);
                     if render_result.is_ok() {
                         frame.present();
                     }

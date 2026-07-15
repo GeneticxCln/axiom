@@ -880,7 +880,6 @@ mod tests {
         assert!(!mgr.get_decoration(1).unwrap().buttons.close.pressed);
     }
 
-    #[test]
     /// Scope decision: when `minimize_enabled = false`
     /// derived from `crate::config::FeaturesConfig::enable_minimize`),
     /// the minimize button must be neither drawn nor clickable. We

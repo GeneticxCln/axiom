@@ -241,15 +241,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let tex_offset = 1.0 / blur.texture_size;
     let step = tex_offset * blur.radius * blur.direction;
     
-    var result = textureSample(input_texture, input_sampler, input.tex_coords + step * -4.0) * 0.0947416;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -3.0) * 0.118318;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -2.0) * 0.0947416;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -1.0) * 0.118318;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 0.0) * 0.147761;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 1.0) * 0.118318;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 2.0) * 0.0947416;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 3.0) * 0.118318;
-    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 4.0) * 0.0947416;
+    var result = textureSample(input_texture, input_sampler, input.tex_coords + step * -4.0) * 0.0276;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -3.0) * 0.0663;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -2.0) * 0.1239;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * -1.0) * 0.1801;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 0.0) * 0.2041;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 1.0) * 0.1801;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 2.0) * 0.1239;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 3.0) * 0.0663;
+    result += textureSample(input_texture, input_sampler, input.tex_coords + step * 4.0) * 0.0276;
     
     return mix(textureSample(input_texture, input_sampler, input.tex_coords), result, blur.intensity);
 }

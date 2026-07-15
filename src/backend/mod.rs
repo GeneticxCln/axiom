@@ -86,7 +86,9 @@ pub mod xwm;
 use self::clipboard_bridge::{
     create_pipe, spawn_clipboard_read_worker, write_selection_bytes_to_fd,
 };
-use self::render_bridge::{popup_render_id, should_use_wgpu_gl_bridge};
+use self::render_bridge::popup_render_id;
+#[cfg(test)]
+use self::render_bridge::should_use_wgpu_gl_bridge;
 use self::xwm::AxiomXwm;
 
 // Type alias to reduce complexity of the Rc<RefCell<Option<...>>> pattern
@@ -150,7 +152,9 @@ struct ClientState {
 
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+    fn disconnected(&self, client_id: ClientId, reason: DisconnectReason) {
+        debug!("Client {:?} disconnected: {:?}", client_id, reason);
+    }
 }
 
 // ============================================================================
@@ -655,7 +659,7 @@ impl CompositorHandler for State {
                     .insert(buffer_cache_sid, (w, h));
             }
         } else if self.popups.contains_key(&surface_id) {
-            // Popup buffer upload — GL-only, no WGPU since popups render via GL pass
+            // Popup buffer upload — cached for WGPU texture upload via stage_wgpu_scene_from_state
             let buffer_cache_sid = surface_id;
             let cached_data: CachedBufferData =
                 CachedBufferData::new(std::cell::RefCell::new(None));
@@ -1060,11 +1064,6 @@ pub struct AxiomSmithayBackendReal {
     /// DRM backend state (scaffolding; `Some` only when `backend_kind == Drm`).
     pub drm_backend: Option<DrmBackend>,
     pub clients: Vec<Client>,
-    /// GLES 2.0 shader program for the final fullscreen blit (only GL state kept).
-    blit_shader: Option<gl::types::GLuint>,
-    /// Persistent GL texture for uploading the WGPU-composed frame.
-    /// `(handle, width, height)` — reuses the same texture when dimensions unchanged.
-    blit_texture: Option<(gl::types::GLuint, u32, u32)>,
     /// Wayland listening socket — kept alive so clients can connect
     /// (Smithay's display.dispatch_clients polls it internally)
     #[allow(dead_code)]
@@ -1181,8 +1180,6 @@ impl AxiomSmithayBackendReal {
             winit_event_loop: None,
             drm_backend: None,
             clients: Vec::new(),
-            blit_shader: None,
-            blit_texture: None,
             listener: None,
             decoration_consumed_press: false,
             interaction: None,
@@ -1318,8 +1315,6 @@ impl AxiomSmithayBackendReal {
             winit_event_loop: None,
             drm_backend,
             clients: Vec::new(),
-            blit_shader: None,
-            blit_texture: None,
             listener: Some(listener),
             decoration_consumed_press: false,
             interaction: None,
@@ -1372,6 +1367,23 @@ impl AxiomSmithayBackendReal {
 
         self.winit_backend = Some(backend);
         self.winit_event_loop = Some(event_loop);
+
+        // Create a WGPU surface from the winit window for direct GPU compositing
+        if let Some(ref renderer) = self.state.renderer {
+            let instance = renderer.read().instance();
+            let window = self.winit_backend.as_ref().unwrap().window();
+            let surface = unsafe {
+                // SAFETY: window outlives surface — see drop order:
+                // state (contains renderer → surface) is dropped before
+                // winit_backend (contains window). Transmute from `'_` to `'static`.
+                let s = instance.create_surface(window)?;
+                std::mem::transmute::<wgpu::Surface<'_>, wgpu::Surface<'static>>(s)
+            };
+            let w = window_size.w as u32;
+            let h = window_size.h as u32;
+            renderer.write().add_output("primary".to_string(), surface, w, h);
+            info!("🎨 WGPU surface created from winit window ({}x{})", w, h);
+        }
 
         let (repeat_delay, repeat_rate) = State::keyboard_repeat_settings(&self.state.config);
         let _keyboard =
@@ -3038,10 +3050,9 @@ impl AxiomSmithayBackendReal {
 
     /// Render the current frame.
     ///
-    /// Composition is WGPU-first, but the nested winit path still presents
-    /// through an isolated WGPU → CPU readback → GL upload bridge. Keeping
-    /// that bridge in one place makes it easier to replace later without
-    /// spreading presentation logic across the whole backend.
+    /// Composition is WGPU-first, with direct surface presentation for the
+    /// winit path. The surface was created from the winit window during init
+    /// — no CPU readback, no GL bridge.
     fn render(&mut self) -> Result<()> {
         if self.winit_backend.is_none() {
             return Ok(());
@@ -3053,79 +3064,115 @@ impl AxiomSmithayBackendReal {
             }
         }
 
-        let ww = self.state.window_width;
-        let wh = self.state.window_height;
         let layouts = self.prepare_render_scene();
+        let (popup_ids, _committed_popup_count) = self.stage_wgpu_scene_from_state(&layouts);
 
-        let floating_window_ids = self.state.workspace_manager.read().floating_window_ids();
-        let (popup_ids, committed_popup_count) = self.stage_wgpu_scene_from_state(&layouts);
-
-        let should_bridge = should_use_wgpu_gl_bridge(
-            !layouts.is_empty(),
-            !floating_window_ids.is_empty(),
-            committed_popup_count,
-        );
-
-        if should_bridge {
-            self.compose_and_present_via_gl_bridge(ww, wh, &popup_ids)?;
-        } else {
-            debug!(
-                "Skipping WGPU→GL bridge for empty scene at {}x{}; clearing background directly",
-                ww, wh
-            );
-            self.present_clear_gl()?;
+        // Notify the window system that a frame is about to be presented
+        if let Some(backend) = self.winit_backend.as_mut() {
+            backend.window().pre_present_notify();
         }
 
-        if let Some(backend) = self.winit_backend.as_mut() {
-            backend.submit(None)?;
+        // Render directly to the WGPU surface — no CPU readback, no GL bridge
+        if let Some(ref renderer) = self.state.renderer {
+            renderer.write().render_output("primary")?;
+        }
+
+        // Clean up popup render IDs after the frame
+        if let Some(ref renderer) = self.state.renderer {
+            let mut r = renderer.write();
+            for popup_id in &popup_ids {
+                r.remove_window(crate::backend::render_bridge::popup_render_id(*popup_id));
+            }
         }
 
         debug!(
-            "🎨 Rendered {} tiled windows, {} floating windows, {} committed popups at {}x{}",
+            "🎨 Rendered {} tiled windows at {}x{}",
             layouts.len(),
-            floating_window_ids.len(),
-            committed_popup_count,
-            ww,
-            wh
+            self.state.window_width,
+            self.state.window_height,
         );
 
         Ok(())
     }
 
-    /// Standalone DRM render path. Uses the same WGPU scene composition as
-    /// nested mode, but presents the composed frame through the DRM dumb-buffer
-    /// scanout path instead of the nested GL bridge.
+    /// Standalone DRM render path. Composites windows directly from the buffer
+    /// cache to a BGRA frame via CPU (software rendering), then copies to the
+    /// dumb-buffer scanout. Avoids the WGPU pipeline entirely — no GPU
+    /// render + CPU readback stall.
     fn render_drm_frame(&mut self) -> Result<()> {
-        let ww = self.state.window_width;
-        let wh = self.state.window_height;
+        let ww = self.state.window_width as u32;
+        let wh = self.state.window_height as u32;
         let layouts = self.prepare_render_scene();
-        let floating_window_ids = self.state.workspace_manager.read().floating_window_ids();
-        let (popup_ids, committed_popup_count) = self.stage_wgpu_scene_from_state(&layouts);
 
-        let mut presented = 0usize;
-        if should_use_wgpu_gl_bridge(
-            !layouts.is_empty(),
-            !floating_window_ids.is_empty(),
-            committed_popup_count,
-        ) {
-            if let Some(ref renderer) = self.state.renderer {
-                match renderer.write().compose_full_frame(ww, wh) {
-                    Ok(composed) => {
-                        if let Some(ref mut drm) = self.drm_backend {
-                            presented = drm.present_composited_frame(ww, wh, &composed)?;
-                        }
+        // Software composite: BGRA buffer, cleared to dark navy background
+        let r: u8 = 26;   // 0.1 * 255
+        let g: u8 = 26;   // 0.1 * 255
+        let b: u8 = 51;   // 0.2 * 255
+
+        let mut frame = vec![0u8; (ww * wh * 4) as usize];
+        for pixel in frame.chunks_exact_mut(4) {
+            pixel[0] = b;  // BGRA — B first
+            pixel[1] = g;
+            pixel[2] = r;
+            pixel[3] = 255;
+        }
+
+        // Collect window positions and surface IDs from window_map
+        let mut window_data: Vec<(Vec<u8>, i32, i32, i32, i32)> = Vec::new();
+        for (&wid, &sid) in self.state.window_map.iter() {
+            if let Some(w) = self.state.window_manager.read().get_window(wid) {
+                if let Some(data) = self.state.buffer_cache.get(&sid) {
+                    if let Some(&(sw, sh)) = self.state.buffer_cache_dimensions.get(&sid) {
+                        window_data.push((data.clone(), sw, sh, w.window.position.0, w.window.position.1));
                     }
-                    Err(e) => warn!("⚠️ DRM WGPU compose failed: {}", e),
                 }
             }
         }
 
-        if let Some(ref renderer) = self.state.renderer {
-            let mut r = renderer.write();
-            for popup_id in &popup_ids {
-                r.remove_window(popup_render_id(*popup_id));
+        // Software composite: BGRA buffer, cleared to dark navy background
+        let r: u8 = 26;   // 0.1 * 255
+        let g: u8 = 26;   // 0.1 * 255
+        let b: u8 = 51;   // 0.2 * 255
+
+        let mut frame = vec![0u8; (ww * wh * 4) as usize];
+        for pixel in frame.chunks_exact_mut(4) {
+            pixel[0] = b;  // BGRA — B first
+            pixel[1] = g;
+            pixel[2] = r;
+            pixel[3] = 255;
+        }
+
+        // Blit each window's RGBA buffer into the BGRA frame
+        for (data, sw, sh, wx, wy) in &window_data {
+            let sw = *sw as usize;
+            let sh = *sh as usize;
+            let wx = *wx;
+            let wy = *wy;
+            for row in 0..sh {
+                let src_row = row * sw * 4;
+                let dst_y = (wy + row as i32) as usize;
+                if dst_y >= wh as usize { break; }
+                let dst_x_start = wx as usize;
+                let copy_w = sw.min((ww as usize).saturating_sub(dst_x_start));
+
+                let dst_start = (dst_y * ww as usize + dst_x_start) * 4;
+                let dst = &mut frame[dst_start..dst_start + copy_w * 4];
+                let src = &data[src_row..src_row + copy_w * 4];
+
+                for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                    d[0] = s[2]; // B = R
+                    d[1] = s[1]; // G = G
+                    d[2] = s[0]; // R = B
+                    d[3] = 255;  // A
+                }
             }
         }
+
+        let presented = if let Some(ref mut drm) = self.drm_backend {
+            drm.present_composited_frame(ww, wh, &frame)?
+        } else {
+            0
+        };
 
         if presented == 0 {
             if let Some(ref mut drm) = self.drm_backend {
@@ -3133,15 +3180,12 @@ impl AxiomSmithayBackendReal {
                 if legacy == 0 {
                     debug!("DRM render_frame fallback produced no updated outputs");
                 }
-                presented = legacy;
             }
         }
 
         debug!(
-            "🖥️ DRM rendered {} tiled windows, {} floating windows, {} committed popups at {}x{} -> {} outputs",
+            "🖥️ DRM rendered {} windows at {}x{} -> {} outputs (software composite)",
             layouts.len(),
-            floating_window_ids.len(),
-            committed_popup_count,
             ww,
             wh,
             presented,
@@ -3311,19 +3355,7 @@ impl AxiomSmithayBackendReal {
             BackendKind::Winit => {
                 if let Some(backend) = self.winit_backend.as_mut() {
                     // Try rebinding; failure during shutdown is non-fatal.
-                    if backend.bind().is_ok() {
-                        if let Some((tex, _, _)) = self.blit_texture.take() {
-                            // SAFETY: GL context is current after the rebind above.
-                            unsafe {
-                                gl::DeleteTextures(1, &tex);
-                            }
-                        }
-                        if let Some(prog) = self.blit_shader.take() {
-                            unsafe {
-                                gl::DeleteProgram(prog);
-                            }
-                        }
-                    }
+                    let _ = backend.bind();
                 }
             }
             BackendKind::Drm => {

@@ -71,7 +71,7 @@ libloading = "0.8"
 gl = "0.14"  # OpenGL bindings for GLES 2.0 rendering pipeline (raw gl::* in backend)
 
 # Graphics and rendering
-wgpu = "0.19"  # GPU compute and rendering (independent of Smithay's GLES renderer)
+wgpu = "0.19"  # GPU compute and rendering
 
 # Event loop
 calloop = "0.13"  # Callback-based event loop for FD polling (DRM + libinput + udev)

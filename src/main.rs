@@ -72,8 +72,8 @@ struct Cli {
     /// `noop` is for tests/headless flows.
     /// Persisted into `config.backend.kind` so downstream subsystems
     /// see one source of truth.
-    #[arg(long, value_name = "KIND", default_value = "winit")]
-    backend: String,
+    #[arg(long, value_name = "KIND")]
+    backend: Option<String>,
 }
 
 #[tokio::main]
@@ -130,9 +130,11 @@ async fn main() -> Result<()> {
     // the backend constructor. We only log when the resolved kind
     // differs from the dev default so a TOML file that already had
     // `kind = "drm"` is not misattributed to the CLI.
-    config.backend.kind = cli.backend.clone();
-    if config.backend.kind != "winit" {
-        info!("🖥️  Backend: {}", config.backend.kind);
+    if let Some(ref backend) = cli.backend {
+        config.backend.kind = backend.clone();
+        if config.backend.kind != "winit" {
+            info!("Backend: {}", config.backend.kind);
+        }
     }
 
     // Initialize and run compositor
@@ -210,7 +212,7 @@ async fn main() -> Result<()> {
     }
 
     // Main event loop
-    Box::pin(compositor.run()).await?;
+    compositor.run().await?;
 
     info!("👋 Axiom compositor shutting down");
     Ok(())

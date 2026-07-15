@@ -114,7 +114,7 @@ pub struct LiveMetrics {
 /// Kept as `pub(super)` for tests (`test_known_workspace_actions`) and
 /// future code paths that need to validate workspace actions
 /// outside the IPC handler's gate.
-#[allow(dead_code)]
+#[cfg(test)]
 fn is_known_workspace_action(action: &str) -> bool {
     KNOWN_WORKSPACE_ACTIONS.contains(&action)
 }
@@ -129,7 +129,7 @@ fn is_known_workspace_action(action: &str) -> bool {
 /// `EffectsEngine::apply_live_effects_control` which re-validates inline
 /// as defense in depth. Kept as `pub(super)` for tests
 /// (`test_validate_blur_radius`) and any future direct callers.
-#[allow(dead_code)]
+#[cfg(test)]
 fn validate_blur_radius(radius: f32) -> Option<f32> {
     if radius.is_finite() && (0.0..=MAX_EFFECTS_BLUR_RADIUS_PX).contains(&radius) {
         Some(radius)
@@ -146,7 +146,7 @@ fn validate_blur_radius(radius: f32) -> Option<f32> {
 /// `EffectsEngine::apply_live_effects_control` which re-validates inline
 /// as defense in depth. Kept as `pub(super)` for tests
 /// (`test_validate_animation_speed`) and any future direct callers.
-#[allow(dead_code)]
+#[cfg(test)]
 fn validate_animation_speed(speed: f32) -> Option<f32> {
     if speed.is_finite() && (0.0..=MAX_EFFECTS_ANIMATION_SPEED).contains(&speed) {
         Some(speed)
