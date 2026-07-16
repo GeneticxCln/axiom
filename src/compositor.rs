@@ -152,17 +152,19 @@ impl AxiomCompositor {
         // `GetPerformanceReport` query arriving BEFORE the first tick
         // still sees the gpu_initialized state instead of the default
         // LiveMetrics::default() (= false / 0).
-        let effects_initial = effects_engine.read();
+        let (effects_enabled, blur_enabled, blur_radius) = {
+            let e = effects_engine.read();
+            (e.is_enabled(), e.is_blur_enabled(), e.blur_params().radius)
+        };
         ipc_server.set_live_metrics_snapshot(LiveMetrics {
             frame_time_ms: 0.0,
             active_windows: 0,
             current_workspace: 0,
             effects_gpu_available,
-            effects_enabled: effects_initial.is_enabled(),
-            blur_enabled: effects_initial.is_blur_enabled(),
-            blur_radius: effects_initial.blur_params().radius,
+            effects_enabled,
+            blur_enabled,
+            blur_radius,
         });
-        drop(effects_initial);
 
         // Wire effects engine into renderer for GPU shadow/blur post-processing
         renderer.write().set_effects_engine(effects_engine.clone());
@@ -445,11 +447,12 @@ impl AxiomCompositor {
     /// this point — the backend updates them during its own render pass — so
     /// this only queues window-less effects that don't depend on exact layout.
     fn prepare_frame_data(&mut self) -> Result<()> {
-        // Clear per-frame effect queues from previous frame
+        // Clear per-frame effect and decoration queues from previous frame
         if let Some(ref renderer) = self.renderer {
             let mut r = renderer.write();
             r.clear_shadows();
             r.clear_blurs();
+            r.clear_decoration_quads();
         }
 
         // Collect render data from windows
@@ -545,6 +548,80 @@ impl AxiomCompositor {
                 let h = win_data.layout_rect.height as f32 * scale;
                 r.upsert_window_rect(win_data.id, (x, y), (w, h), opacity, [0.0, 0.0, 0.0, 0.0]);
             }
+
+            // Generate server-side decoration quads from DecorationManager.
+            let mut decoration_quads = Vec::new();
+            {
+                let dm = self.decoration_manager.read();
+                for win_data in &self.render_data_buffer {
+                    let Some(decoration) = dm.decorations().get(&win_data.id) else {
+                        continue;
+                    };
+                    if decoration.mode != crate::decoration::DecorationMode::ServerSide {
+                        continue;
+                    }
+                    let focused = decoration.focused;
+                    let th = decoration.titlebar_height as f32;
+                    if th <= 0.0 {
+                        continue;
+                    }
+                    let wr = &win_data.layout_rect;
+                    let wx = wr.x as f32;
+                    let wy = wr.y as f32;
+                    let ww = wr.width as f32;
+                    let theme = dm.theme();
+
+                    // Titlebar background quad (above content).
+                    let titlebar_bg = if focused {
+                        theme.titlebar_bg_focused
+                    } else {
+                        theme.titlebar_bg_unfocused
+                    };
+                    decoration_quads.push(crate::renderer::DecorationQuad {
+                        x: wx,
+                        y: wy - th,
+                        w: ww,
+                        h: th,
+                        color: titlebar_bg,
+                    });
+
+                    // Button quads (close, maximize, minimize) at the top-right.
+                    let button_size = theme.button_size as f32;
+                    let btn_margin = 8.0_f32;
+                    let btn_y = wy - th + (th - button_size) / 2.0;
+                    let close_idx = 0usize;
+                    let max_idx = 1usize;
+                    let min_idx = 2usize;
+
+                    let close_x = wx + ww - (button_size + btn_margin) * (close_idx as f32 + 1.0);
+                    decoration_quads.push(crate::renderer::DecorationQuad {
+                        x: close_x,
+                        y: btn_y,
+                        w: button_size,
+                        h: button_size,
+                        color: theme.close_normal,
+                    });
+
+                    let max_x = wx + ww - (button_size + btn_margin) * (max_idx as f32 + 1.0);
+                    decoration_quads.push(crate::renderer::DecorationQuad {
+                        x: max_x,
+                        y: btn_y,
+                        w: button_size,
+                        h: button_size,
+                        color: theme.button_normal,
+                    });
+
+                    let min_x = wx + ww - (button_size + btn_margin) * (min_idx as f32 + 1.0);
+                    decoration_quads.push(crate::renderer::DecorationQuad {
+                        x: min_x,
+                        y: btn_y,
+                        w: button_size,
+                        h: button_size,
+                        color: theme.button_normal,
+                    });
+                }
+            }
+            r.set_decoration_quads(decoration_quads);
         }
 
         Ok(())
@@ -627,6 +704,13 @@ impl AxiomCompositor {
         self.effects_engine.write().shutdown();
         self.workspace_manager.write().shutdown();
         self.window_manager.write().shutdown();
+        // Drop the renderer's GPU resources explicitly rather than
+        // relying on the Arc being dropped when `self` goes out of
+        // scope, so that the backend (which may hold its own Arc clone)
+        // cannot delay GPU resource cleanup.
+        if let Some(ref renderer) = self.renderer {
+            renderer.write().shutdown();
+        }
 
         info!("Axiom compositor shutdown complete");
         Ok(())

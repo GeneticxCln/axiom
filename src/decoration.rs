@@ -326,6 +326,11 @@ impl DecorationManager {
         removed
     }
 
+    /// Access the per-window decoration state map.
+    pub fn decorations(&self) -> &HashMap<u64, WindowDecoration> {
+        &self.decorations
+    }
+
     /// Update the stored window width and recompute button positions.
     ///
     /// Call this when the window is resized or when the real width first

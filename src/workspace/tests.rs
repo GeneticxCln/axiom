@@ -329,9 +329,13 @@ fn test_remove_window_clears_minimized_floating_and_origin_state() {
     workspaces.set_window_floating(77, true);
     assert!(workspaces.is_window_floating(77));
 
+    // Floating windows are removed from their column, so minimize has no
+    // originating column to record — the window is tracked only in the
+    // minimized set and can be restored to the focused column.
     assert!(workspaces.minimize_window(77));
     assert!(workspaces.is_window_minimized(77));
-    assert!(workspaces.originating_column.contains_key(&77));
+    assert!(!workspaces.originating_column.contains_key(&77),
+        "floating window was removed from column on float, so no origin recorded");
 
     let removed = workspaces.remove_window(77);
     assert!(
@@ -566,7 +570,7 @@ fn test_sync_tapes_with_outputs_removes_default_and_preserves_focus_when_possibl
     workspaces.ensure_tape("DP-1");
     workspaces.focused_output = "DP-1".to_string();
 
-    workspaces.sync_tapes_with_outputs(&["HDMI-A-1".to_string(), "DP-1".to_string()]);
+    workspaces.sync_tapes_with_outputs(&["HDMI-A-1".to_string(), "DP-1".to_string()], &[]);
 
     let ids = workspaces.known_tape_ids();
     assert_eq!(ids, vec!["DP-1".to_string(), "HDMI-A-1".to_string()]);
@@ -583,7 +587,7 @@ fn test_sync_tapes_with_outputs_migrates_windows_from_stale_output() {
     workspaces.focused_output = "output-2".to_string();
     workspaces.add_window_to_column(5001, 3);
 
-    workspaces.sync_tapes_with_outputs(&["output-1".to_string()]);
+    workspaces.sync_tapes_with_outputs(&["output-1".to_string()], &[]);
 
     assert_eq!(workspaces.focused_output, "output-1");
     assert_eq!(workspaces.known_tape_ids(), vec!["output-1".to_string()]);
@@ -604,7 +608,7 @@ fn test_multi_monitor_layout_coordinates_are_offset_per_output() {
     let config = WorkspaceConfig::default();
     let mut workspaces = ScrollableWorkspaces::new(&config);
 
-    workspaces.sync_tapes_with_outputs(&["output-1".to_string(), "output-2".to_string()]);
+    workspaces.sync_tapes_with_outputs(&["output-1".to_string(), "output-2".to_string()], &[]);
     workspaces.set_output_viewport("output-1", 1000.0, 800.0);
     workspaces.set_output_viewport("output-2", 1200.0, 900.0);
 
@@ -633,7 +637,7 @@ fn test_multi_monitor_layout_coordinates_are_offset_per_output() {
 fn test_virtual_desktop_size_sums_output_widths() {
     let config = WorkspaceConfig::default();
     let mut workspaces = ScrollableWorkspaces::new(&config);
-    workspaces.sync_tapes_with_outputs(&["output-1".to_string(), "output-2".to_string()]);
+    workspaces.sync_tapes_with_outputs(&["output-1".to_string(), "output-2".to_string()], &[]);
     workspaces.set_output_viewport("output-1", 1000.0, 800.0);
     workspaces.set_output_viewport("output-2", 1200.0, 900.0);
 
@@ -647,7 +651,7 @@ fn test_element_under_works_across_output_offsets() {
     let config = WorkspaceConfig::default();
     let mut workspaces = ScrollableWorkspaces::new(&config);
 
-    workspaces.sync_tapes_with_outputs(&["output-1".to_string(), "output-2".to_string()]);
+    workspaces.sync_tapes_with_outputs(&["output-1".to_string(), "output-2".to_string()], &[]);
     workspaces.set_output_viewport("output-1", 1000.0, 800.0);
     workspaces.set_output_viewport("output-2", 1200.0, 900.0);
 
@@ -668,6 +672,56 @@ fn test_element_under_works_across_output_offsets() {
     let hit_right = workspaces.element_under(2500.0, f64::from(right.y + 5), &[]);
     assert!(matches!(hit_right, Some((2002, _))));
 }
+
+#[test]
+fn test_sync_tapes_with_config_order_respects_preference() {
+    let config = WorkspaceConfig::default();
+    let mut workspaces = ScrollableWorkspaces::new(&config);
+
+    // Config order reverses the natural DRM enumeration order
+    let config_order = ["DP-1".to_string(), "HDMI-A-1".to_string(), "eDP-1".to_string()];
+    workspaces.sync_tapes_with_outputs(
+        &["HDMI-A-1".to_string(), "eDP-1".to_string(), "DP-1".to_string()],
+        &config_order,
+    );
+
+    let order = workspaces.output_order.clone();
+    assert_eq!(order, vec!["DP-1", "HDMI-A-1", "eDP-1"],
+        "config order should take priority over DRM enumeration order");
+}
+
+#[test]
+fn test_sync_tapes_with_config_order_filters_absent_outputs() {
+    let config = WorkspaceConfig::default();
+    let mut workspaces = ScrollableWorkspaces::new(&config);
+
+    // Config mentions an output not physically connected
+    let config_order = ["Missing-Output".to_string(), "HDMI-A-1".to_string()];
+    workspaces.sync_tapes_with_outputs(
+        &["HDMI-A-1".to_string(), "DP-1".to_string()],
+        &config_order,
+    );
+
+    let order = workspaces.output_order.clone();
+    assert_eq!(order, vec!["HDMI-A-1", "DP-1"],
+        "missing outputs in config should be filtered; remaining live outputs appended at end");
+}
+
+#[test]
+fn test_sync_tapes_with_empty_config_order_uses_natural_order() {
+    let config = WorkspaceConfig::default();
+    let mut workspaces = ScrollableWorkspaces::new(&config);
+
+    workspaces.sync_tapes_with_outputs(
+        &["eDP-1".to_string(), "HDMI-A-1".to_string()],
+        &[],  // empty config_order = natural order
+    );
+
+    let order = workspaces.output_order.clone();
+    assert_eq!(order, vec!["eDP-1", "HDMI-A-1"],
+        "empty config order should preserve the live enumeration order");
+}
+
 /// correct layout dimensions on every call — no stale cached values
 /// from a previous viewport size survive across resizes.
 #[test]
@@ -829,6 +883,275 @@ mod property_tests {
             // Moving windows may create new columns but shouldn't decrease count much
             let final_count = workspaces.active_column_count();
             prop_assert!(final_count >= initial_count); // Moving creates new columns if needed
+        }
+    }
+
+    /// Helper: insert unique window IDs into a workspace, returning the set
+    /// of (window_id, column_index) pairs actually added (duplicates skipped).
+    fn insert_unique_windows(
+        workspaces: &mut ScrollableWorkspaces,
+        windows: &[(u64, i32)],
+    ) -> Vec<(u64, i32)> {
+        let mut seen = HashSet::new();
+        let mut inserted = Vec::new();
+        for &(wid, col) in windows {
+            if seen.insert(wid) {
+                workspaces.add_window_to_column(wid, col);
+                inserted.push((wid, col));
+            }
+        }
+        inserted
+    }
+
+    proptest! {
+        /// Count preservation: |layouts| == number of non-minimized, non-floating windows
+        /// in columns that pass frustum culling.
+        #[test]
+        fn test_layout_count_matches_visible_windows(
+            windows in prop::collection::vec(
+                (1u64..200u64, 0i32..=0i32),  // Column 0 is always visible
+                1..30,
+            )
+        ) {
+            let config = WorkspaceConfig::default();
+            let mut workspaces = ScrollableWorkspaces::new(&config);
+
+            for &(window_id, col) in &windows {
+                workspaces.add_window_to_column(window_id, col);
+            }
+
+            // Mark some as minimized
+            let to_minimize: Vec<u64> = windows.iter()
+                .step_by(3)
+                .map(|(id, _)| *id)
+                .collect();
+            for &id in &to_minimize {
+                workspaces.minimize_window(id);
+            }
+            // Mark some as floating
+            let to_float: Vec<u64> = windows.iter()
+                .enumerate()
+                .filter(|(i, _)| i % 3 != 0 && i % 4 == 0)
+                .map(|(_, (id, _))| *id)
+                .collect();
+            for &id in &to_float {
+                workspaces.set_window_floating(id, true);
+            }
+
+            let layouts = workspaces.calculate_workspace_layouts();
+
+            // Count windows in visible columns that are neither minimized nor floating
+            let to_minimize_set: HashSet<u64> = to_minimize.iter().copied().collect();
+            let to_float_set: HashSet<u64> = to_float.iter().copied().collect();
+            let excluded: HashSet<u64> = to_minimize_set.union(&to_float_set).copied().collect();
+
+            let expected = workspaces.tapes.get("default")
+                .map(|tape| {
+                    let visible_cols = tape.get_visible_columns();
+                    visible_cols.iter()
+                        .flat_map(|col| col.windows.iter())
+                        .filter(|wid| !excluded.contains(wid))
+                        .count()
+                })
+                .unwrap_or(0);
+
+            // Also verify every layout entry corresponds to a non-excluded window
+            for (wid, _rect) in &layouts {
+                prop_assert!(
+                    !excluded.contains(wid),
+                    "Layout contains excluded (minimized/floating) window {}",
+                    wid
+                );
+            }
+
+            prop_assert_eq!(
+                layouts.len(),
+                expected,
+                "Layout count must match visible (non-minimized, non-floating) window count"
+            );
+        }
+
+        /// No overlapping rectangles within the same column.
+        #[test]
+        fn test_layout_no_overlap(
+            windows in prop::collection::vec(
+                (1u64..100u64, 0i32..2i32),
+                2..20,
+            )
+        ) {
+            let config = WorkspaceConfig::default();
+            let mut workspaces = ScrollableWorkspaces::new(&config);
+
+            let inserted = insert_unique_windows(&mut workspaces, &windows);
+            let unique_cols: HashSet<i32> = inserted.iter().map(|&(_, c)| c).collect();
+
+            let layouts = workspaces.calculate_workspace_layouts();
+
+            for &col_idx in &unique_cols {
+                let col_rects: Vec<&Rectangle> = workspaces.tapes.get("default")
+                    .and_then(|tape| {
+                        let col = tape.columns.get(&col_idx)?;
+                        Some(col.windows.iter().filter_map(|wid| layouts.get(wid)))
+                    })
+                    .into_iter()
+                    .flatten()
+                    .collect();
+
+                for i in 0..col_rects.len() {
+                    for j in i + 1..col_rects.len() {
+                        prop_assert!(
+                            !col_rects[i].intersects(col_rects[j]),
+                            "Windows in same column must not overlap: {:?} vs {:?}",
+                            col_rects[i],
+                            col_rects[j]
+                        );
+                    }
+                }
+            }
+        }
+
+        /// Every window rectangle has width >= 1 and height >= 1.
+        #[test]
+        fn test_layout_positive_dimensions(
+            windows in prop::collection::vec(
+                (1u64..100u64, 0i32..2i32),
+                1..30,
+            )
+        ) {
+            let config = WorkspaceConfig::default();
+            let mut workspaces = ScrollableWorkspaces::new(&config);
+
+            insert_unique_windows(&mut workspaces, &windows);
+
+            let layouts = workspaces.calculate_workspace_layouts();
+
+            for (wid, rect) in &layouts {
+                prop_assert!(
+                    rect.width >= 1,
+                    "Window {} width must be >= 1, got {}",
+                    wid,
+                    rect.width
+                );
+                prop_assert!(
+                    rect.height >= 1,
+                    "Window {} height must be >= 1, got {}",
+                    wid,
+                    rect.height
+                );
+            }
+        }
+
+        /// Windows in the same column appear with monotonically increasing
+        /// y positions (top-to-bottom order matches the column's window list).
+        #[test]
+        fn test_layout_monotonic_y_order(
+            windows in prop::collection::vec(
+                (1u64..100u64, 0i32..2i32),
+                2..15,
+            )
+        ) {
+            let config = WorkspaceConfig::default();
+            let mut workspaces = ScrollableWorkspaces::new(&config);
+
+            let inserted = insert_unique_windows(&mut workspaces, &windows);
+            let unique_cols: HashSet<i32> = inserted.iter().map(|&(_, c)| c).collect();
+
+            let layouts = workspaces.calculate_workspace_layouts();
+
+            for &col_idx in &unique_cols {
+                let col_rects: Vec<(usize, &Rectangle)> = workspaces.tapes.get("default")
+                    .and_then(|tape| {
+                        let col = tape.columns.get(&col_idx)?;
+                        Some(col.windows.iter().enumerate().filter_map(|(i, wid)| {
+                            layouts.get(wid).map(|r| (i, r))
+                        }))
+                    })
+                    .into_iter()
+                    .flatten()
+                    .collect();
+
+                for pair in col_rects.windows(2) {
+                    let (i, a) = pair[0];
+                    let (j, b) = pair[1];
+                    prop_assert!(
+                        a.y <= b.y,
+                        "Window order mismatch at column {}: index {} (y={}) should be above index {} (y={})",
+                        col_idx, i, a.y, j, b.y
+                    );
+                }
+            }
+        }
+
+        /// Minimized and floating windows are excluded from layouts.
+        #[test]
+        fn test_layout_excludes_minimized_and_floating(
+            windows in prop::collection::vec(
+                (1u64..100u64, 0i32..2i32),
+                2..20,
+            )
+        ) {
+            let config = WorkspaceConfig::default();
+            let mut workspaces = ScrollableWorkspaces::new(&config);
+
+            let inserted = insert_unique_windows(&mut workspaces, &windows);
+
+            // Minimize every 3rd, float every 4th (non-overlapping)
+            let to_minimize: Vec<u64> = inserted.iter()
+                .enumerate()
+                .filter(|(i, _)| i % 3 == 0)
+                .map(|(_, (id, _))| *id)
+                .collect();
+            let to_float: Vec<u64> = inserted.iter()
+                .enumerate()
+                .filter(|(i, _)| i % 3 != 0 && i % 4 == 0)
+                .map(|(_, (id, _))| *id)
+                .collect();
+
+            for &id in &to_minimize {
+                workspaces.minimize_window(id);
+            }
+            for &id in &to_float {
+                workspaces.set_window_floating(id, true);
+            }
+
+            let layouts = workspaces.calculate_workspace_layouts();
+
+            for &id in &to_minimize {
+                prop_assert!(
+                    !layouts.contains_key(&id),
+                    "Minimized window {} must not appear in layouts",
+                    id
+                );
+            }
+            for &id in &to_float {
+                prop_assert!(
+                    !layouts.contains_key(&id),
+                    "Floating window {} must not appear in layouts",
+                    id
+                );
+            }
+        }
+
+        /// Layout cache returns identical results on repeated calls with no state change.
+        #[test]
+        fn test_layout_cache_consistency(
+            windows in prop::collection::vec(
+                (1u64..100u64, 0i32..2i32),
+                1..15,
+            )
+        ) {
+            let config = WorkspaceConfig::default();
+            let mut workspaces = ScrollableWorkspaces::new(&config);
+
+            insert_unique_windows(&mut workspaces, &windows);
+
+            let first = workspaces.calculate_workspace_layouts();
+            let second = workspaces.calculate_workspace_layouts();
+
+            prop_assert_eq!(
+                first, second,
+                "Repeated layout calls with identical state must return identical results"
+            );
         }
     }
 }

@@ -71,6 +71,16 @@ impl Rectangle {
             && x < self.x + self.width as i32
             && y < self.y + self.height as i32
     }
+
+    /// Returns `true` if this rectangle intersects another rectangle.
+    /// Two rectangles intersect if they share any area; edge-only touches
+    /// are not considered intersection (exclusive right/bottom edges).
+    pub fn intersects(&self, other: &Self) -> bool {
+        self.x < other.x + other.width as i32
+            && self.x + self.width as i32 > other.x
+            && self.y < other.y + other.height as i32
+            && self.y + self.height as i32 > other.y
+    }
 }
 
 /// Enhanced window wrapper for Axiom-specific functionality
@@ -170,6 +180,7 @@ impl WindowManager {
     }
 
     /// Add a new window to management
+    #[must_use]
     pub fn add_window(&mut self, title: String) -> u64 {
         let id = self.next_window_id;
         self.next_window_id += 1;
@@ -424,7 +435,7 @@ mod tests {
     #[test]
     fn test_focus_nonexistent_window() {
         let mut wm = WindowManager::new(&WindowConfig::default());
-        wm.add_window("test".into());
+        let _ = wm.add_window("test".into());
         wm.focus_window(999);
         // Focus should not change
         assert_eq!(wm.focused_window_id(), Some(1));
@@ -511,7 +522,7 @@ mod tests {
     #[test]
     fn test_shutdown_clears_windows() {
         let mut wm = WindowManager::new(&WindowConfig::default());
-        wm.add_window("test".into());
+        let _ = wm.add_window("test".into());
         wm.shutdown();
     }
 }

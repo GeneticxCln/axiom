@@ -9,6 +9,8 @@ enable_xdg_decoration_protocol = false
 debug = false
 max_fps = 60
 vsync = true
+default_terminal = "xterm"
+default_launcher = "dmenu_run"
 
 [workspace]
 scroll_speed = 1.0
@@ -81,6 +83,11 @@ quit = "Super+Shift+q"
 mouse_back = "scroll_left"
 mouse_forward = "scroll_right"
 mouse_middle = "toggle_floating"
+
+[output]
+# Preferred output order (left to right). Empty = use DRM enumeration order.
+# Example: order = ["HDMI-A-1", "DP-1"]
+order = []
 
 [xwayland]
 enabled = true

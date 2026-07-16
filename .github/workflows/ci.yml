@@ -129,6 +129,40 @@ jobs:
         # Run subset of tests under valgrind for memory leak detection
         cargo valgrind test --lib -- workspace config effects 2>&1 || echo "Valgrind checks complete (some failures expected in CI without display)"
         
+  nested-smoke:
+    name: Nested Smoke Test Matrix
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libwayland-dev \
+          libxkbcommon-dev \
+          libegl1-mesa-dev \
+          libdrm-dev \
+          libgbm-dev \
+          libinput-dev \
+          libsystemd-dev \
+          libdbus-1-dev \
+          pkg-config \
+          xvfb \
+          weston \
+          foot
+
+    - name: Build debug binary
+      run: cargo build --bin axiom
+
+    - name: Run nested smoke test matrix
+      run: |
+        chmod +x scripts/nested_smoke_test.sh
+        xvfb-run -a scripts/nested_smoke_test.sh -- AXIOM_SMOKE_MATRIX=true
+
   performance:
     name: Performance Benchmarks  
     runs-on: ubuntu-latest
@@ -152,15 +186,32 @@ jobs:
           libdbus-1-dev \
           pkg-config \
           xvfb
-    
-    - name: Run benchmarks
+
+    - name: Restore baseline cache
+      id: cache-baseline
+      uses: actions/cache@v4
+      with:
+        path: target/criterion
+        key: benchmark-baseline-main-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          benchmark-baseline-main-
+
+    - name: Run benchmarks (baseline comparison on PR)
       run: |
-        xvfb-run -a cargo bench --all-features
-        
-    - name: Performance regression check
-      run: |
-        # Compare benchmark results with baseline (implement this when we have baseline)
-        echo "Benchmark results logged for performance tracking"
+        if [ "${{ github.ref_name }}" = "main" ]; then
+          # On main: save new baseline
+          xvfb-run -a cargo bench --all-features -- --save-baseline ci-main
+        elif [ -f "target/criterion/ci-main/baseline" ]; then
+          # On PR with cached baseline: compare
+          xvfb-run -a cargo bench --all-features -- --baseline ci-main 2>&1 | tee target/criterion/comparison.log
+          # Check for regressions (Criterion exits 0 even with regressions, so parse output)
+          if grep -qi "regression\|performance has (regressed\|became worse" target/criterion/comparison.log; then
+            echo "::warning title=Performance Regressions detected::Benchmark regressions found. See comparison.log for details."
+          fi
+        else
+          # No baseline available: run without comparison
+          xvfb-run -a cargo bench --all-features -- --noplot
+        fi
 
   security:
     name: Security Audit
@@ -188,23 +239,17 @@ jobs:
       run: cargo deny check
 
   package:
-    name: Test Packaging
-    runs-on: ${{ matrix.os }}
+    name: Build & Verify Package
+    runs-on: ubuntu-latest
     needs: test
-    strategy:
-      matrix:
-        os: [ubuntu-latest, ubuntu-22.04]
-        include:
-          - os: ubuntu-latest
-            package_type: deb
-          - os: ubuntu-22.04
-            package_type: deb-jammy
     
     steps:
     - uses: actions/checkout@v4
     
-    - name: Install system dependencies (Ubuntu)
-      if: matrix.os == 'ubuntu-latest'
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Install system dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
@@ -216,12 +261,50 @@ jobs:
           libinput-dev \
           libsystemd-dev \
           libdbus-1-dev \
-          pkg-config
+          pkg-config \
+          desktop-file-utils
     
-    - name: Test package creation
+    - name: Build release binary
+      run: cargo build --release --all-features
+    
+    - name: Validate desktop entries
       run: |
-        # Create basic package structure (to be implemented)
-        echo "Package creation test for ${{ matrix.package_type }}"
+        desktop-file-validate packaging/axiom.desktop
+        desktop-file-validate packaging/axiom-wayland.desktop
+    
+    - name: Validate session wrapper syntax
+      run: bash -n packaging/axiom-session
+    
+    - name: Build package tarball
+      run: |
+        PKG_DIR="axiom-v0.1.0-alpha.1-linux-amd64"
+        mkdir -p "$PKG_DIR/usr/bin"
+        mkdir -p "$PKG_DIR/usr/share/applications"
+        mkdir -p "$PKG_DIR/usr/share/wayland-sessions"
+        mkdir -p "$PKG_DIR/usr/share/icons/hicolor/scalable/apps"
+        mkdir -p "$PKG_DIR/usr/share/doc/axiom"
+        mkdir -p "$PKG_DIR/usr/share/axiom"
+        mkdir -p "$PKG_DIR/etc/axiom"
+        
+        cp target/release/axiom "$PKG_DIR/usr/bin/"
+        cp packaging/axiom-session "$PKG_DIR/usr/bin/"
+        cp packaging/axiom.desktop "$PKG_DIR/usr/share/applications/"
+        cp packaging/axiom-wayland.desktop "$PKG_DIR/usr/share/wayland-sessions/axiom.desktop"
+        cp assets/logo.svg "$PKG_DIR/usr/share/icons/hicolor/scalable/apps/axiom.svg"
+        cp config/axiom.toml "$PKG_DIR/usr/share/axiom/"
+        cp config/axiom.toml "$PKG_DIR/etc/axiom/"
+        cp README.md "$PKG_DIR/usr/share/doc/axiom/"
+        cp LICENSE "$PKG_DIR/usr/share/doc/axiom/"
+        
+        tar czf "${PKG_DIR}.tar.gz" "$PKG_DIR"
+        echo "Package size: $(du -sh "${PKG_DIR}.tar.gz" | cut -f1)"
+    
+    - name: Upload package artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: axiom-linux-amd64
+        path: axiom-v*.tar.gz
+        retention-days: 90
         
   coverage:
     name: Code Coverage

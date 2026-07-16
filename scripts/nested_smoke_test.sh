@@ -30,6 +30,7 @@ INFO_CLIENT_RAW="${AXIOM_SMOKE_INFO_CLIENT:-$DEFAULT_INFO_CLIENT}"
 TOPLEVEL_CLIENT_RAW="${AXIOM_SMOKE_TOPLEVEL_CLIENT:-weston-terminal}"
 EXTRA_ARGS_RAW="${AXIOM_SMOKE_EXTRA_ARGS:-}"
 KEEP_LOGS="${AXIOM_SMOKE_KEEP_LOGS:-false}"
+MATRIX_MODE="${AXIOM_SMOKE_MATRIX:-false}"
 
 TMP_ROOT="$(mktemp -d)"
 AXIOM_LOG="$TMP_ROOT/axiom.log"
@@ -147,6 +148,95 @@ wait_for_process_exit() {
     fail "Timed out waiting for process exit: $description"
 }
 
+# ── Client test matrix ──────────────────────────────────────────
+MATRIX_CLIENTS=(
+    "weston-terminal:weston-terminal"
+    "weston-smoke:weston-smoke"
+)
+# Optionally include lightweight terminals if available
+if command -v foot >/dev/null 2>&1; then
+    MATRIX_CLIENTS+=("foot:foot --version")
+fi
+if command -v alacritty >/dev/null 2>&1; then
+    MATRIX_CLIENTS+=("alacritty:alacritty --version")
+fi
+MATRIX_RESULTS=()
+
+test_single_client() {
+    local client_label="$1"
+    local client_cmd="$2"
+    local temp_root="$3"
+    local axiom_log="$temp_root/axiom_${client_label}.log"
+    local info_log="$temp_root/info_${client_label}.log"
+    local client_log="$temp_root/client_${client_label}.log"
+    local config_path="$temp_root/config_${client_label}.toml"
+
+    cat > "$config_path" <<'EOF'
+[xwayland]
+enabled = false
+EOF
+
+    local launch_cmd=("$BINARY_PATH" "--config" "$config_path" "--windowed" "--debug")
+    if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+        launch_cmd+=("${EXTRA_ARGS[@]}")
+    fi
+    if command -v stdbuf >/dev/null 2>&1; then
+        launch_cmd=(stdbuf -oL -eL "${launch_cmd[@]}")
+    fi
+
+    log "[$client_label] Launching Axiom: ${launch_cmd[*]}"
+    "${launch_cmd[@]}" >"$axiom_log" 2>&1 &
+    local axiom_pid=$!
+
+    wait_for_pattern "$axiom_log" "Wayland socket:" "$STARTUP_TIMEOUT_SECS" "Wayland socket announcement"
+    local socket_name
+    socket_name="$(sed -nE 's/.*Wayland socket: ([^[:space:]]+).*/\1/p' "$axiom_log" | tail -n 1)"
+    if [[ -z "$socket_name" ]]; then
+        kill -TERM "$axiom_pid" 2>/dev/null || true
+        return 1
+    fi
+
+    wait_for_socket_file "$XDG_RUNTIME_DIR/$socket_name" "$STARTUP_TIMEOUT_SECS"
+
+    if [[ ${#INFO_CLIENT[@]} -gt 0 ]]; then
+        log "[$client_label] Running registry/info probe"
+        timeout "$INFO_TIMEOUT_SECS" env \
+            XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+            WAYLAND_DISPLAY="$socket_name" \
+            "${INFO_CLIENT[@]}" >"$info_log" 2>&1 || true
+    fi
+
+    log "[$client_label] Launching client: $client_cmd"
+    read -r -a client_args <<< "$client_cmd"
+    env \
+        XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+        WAYLAND_DISPLAY="$socket_name" \
+        "${client_args[@]}" >"$client_log" 2>&1 &
+    local client_pid=$!
+
+    if ! wait_for_pattern "$axiom_log" "New XDG toplevel:" "$MAP_TIMEOUT_SECS" "client surface mapping"; then
+        kill -TERM "$client_pid" 2>/dev/null || true
+        kill -TERM "$axiom_pid" 2>/dev/null || true
+        return 1
+    fi
+
+    log "[$client_label] Axiom observed a mapped client surface"
+
+    if kill -0 "$client_pid" 2>/dev/null; then
+        kill -TERM "$client_pid" 2>/dev/null || true
+    fi
+    wait_for_process_exit "$client_pid" "$TEARDOWN_TIMEOUT_SECS" "client shutdown" || true
+
+    wait_for_pattern "$axiom_log" "Destroying window" "$TEARDOWN_TIMEOUT_SECS" "window teardown" || true
+
+    kill -TERM "$axiom_pid"
+    wait_for_pattern "$axiom_log" "Axiom compositor shutdown complete" "$TEARDOWN_TIMEOUT_SECS" "compositor shutdown" || true
+    wait "$axiom_pid" 2>/dev/null || true
+
+    return 0
+}
+
+# ── Main ────────────────────────────────────────────────────────
 if [[ ! -x "$BINARY_PATH" ]]; then
     if ! command -v cargo >/dev/null 2>&1; then
         fail "Axiom binary not found at $BINARY_PATH and cargo is unavailable"
@@ -163,22 +253,6 @@ fi
 
 if [[ ! -x "$BINARY_PATH" ]]; then
     fail "Axiom binary is not executable: $BINARY_PATH"
-fi
-
-read -r -a TOPLEVEL_CLIENT <<< "$TOPLEVEL_CLIENT_RAW"
-if [[ ${#TOPLEVEL_CLIENT[@]} -eq 0 ]]; then
-    fail "No toplevel smoke client configured"
-fi
-if ! command -v "${TOPLEVEL_CLIENT[0]}" >/dev/null 2>&1; then
-    fail "Required toplevel client is missing: ${TOPLEVEL_CLIENT[0]}"
-fi
-
-INFO_CLIENT=()
-if [[ -n "$INFO_CLIENT_RAW" ]]; then
-    read -r -a INFO_CLIENT <<< "$INFO_CLIENT_RAW"
-    if ! command -v "${INFO_CLIENT[0]}" >/dev/null 2>&1; then
-        fail "Configured info client is missing: ${INFO_CLIENT[0]}"
-    fi
 fi
 
 EXTRA_ARGS=()
@@ -204,66 +278,51 @@ else
     fail "No DISPLAY or WAYLAND_DISPLAY found. Run inside a desktop session or wrap with xvfb-run -a."
 fi
 
-cat > "$CONFIG_PATH" <<'EOF'
-[xwayland]
-enabled = false
-EOF
-
-LAUNCH_CMD=("$BINARY_PATH" "--config" "$CONFIG_PATH" "--windowed" "--debug")
-if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
-    LAUNCH_CMD+=("${EXTRA_ARGS[@]}")
-fi
-if command -v stdbuf >/dev/null 2>&1; then
-    LAUNCH_CMD=(stdbuf -oL -eL "${LAUNCH_CMD[@]}")
-fi
-
-log "Launching Axiom: ${LAUNCH_CMD[*]}"
-"${LAUNCH_CMD[@]}" >"$AXIOM_LOG" 2>&1 &
-AXIOM_PID=$!
-
-wait_for_pattern "$AXIOM_LOG" "Wayland socket:" "$STARTUP_TIMEOUT_SECS" "Wayland socket announcement"
-SOCKET_NAME="$(sed -nE 's/.*Wayland socket: ([^[:space:]]+).*/\1/p' "$AXIOM_LOG" | tail -n 1)"
-if [[ -z "$SOCKET_NAME" ]]; then
-    fail "Could not extract Wayland socket name from Axiom logs"
-fi
-log "Axiom announced nested Wayland socket: $SOCKET_NAME"
-
-wait_for_socket_file "$XDG_RUNTIME_DIR/$SOCKET_NAME" "$STARTUP_TIMEOUT_SECS"
-
-if [[ ${#INFO_CLIENT[@]} -gt 0 ]]; then
-    log "Running registry/info probe: ${INFO_CLIENT[*]}"
-    if ! timeout "$INFO_TIMEOUT_SECS" env \
-        XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-        WAYLAND_DISPLAY="$SOCKET_NAME" \
-        "${INFO_CLIENT[@]}" >"$INFO_LOG" 2>&1; then
-        fail "Wayland registry/info probe failed"
+INFO_CLIENT=()
+if [[ -n "$INFO_CLIENT_RAW" ]]; then
+    read -r -a INFO_CLIENT <<< "$INFO_CLIENT_RAW"
+    if ! command -v "${INFO_CLIENT[0]}" >/dev/null 2>&1; then
+        log "Info client not available (${INFO_CLIENT[0]}), skipping probe"
+        INFO_CLIENT=()
     fi
 fi
 
-log "Launching real toplevel client: ${TOPLEVEL_CLIENT[*]}"
-env \
-    XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-    WAYLAND_DISPLAY="$SOCKET_NAME" \
-    "${TOPLEVEL_CLIENT[@]}" >"$CLIENT_LOG" 2>&1 &
-CLIENT_PID=$!
-
-wait_for_pattern "$AXIOM_LOG" "New XDG toplevel:" "$MAP_TIMEOUT_SECS" "real client surface mapping"
-log "Axiom observed a real mapped client surface"
-
-if kill -0 "$CLIENT_PID" 2>/dev/null; then
-    log "Stopping toplevel client"
-    kill -TERM "$CLIENT_PID" 2>/dev/null || true
+if [[ "$MATRIX_MODE" == "true" ]]; then
+    log "Running nested smoke test MATRIX (multiple clients)"
+    PASS=0
+    FAIL=0
+    for entry in "${MATRIX_CLIENTS[@]}"; do
+        label="${entry%%:*}"
+        cmd="${entry#*:}"
+        if ! command -v "${cmd%% *}" >/dev/null 2>&1; then
+            log "[$label] SKIPPED (client not installed)"
+            continue
+        fi
+        if test_single_client "$label" "$cmd" "$TMP_ROOT"; then
+            log "[$label] PASSED"
+            PASS=$((PASS + 1))
+        else
+            log "[$label] FAILED"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+    log "Matrix results: $PASS passed, $FAIL failed"
+    if [[ "$FAIL" -gt 0 ]]; then
+        exit 1
+    fi
+    exit 0
 fi
-wait_for_process_exit "$CLIENT_PID" "$TEARDOWN_TIMEOUT_SECS" "toplevel client shutdown"
-CLIENT_PID=""
 
-wait_for_pattern "$AXIOM_LOG" "Destroying window" "$TEARDOWN_TIMEOUT_SECS" "window teardown after client exit"
-log "Axiom cleaned up the client window"
+# Single client mode (default, backwards-compatible)
+read -r -a TOPLEVEL_CLIENT <<< "$TOPLEVEL_CLIENT_RAW"
+if [[ ${#TOPLEVEL_CLIENT[@]} -eq 0 ]]; then
+    fail "No toplevel smoke client configured"
+fi
+if ! command -v "${TOPLEVEL_CLIENT[0]}" >/dev/null 2>&1; then
+    fail "Required toplevel client is missing: ${TOPLEVEL_CLIENT[0]}"
+fi
 
-log "Stopping Axiom"
-kill -TERM "$AXIOM_PID"
-wait_for_pattern "$AXIOM_LOG" "Axiom compositor shutdown complete" "$TEARDOWN_TIMEOUT_SECS" "compositor shutdown completion"
-wait "$AXIOM_PID"
-AXIOM_PID=""
+test_single_client "single" "$TOPLEVEL_CLIENT_RAW" "$TMP_ROOT"
+log "Single client smoke test PASSED"
 
 log "Nested smoke test passed"

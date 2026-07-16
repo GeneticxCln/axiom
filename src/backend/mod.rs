@@ -87,8 +87,6 @@ use self::clipboard_bridge::{
     create_pipe, spawn_clipboard_read_worker, write_selection_bytes_to_fd,
 };
 use self::render_bridge::popup_render_id;
-#[cfg(test)]
-use self::render_bridge::should_use_wgpu_gl_bridge;
 use self::xwm::AxiomXwm;
 
 // Type alias to reduce complexity of the Rc<RefCell<Option<...>>> pattern
@@ -1497,7 +1495,7 @@ impl AxiomSmithayBackendReal {
 
             {
                 let mut wm = self.state.workspace_manager.write();
-                wm.sync_tapes_with_outputs(&output_names);
+                wm.sync_tapes_with_outputs(&output_names, &self.state.config.output.order);
             }
 
             let focused_name = self.state.workspace_manager.read().focused_output.clone();
@@ -1614,7 +1612,7 @@ impl AxiomSmithayBackendReal {
 
         {
             let mut wm = self.state.workspace_manager.write();
-            wm.sync_tapes_with_outputs(&output_names);
+            wm.sync_tapes_with_outputs(&output_names, &self.state.config.output.order);
         }
 
         let focused_name = self.state.workspace_manager.read().focused_output.clone();
@@ -2540,9 +2538,13 @@ impl AxiomSmithayBackendReal {
     /// Each entry is `(window_id, x, y, width, height)`. Called on every
     /// motion and button event so `element_under` can find floating windows.
     fn floating_rects(&self) -> Vec<(u64, i32, i32, u32, u32)> {
+        let floating_ids = self.state.workspace_manager.read().floating_window_ids();
+        if floating_ids.is_empty() {
+            return Vec::new();
+        }
         let wm = self.state.window_manager.read();
-        let mut rects = Vec::new();
-        for id in self.state.workspace_manager.read().floating_window_ids() {
+        let mut rects = Vec::with_capacity(floating_ids.len());
+        for &id in &floating_ids {
             if let Some(w) = wm.get_window(id) {
                 if !w.properties.minimized {
                     rects.push((
@@ -2955,16 +2957,18 @@ impl AxiomSmithayBackendReal {
                     self.state.needs_redraw = true;
                 }
                 CompositorAction::LaunchTerminal => {
-                    let _ = std::process::Command::new("xterm")
+                    let cmd = &self.state.config.general.default_terminal;
+                    let _ = std::process::Command::new(cmd)
                         .spawn()
-                        .map(|_| debug!("🚀 Launched terminal"))
-                        .map_err(|e| warn!("Failed to launch terminal: {}", e));
+                        .map(|_| debug!("🚀 Launched terminal: {}", cmd))
+                        .map_err(|e| warn!("Failed to launch terminal '{}': {}", cmd, e));
                 }
                 CompositorAction::LaunchLauncher => {
-                    let _ = std::process::Command::new("dmenu_run")
+                    let cmd = &self.state.config.general.default_launcher;
+                    let _ = std::process::Command::new(cmd)
                         .spawn()
-                        .map(|_| debug!("🚀 Launched launcher"))
-                        .map_err(|e| warn!("Failed to launch launcher: {}", e));
+                        .map(|_| debug!("🚀 Launched launcher: {}", cmd))
+                        .map_err(|e| warn!("Failed to launch launcher '{}': {}", cmd, e));
                 }
                 CompositorAction::Custom(ref cmd) => {
                     // Split the command string on whitespace for the
@@ -3095,96 +3099,49 @@ impl AxiomSmithayBackendReal {
         Ok(())
     }
 
-    /// Standalone DRM render path. Composites windows directly from the buffer
-    /// cache to a BGRA frame via CPU (software rendering), then copies to the
-    /// dumb-buffer scanout. Avoids the WGPU pipeline entirely — no GPU
-    /// render + CPU readback stall.
+    /// Standalone DRM render path. Composites the scene via WGPU GPU
+    /// rendering to a headless texture, reads the RGBA result back to
+    /// CPU, converts to BGRA, and presents to every output through either
+    /// the GBM page-flip path or the CPU dumb-buffer fallback.
     fn render_drm_frame(&mut self) -> Result<()> {
-        let ww = self.state.window_width as u32;
-        let wh = self.state.window_height as u32;
+        let ww = self.state.window_width;
+        let wh = self.state.window_height;
         let layouts = self.prepare_render_scene();
+        let (popup_ids, _committed_popup_count) = self.stage_wgpu_scene_from_state(&layouts);
 
-        // Software composite: BGRA buffer, cleared to dark navy background
-        let r: u8 = 26;   // 0.1 * 255
-        let g: u8 = 26;   // 0.1 * 255
-        let b: u8 = 51;   // 0.2 * 255
+        // GPU composite: render all windows + effects + decorations to a
+        // headless WGPU texture and read back the RGBA8 pixel data to CPU.
+        let frame = if let Some(ref renderer) = self.state.renderer {
+            renderer.write().compose_full_frame(ww, wh)?
+        } else {
+            warn!("WGPU renderer unavailable — skipping DRM frame");
+            return Ok(());
+        };
 
-        let mut frame = vec![0u8; (ww * wh * 4) as usize];
-        for pixel in frame.chunks_exact_mut(4) {
-            pixel[0] = b;  // BGRA — B first
-            pixel[1] = g;
-            pixel[2] = r;
-            pixel[3] = 255;
+        // Convert RGBA → BGRA (XRGB8888 / GBM native format in LE memory).
+        let mut bgra = frame;
+        for pixel in bgra.chunks_exact_mut(4) {
+            // pixel is [R, G, B, A] → [B, G, R, A]
+            pixel.swap(0, 2);
         }
 
-        // Collect window positions and surface IDs from window_map
-        let mut window_data: Vec<(Vec<u8>, i32, i32, i32, i32)> = Vec::new();
-        for (&wid, &sid) in self.state.window_map.iter() {
-            if let Some(w) = self.state.window_manager.read().get_window(wid) {
-                if let Some(data) = self.state.buffer_cache.get(&sid) {
-                    if let Some(&(sw, sh)) = self.state.buffer_cache_dimensions.get(&sid) {
-                        window_data.push((data.clone(), sw, sh, w.window.position.0, w.window.position.1));
-                    }
-                }
-            }
-        }
-
-        // Software composite: BGRA buffer, cleared to dark navy background
-        let r: u8 = 26;   // 0.1 * 255
-        let g: u8 = 26;   // 0.1 * 255
-        let b: u8 = 51;   // 0.2 * 255
-
-        let mut frame = vec![0u8; (ww * wh * 4) as usize];
-        for pixel in frame.chunks_exact_mut(4) {
-            pixel[0] = b;  // BGRA — B first
-            pixel[1] = g;
-            pixel[2] = r;
-            pixel[3] = 255;
-        }
-
-        // Blit each window's RGBA buffer into the BGRA frame
-        for (data, sw, sh, wx, wy) in &window_data {
-            let sw = *sw as usize;
-            let sh = *sh as usize;
-            let wx = *wx;
-            let wy = *wy;
-            for row in 0..sh {
-                let src_row = row * sw * 4;
-                let dst_y = (wy + row as i32) as usize;
-                if dst_y >= wh as usize { break; }
-                let dst_x_start = wx as usize;
-                let copy_w = sw.min((ww as usize).saturating_sub(dst_x_start));
-
-                let dst_start = (dst_y * ww as usize + dst_x_start) * 4;
-                let dst = &mut frame[dst_start..dst_start + copy_w * 4];
-                let src = &data[src_row..src_row + copy_w * 4];
-
-                for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                    d[0] = s[2]; // B = R
-                    d[1] = s[1]; // G = G
-                    d[2] = s[0]; // R = B
-                    d[3] = 255;  // A
-                }
-            }
-        }
-
+        // Present: GBM page-flip where available, dumb-buffer fallback otherwise.
         let presented = if let Some(ref mut drm) = self.drm_backend {
-            drm.present_composited_frame(ww, wh, &frame)?
+            drm.present_frame(ww, wh, &bgra)?
         } else {
             0
         };
 
-        if presented == 0 {
-            if let Some(ref mut drm) = self.drm_backend {
-                let legacy = drm.render_frame();
-                if legacy == 0 {
-                    debug!("DRM render_frame fallback produced no updated outputs");
-                }
+        // Clean up transient popup render IDs after the frame.
+        if let Some(ref renderer) = self.state.renderer {
+            let mut r = renderer.write();
+            for popup_id in &popup_ids {
+                r.remove_window(popup_render_id(*popup_id));
             }
         }
 
         debug!(
-            "🖥️ DRM rendered {} windows at {}x{} -> {} outputs (software composite)",
+            "🖥️ DRM rendered {} windows at {}x{} -> {} outputs (GPU composite)",
             layouts.len(),
             ww,
             wh,
@@ -3437,7 +3394,9 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_does_not_claim_visible_ssd_yet() {
+    fn test_backend_delegates_ssd_to_client_by_default() {
+        // SSD render infrastructure exists (solid.wgsl + decoration quad pipeline)
+        // but title text rendering is deferred, so we still prefer client-side.
         assert!(!backend_prefers_server_side_decorations());
         assert_eq!(negotiated_xdg_decoration_mode(), Mode::ClientSide);
     }

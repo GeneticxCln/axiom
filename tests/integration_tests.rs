@@ -2276,7 +2276,7 @@ async fn test_ipc_workspace_command_flow() -> Result<()> {
     };
 
     if let Some(sender) = ipc_server.command_sender_for_test() {
-        sender.send(cmd).unwrap();
+        sender.send(cmd).await.unwrap();
     }
 
     // Process the message
@@ -2317,7 +2317,7 @@ async fn test_ipc_effects_control_flow() -> Result<()> {
     };
 
     if let Some(sender) = ipc_server.command_sender_for_test() {
-        sender.send(cmd).unwrap();
+        sender.send(cmd).await.unwrap();
     }
 
     let (changed, actions) = ipc_server.process_messages(&mut config)?;
@@ -2353,7 +2353,7 @@ async fn test_ipc_optimize_config_flow() -> Result<()> {
     };
 
     if let Some(sender) = ipc_server.command_sender_for_test() {
-        sender.send(cmd).unwrap();
+        sender.send(cmd).await.unwrap();
     }
 
     let (changed, actions) = ipc_server.process_messages(&mut config)?;
@@ -2559,8 +2559,8 @@ async fn test_ipc_readonly_messages() -> Result<()> {
 
     // HealthCheck
     if let Some(sender) = ipc_server.command_sender_for_test() {
-        sender.send(LazyUIMessage::HealthCheck).unwrap();
-        sender.send(LazyUIMessage::GetPerformanceReport).unwrap();
+        sender.send(LazyUIMessage::HealthCheck).await.unwrap();
+        sender.send(LazyUIMessage::GetPerformanceReport).await.unwrap();
     }
 
     let (changed, actions) = ipc_server.process_messages(&mut config)?;

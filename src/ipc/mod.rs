@@ -37,6 +37,7 @@ const CLIENT_IDLE_TIMEOUT_SECS: u64 = 60;
 /// future-supported actions from outright typos. The compositor-side
 /// executor wires these to `WorkspaceTape::scroll_left/right` etc. when the
 /// `process_messages` dispatch table is extended.
+#[cfg(test)]
 const KNOWN_WORKSPACE_ACTIONS: &[&str] = &[
     "scroll_left",
     "scroll_right",
@@ -298,9 +299,9 @@ pub struct AxiomIPCServer {
     socket_path: PathBuf,
     /// Broadcast channel for outgoing Axiom messages to all clients
     broadcast_tx: Option<broadcast::Sender<AxiomMessage>>,
-    command_receiver: Option<mpsc::UnboundedReceiver<LazyUIMessage>>,
+    command_receiver: Option<mpsc::Receiver<LazyUIMessage>>,
     /// Sender side of command channel (for wiring incoming commands)
-    command_sender: Option<mpsc::UnboundedSender<LazyUIMessage>>,
+    command_sender: Option<mpsc::Sender<LazyUIMessage>>,
     /// Live read-only handle to the compositor's `AxiomConfig`. Lazily wired
     /// via `set_config_handle` so test-only constructors (`new()`) can keep
     /// working without a config.
@@ -512,8 +513,8 @@ impl AxiomIPCServer {
         let (tx, _rx) = broadcast::channel::<AxiomMessage>(1024);
         self.broadcast_tx = Some(tx.clone());
 
-        // Create command channel for incoming messages
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<LazyUIMessage>();
+        // Create bounded command channel for incoming messages
+        let (cmd_tx, cmd_rx) = mpsc::channel::<LazyUIMessage>(256);
         self.command_sender = Some(cmd_tx.clone());
         self.command_receiver = Some(cmd_rx);
 
@@ -565,7 +566,7 @@ impl AxiomIPCServer {
     async fn accept_connections_static(
         listener: UnixListener,
         tx: broadcast::Sender<AxiomMessage>,
-        cmd_tx: mpsc::UnboundedSender<LazyUIMessage>,
+        cmd_tx: mpsc::Sender<LazyUIMessage>,
         shutdown_token: CancellationToken,
         semaphore: Arc<Semaphore>,
         our_uid: u32,
@@ -614,9 +615,10 @@ impl AxiomIPCServer {
                             let cmd_tx_clone = cmd_tx.clone();
                             let config_for_client = config_handle.clone();
                             let metrics_for_client = metrics_handle.clone();
+                            let client_shutdown_token = shutdown_token.child_token();
                             tokio::spawn(async move {
-                                let _permit = permit; // Hold permit for duration of connection
-                                if let Err(e) = Self::handle_client(stream, rx, cmd_tx_clone, config_for_client, metrics_for_client).await {
+                                let _permit = permit;
+                                if let Err(e) = Self::handle_client(stream, rx, cmd_tx_clone, config_for_client, metrics_for_client, client_shutdown_token).await {
                                     debug!("IPC client handler ended: {}", e);
                                 }
                             });
@@ -635,9 +637,10 @@ impl AxiomIPCServer {
     async fn handle_client(
         stream: UnixStream,
         mut rx: broadcast::Receiver<AxiomMessage>,
-        cmd_tx: mpsc::UnboundedSender<LazyUIMessage>,
+        cmd_tx: mpsc::Sender<LazyUIMessage>,
         config_handle: Option<Arc<parking_lot::RwLock<AxiomConfig>>>,
         metrics_handle: Option<Arc<parking_lot::RwLock<LiveMetrics>>>,
+        shutdown_token: CancellationToken,
     ) -> Result<()> {
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
@@ -665,6 +668,11 @@ impl AxiomIPCServer {
             let mut limited = (&mut reader).take((MAX_IPC_LINE_BYTES + 1) as u64);
 
             tokio::select! {
+                // Shutdown requested — exit cleanly
+                _ = shutdown_token.cancelled() => {
+                    debug!("IPC client handler cancelled by shutdown");
+                    break;
+                }
                 // Idle timeout - disconnect if no activity
                 _ = tokio::time::sleep(idle_timeout) => {
                     info!("⏱️ IPC client idle timeout, disconnecting");
@@ -852,7 +860,7 @@ impl AxiomIPCServer {
                                     // ACK BEFORE the borrow on `message`
                                     // expires (we're about to move `message`
                                     // into `cmd_tx.send`).
-                                    let send_result = cmd_tx.send(message);
+                                    let send_result = cmd_tx.send(message).await;
                                     let ack_event_type: &'static str;
                                     let ack_details: serde_json::Value;
                                     // Q2 fix (compile error E0382 — partial move of
@@ -929,7 +937,9 @@ impl AxiomIPCServer {
                                     // the rest). The inline handler
                                     // takes care of validation + ACK
                                     // generation synchronously.
-                                    let _ = cmd_tx.send(message.clone());
+                                    if cmd_tx.send(message.clone()).await.is_err() {
+                                        debug!("cmd_tx send failed for non-command message (shutting down)");
+                                    }
                                     let cfg_snapshot = config_handle
                                         .as_ref()
                                         .map(|h| h.read().clone());
@@ -1011,18 +1021,13 @@ impl AxiomIPCServer {
                             applied.push(key);
                         }
                         ("workspace.scroll_speed", Some(v))
-                            if v.is_finite() && v >= 0.0 && v <= MAX_SCROLL_SPEED =>
+                            if v.is_finite() && (0.0..=MAX_SCROLL_SPEED).contains(&v) =>
                         {
                             applied.push(key);
                         }
-                        (k, _)
-                            if matches!(
-                                k,
-                                "effects.blur.radius"
-                                    | "effects.animations.duration"
-                                    | "workspace.scroll_speed"
-                            ) =>
-                        {
+                        ("effects.blur.radius"
+                            | "effects.animations.duration"
+                            | "workspace.scroll_speed", _) => {
                             rejected.push((key, "invalid_or_out_of_range_value".into()));
                         }
                         _ => {
@@ -1351,7 +1356,7 @@ impl AxiomIPCServer {
 
     /// Public getter for testing — allows external test code to inject
     /// LazyUIMessage variants into the command channel without a real IPC client.
-    pub fn command_sender_for_test(&self) -> Option<&mpsc::UnboundedSender<LazyUIMessage>> {
+    pub fn command_sender_for_test(&self) -> Option<&mpsc::Sender<LazyUIMessage>> {
         self.command_sender.as_ref()
     }
 

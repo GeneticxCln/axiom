@@ -6,3 +6,4 @@ Exec=axiom-session
 TryExec=axiom-session
 Icon=axiom
 X-DesktopNames=Axiom
+X-Wayland-Compositor=true

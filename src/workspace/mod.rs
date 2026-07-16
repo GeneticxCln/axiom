@@ -357,6 +357,7 @@ impl WorkspaceTape {
     }
 
     /// Move a window to a different column
+    #[must_use]
     pub fn move_window_to_column(&mut self, window_id: u64, target_column: i32) -> bool {
         // First remove from current column
         if let Some(_current_column) = self.remove_window_internal(window_id) {
@@ -463,10 +464,13 @@ impl WorkspaceTape {
             .collect()
     }
 
-    /// Update animations and smooth scrolling
-    pub fn update_animations(&mut self) {
+    /// Update animations and smooth scrolling.
+    /// Returns `true` if the scroll position (or any state affecting layout)
+    /// actually changed this frame.
+    pub fn update_animations(&mut self) -> bool {
         let now = Instant::now();
         self.last_update = now;
+        let old_position = self.current_position;
 
         match self.scroll_state {
             ScrollState::Scrolling {
@@ -556,6 +560,8 @@ impl WorkspaceTape {
             self.cleanup_empty_columns();
             self.last_cleanup = now;
         }
+
+        (self.current_position - old_position).abs() > f64::EPSILON
     }
 
     /// Ease-out cubic function for smooth animations
@@ -852,7 +858,7 @@ impl ScrollableWorkspaces {
     ///   preserving per-column order as much as possible.
     /// - Preserves focused output when it still exists; otherwise focuses the
     ///   first live output. If no live outputs exist, falls back to `default`.
-    pub fn sync_tapes_with_outputs(&mut self, live_output_ids: &[String]) {
+    pub fn sync_tapes_with_outputs(&mut self, live_output_ids: &[String], config_order: &[String]) {
         if live_output_ids.is_empty() {
             self.ensure_tape("default");
             self.output_order = vec!["default".to_string()];
@@ -861,7 +867,21 @@ impl ScrollableWorkspaces {
             return;
         }
 
-        self.output_order = live_output_ids.to_vec();
+        // Apply the configured output order on top of the live set:
+        // outputs named in `config_order` appear first in that order,
+        // then any remaining live outputs (not in the config) are
+        // appended in DRM enumeration order.
+        let mut new_order: Vec<String> = config_order
+            .iter()
+            .filter(|id| live_output_ids.iter().any(|live| live == *id))
+            .cloned()
+            .collect();
+        for id in live_output_ids {
+            if !new_order.contains(id) {
+                new_order.push(id.clone());
+            }
+        }
+        self.output_order = new_order;
         for output_id in live_output_ids {
             self.ensure_tape(output_id);
         }
@@ -1083,12 +1103,17 @@ impl ScrollableWorkspaces {
     }
 
     /// Update animations on all tapes.
+    /// Only invalidates the layout cache when at least one tape's scroll
+    /// position actually changed, so the hot path avoids unnecessary
+    /// recomputation when the workspace is idle.
     pub fn update_animations(&mut self) {
+        let mut changed = false;
         for tape in self.tapes.values_mut() {
-            tape.update_animations();
+            changed |= tape.update_animations();
         }
-        // Invalidate layout cache since scroll positions may have changed
-        *self.cached_layouts.lock() = None;
+        if changed {
+            *self.cached_layouts.lock() = None;
+        }
     }
 
     /// Calculate layout rectangles for all visible windows across all tapes.
@@ -1256,11 +1281,17 @@ impl ScrollableWorkspaces {
     pub fn set_window_floating(&mut self, window_id: u64, floating: bool) {
         if floating {
             self.floating_windows.insert(window_id);
+            // Remove from tiled column so it no longer inflates the
+            // window-count divisor in calculate_workspace_layouts.
+            for tape in self.tapes.values_mut() {
+                tape.remove_window(window_id);
+            }
         } else {
             self.floating_windows.remove(&window_id);
-            // Invalidate cached layouts so the window re-enters tiling.
-            *self.cached_layouts.lock() = None;
         }
+        // Always invalidate: going floating (stale tiled rect in cache)
+        // or coming back (window needs a new tiled rect).
+        *self.cached_layouts.lock() = None;
     }
 
     /// Toggle the floating state for a window.

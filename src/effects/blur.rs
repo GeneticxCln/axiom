@@ -17,7 +17,7 @@ use wgpu::{
     TextureUsages, TextureView, VertexState,
 };
 
-use super::shaders::{ShaderManager, ShaderType};
+
 
 /// Different types of blur effects
 #[derive(Debug, Clone)]

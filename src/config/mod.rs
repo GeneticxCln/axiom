@@ -73,9 +73,25 @@ pub struct AxiomConfig {
     #[serde(default)]
     pub features: FeaturesConfig,
 
+    /// Output configuration (multi-monitor layout)
+    #[serde(default)]
+    pub output: OutputConfig,
+
     /// General compositor settings
     #[serde(default)]
     pub general: GeneralConfig,
+}
+
+/// Output configuration (multi-monitor layout)
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct OutputConfig {
+    /// Preferred output order for the horizontal strip layout.
+    /// Output names (e.g. `"HDMI-A-1"`, `"DP-1"`) listed here appear in
+    /// this order from left to right. Any connected output not listed is
+    /// appended at the end in DRM-enumeration order.
+    /// Leave empty to use the natural DRM enumeration order.
+    #[serde(default)]
+    pub order: Vec<String>,
 }
 
 /// Feature kill-switches. Both flags default to `false` — see the
@@ -391,6 +407,24 @@ pub struct GeneralConfig {
 
     /// Enable VSync
     pub vsync: bool,
+
+    /// Default terminal emulator command
+    #[serde(default = "GeneralConfig::default_terminal")]
+    pub default_terminal: String,
+
+    /// Default application launcher command
+    #[serde(default = "GeneralConfig::default_launcher")]
+    pub default_launcher: String,
+}
+
+impl GeneralConfig {
+    fn default_terminal() -> String {
+        "xterm".into()
+    }
+
+    fn default_launcher() -> String {
+        "dmenu_run".into()
+    }
 }
 
 impl Default for WorkspaceConfig {
@@ -532,6 +566,8 @@ impl Default for GeneralConfig {
             debug: false,
             max_fps: 60,
             vsync: true,
+            default_terminal: Self::default_terminal(),
+            default_launcher: Self::default_launcher(),
         }
     }
 }
@@ -698,6 +734,32 @@ impl AxiomConfig {
             );
         }
 
+        // --- output ---
+        // Validate that all entries in output.order are non-empty and
+        // contain only valid identifier characters. DRM connector names
+        // like "HDMI-A-1" are the expected format.
+        for (i, name) in self.output.order.iter().enumerate() {
+            if name.is_empty() {
+                anyhow::bail!("output.order[{}] is empty — each entry must be a non-empty connector name", i);
+            }
+            // Allow alphanumeric, hyphen, underscore, dash
+            if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                anyhow::bail!(
+                    "output.order[{}] = {:?} contains invalid characters — use alphanumeric, hyphen, or underscore",
+                    i, name
+                );
+            }
+        }
+        // Check for duplicates in output.order
+        {
+            let mut seen = std::collections::HashSet::new();
+            for name in &self.output.order {
+                if !seen.insert(name) {
+                    anyhow::bail!("output.order contains duplicate entry {:?}", name);
+                }
+            }
+        }
+
         // --- xwayland ---
         if let Some(display) = self.xwayland.display {
             if display > 99 {
@@ -767,6 +829,7 @@ impl AxiomConfig {
         let input_changed = partial.input != default_config.input;
         let bindings_changed = partial.bindings != default_config.bindings;
         let xwayland_changed = partial.xwayland != default_config.xwayland;
+        let output_changed = partial.output != default_config.output;
         let general_changed = partial.general != default_config.general;
 
         if workspace_changed {
@@ -786,6 +849,9 @@ impl AxiomConfig {
         }
         if xwayland_changed {
             self.xwayland = partial.xwayland;
+        }
+        if output_changed {
+            self.output = partial.output;
         }
         if general_changed {
             self.general = partial.general;

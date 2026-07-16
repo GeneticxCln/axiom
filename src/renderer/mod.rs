@@ -136,12 +136,62 @@ pub struct AxiomRenderer {
     /// buffers need invalidation (border width is baked into each uniform).
     cached_border_width: f32,
 
+    /// Solid-color render pipeline for server-side decoration elements
+    /// (titlebar backgrounds, close/minimize/maximize buttons).
+    /// Shares the cached projection uniform buffer at binding 0.
+    solid_pipeline: RenderPipeline,
+    /// Bind group layout for the solid pipeline (projection uniform only).
+    solid_bind_group_layout: BindGroupLayout,
+
+    /// Per-frame decoration quads. Cleared each frame, populated by
+    /// the compositor's `prepare_frame_data()` from DecorationManager.
+    decoration_quads: Vec<DecorationQuad>,
+
     /// Flipped when a wgpu primitive reports a recoverable-but-fatal
     /// error (driver crash, context lost, surface lost). Read by
     /// [`AxiomRenderer::is_device_lost`] and the compositor's device-loss
     /// recovery path. Shared via `Arc` so callbacks spawned inside
     /// `map_async` can flag loss without holding the renderer lock.
     device_lost: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A solid-colored quad for decoration elements (titlebar backgrounds, buttons).
+#[derive(Debug, Clone)]
+pub struct DecorationQuad {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub color: [f32; 4],
+}
+
+/// Vertex format for [`AxiomRenderer`]'s solid-color decoration pipeline.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct SolidVertex {
+    position: [f32; 2],
+    color: [f32; 4],
+}
+
+impl SolidVertex {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<SolidVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 2]>() as u64,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        }
+    }
 }
 
 /// Represents a rendered window surface
@@ -370,6 +420,12 @@ impl AxiomRenderer {
             create_placeholder_pipeline(&device, config.format)
                 .context("Failed to build placeholder render pipeline")?;
 
+        // Solid-color decoration pipeline for titlebars and buttons.
+        // Always built — decorations are not debug-only.
+        let (solid_pipeline, solid_bind_group_layout) =
+            create_solid_pipeline(&device, config.format)
+                .context("Failed to build solid decoration pipeline")?;
+
         Ok(Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
@@ -386,6 +442,9 @@ impl AxiomRenderer {
             placeholder_pipeline,
             #[cfg(debug_assertions)]
             placeholder_bind_group_layout,
+            solid_pipeline,
+            solid_bind_group_layout,
+            decoration_quads: Vec::new(),
             sampler,
             cached_projection_buffer: None,
             cached_projection_dims: (0, 0),
@@ -543,6 +602,10 @@ impl AxiomRenderer {
             create_placeholder_pipeline(&device, format)
                 .context("Failed to build placeholder render pipeline")?;
 
+        let (solid_pipeline, solid_bind_group_layout) =
+            create_solid_pipeline(&device, format)
+                .context("Failed to build solid decoration pipeline")?;
+
         Ok(Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
@@ -559,6 +622,9 @@ impl AxiomRenderer {
             placeholder_pipeline,
             #[cfg(debug_assertions)]
             placeholder_bind_group_layout,
+            solid_pipeline,
+            solid_bind_group_layout,
+            decoration_quads: Vec::new(),
             sampler,
             cached_projection_buffer: None,
             cached_projection_dims: (0, 0),
@@ -691,6 +757,67 @@ impl AxiomRenderer {
         }
     }
 
+    /// Set the per-frame decoration quads, replacing any previous frame's data.
+    /// Called by the compositor's `prepare_frame_data()` each tick.
+    pub fn set_decoration_quads(&mut self, quads: Vec<DecorationQuad>) {
+        self.decoration_quads = quads;
+    }
+
+    /// Clear decoration quads (called at the start of each frame).
+    pub fn clear_decoration_quads(&mut self) {
+        self.decoration_quads.clear();
+    }
+
+    /// Pre-build decoration GPU resources (vertex buffer + bind group)
+    /// before the render pass so that the pass block does not need &self.
+    /// Returns `None` when there are no decoration quads to draw.
+    fn prepare_decoration_resources(
+        &self,
+        projection_buffer: &Buffer,
+    ) -> Option<(wgpu::BindGroup, wgpu::Buffer, u32)> {
+        if self.decoration_quads.is_empty() {
+            return None;
+        }
+
+        const VERTS_PER_QUAD: usize = 6;
+        let mut vertices: Vec<SolidVertex> =
+            Vec::with_capacity(self.decoration_quads.len() * VERTS_PER_QUAD);
+
+        for quad in &self.decoration_quads {
+            let x0 = quad.x;
+            let y0 = quad.y;
+            let x1 = quad.x + quad.w;
+            let y1 = quad.y + quad.h;
+            let c = quad.color;
+
+            vertices.push(SolidVertex { position: [x0, y0], color: c });
+            vertices.push(SolidVertex { position: [x1, y0], color: c });
+            vertices.push(SolidVertex { position: [x0, y1], color: c });
+            vertices.push(SolidVertex { position: [x1, y0], color: c });
+            vertices.push(SolidVertex { position: [x1, y1], color: c });
+            vertices.push(SolidVertex { position: [x0, y1], color: c });
+        }
+
+        let vertex_buf = self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Decoration Vertex Buffer"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        );
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &self.solid_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: projection_buffer.as_entire_binding(),
+            }],
+            label: Some("Decoration Bind Group"),
+        });
+
+        Some((bind_group, vertex_buf, vertices.len() as u32))
+    }
+
     /// Update window texture from raw RGBA data
     pub fn update_window_texture(&mut self, window_id: u64, width: u32, height: u32, data: &[u8]) {
         if let Some(window) = self.windows.iter_mut().find(|w| w.id == window_id) {
@@ -758,7 +885,7 @@ impl AxiomRenderer {
     /// way out. The `Surface` itself isn't `Clone` in wgpu 0.19, so this
     /// swap pattern is the simplest correct fix.
     pub fn render_output(&mut self, output_name: &str) -> Result<()> {
-        if let Some((key, (mut surface, config))) = self.surfaces.remove_entry(output_name) {
+        if let Some((key, (surface, config))) = self.surfaces.remove_entry(output_name) {
             let result = loop {
                 match surface.get_current_texture() {
                     Ok(frame) => {
@@ -1022,6 +1149,11 @@ impl AxiomRenderer {
             }
         }
 
+        // Pre-build decoration vertex buffer and bind group before the
+        // render pass so we don't need &self inside the pass block.
+        let decoration_resources =
+            self.prepare_decoration_resources(uniform_buffer);
+
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Axiom Render Pass"),
@@ -1045,11 +1177,18 @@ impl AxiomRenderer {
 
             render_pass.set_pipeline(&self.render_pipeline);
 
-            for (id, bind_group, vertex_buffer) in &draw_commands {
+            for (_id, bind_group, vertex_buffer) in &draw_commands {
                 render_pass.set_bind_group(0, bind_group, &[]);
                 render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 render_pass.draw(0..6, 0..1);
-                debug!("✅ Rendered window {} to surface", id);
+            }
+
+            // Draw server-side decorations (titlebar backgrounds, buttons).
+            if let Some((ref deco_bg, ref deco_vb, deco_count)) = decoration_resources {
+                render_pass.set_pipeline(&self.solid_pipeline);
+                render_pass.set_bind_group(0, deco_bg, &[]);
+                render_pass.set_vertex_buffer(0, deco_vb.slice(..));
+                render_pass.draw(0..deco_count, 0..1);
             }
         }
 
@@ -1115,6 +1254,7 @@ impl AxiomRenderer {
     /// recovery path) should consult this BEFORE submitting work to
     /// the queue so they can short-circuit cleanly without paying the
     /// cost of a doomed render pass.
+    #[must_use]
     pub fn is_device_lost(&self) -> bool {
         self.device_lost.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -1281,13 +1421,11 @@ impl AxiomRenderer {
         // already populates — vertex + uniform buffers are up to date.
         self.prepare_window_resources();
 
-        // Get or (lazily) recreate the headless target at the requested
-        // size. Reused across frames to avoid per-frame GPU churn.
-        let (target, target_view) =
-            ensure_headless_target(&self.device, &mut self.headless_target, width, height)?;
-
         // Cached ortho-projection buffer, reused across frames at the
         // same size. Mirrors the optimisation in `render_to_surface`.
+        // Must happen before ensure_headless_target so the decoration
+        // resources (which also need the projection buffer) can be
+        // pre-built without conflicting with the headless target borrow.
         let dims = (width, height);
         if self.cached_projection_dims != dims {
             let projection = create_projection_matrix(width as f32, height as f32);
@@ -1305,6 +1443,16 @@ impl AxiomRenderer {
             .cached_projection_buffer
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("projection buffer not initialized"))?;
+
+        // Pre-build decoration GPU resources while we still have a
+        // shared &self borrow (before the headless target borrow below).
+        let decoration_resources =
+            self.prepare_decoration_resources(proj_buffer);
+
+        // Get or (lazily) recreate the headless target at the requested
+        // size. Reused across frames to avoid per-frame GPU churn.
+        let (target, target_view) =
+            ensure_headless_target(&self.device, &mut self.headless_target, width, height)?;
 
         // Pre-build draw commands. Borrow checker: each entry below is
         // a fresh owned `BindGroup` (gpu handle only) plus a `&Buffer`
@@ -1372,6 +1520,11 @@ impl AxiomRenderer {
                 }
             }
         }
+
+        // Pre-build decoration GPU resources for the DRM composite path.
+        let (decoration_bg, decoration_vb, decoration_count) = decoration_resources
+            .map(|(bg, vb, count)| (Some(bg), Some(vb), count))
+            .unwrap_or((None, None, 0));
 
         // Snapshot effects queue contents before acquiring any
         // effects_engine write lock, so the queue can be drained
@@ -1447,6 +1600,14 @@ impl AxiomRenderer {
                     rp.set_vertex_buffer(0, vb.slice(..));
                     rp.draw(0..6, 0..1);
                 }
+            }
+
+            // Draw server-side decorations (titlebar backgrounds, buttons).
+            if let (Some(deco_bg), Some(deco_vb)) = (&decoration_bg, &decoration_vb) {
+                rp.set_pipeline(&self.solid_pipeline);
+                rp.set_bind_group(0, deco_bg, &[]);
+                rp.set_vertex_buffer(0, deco_vb.slice(..));
+                rp.draw(0..decoration_count, 0..1);
             }
         } // end render pass — `target_view` borrow released here.
 
@@ -2019,6 +2180,17 @@ impl AxiomRenderer {
         }
         removed
     }
+
+    /// Release all GPU resources held by the renderer.
+    pub fn shutdown(&mut self) {
+        self.windows.clear();
+        self.window_shadows.clear();
+        self.window_blurs.clear();
+        self.surfaces.clear();
+        self.cached_projection_buffer = None;
+        self.cached_readback_buffer = None;
+        self.headless_target = None;
+    }
 }
 
 // Vertex descriptor for wgpu
@@ -2155,6 +2327,80 @@ pub fn create_projection_matrix(width: f32, height: f32) -> [[f32; 4]; 4] {
 /// pipeline is dropped at compile time, and the WGSL shader bytes never
 /// reach the release binary.
 #[cfg(debug_assertions)]
+/// Build the solid-color render pipeline used for server-side decoration
+/// elements (titlebar backgrounds, close/minimize/maximize buttons).
+///
+/// Shares the same projection-uniform bind-group layout as the main
+/// compositor pipeline so the cached projection buffer can be re-used.
+/// Each quad carries its color as a per-vertex attribute so no per-quad
+/// uniform buffer is needed.
+pub fn create_solid_pipeline(
+    device: &Device,
+    format: TextureFormat,
+) -> Result<(RenderPipeline, BindGroupLayout)> {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Solid Decoration Shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("solid.wgsl").into()),
+    });
+
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Solid Decoration Bind Group Layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Solid Decoration Pipeline Layout"),
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Solid Decoration Render Pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[SolidVertex::desc()],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+    });
+
+    Ok((pipeline, bind_group_layout))
+}
+
 pub fn create_placeholder_pipeline(
     device: &Device,
     format: TextureFormat,

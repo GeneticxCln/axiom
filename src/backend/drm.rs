@@ -353,6 +353,7 @@ fn scale_factor_from_edid(
 /// Dumb buffers created for scanout use XRGB8888, whose little-endian memory
 /// layout is effectively B, G, R, X. This helper copies the overlapping region
 /// and clears any uncovered destination pixels to black.
+#[allow(clippy::too_many_arguments)]
 fn copy_bgra_to_xrgb8888(
     src: &[u8],
     src_width: u32,
@@ -845,6 +846,128 @@ impl KmsState {
         Ok(presented)
     }
 
+    /// Present a composed BGRA frame to every output, preferring GBM
+    /// page-flip on outputs with a GBM surface and falling back to the
+    /// CPU dumb-buffer copy path on outputs without GBM.
+    ///
+    /// For GBM outputs the flow is:
+    ///   1. Lock the GBM surface front buffer → BO
+    ///   2. Write the output's subregion of the composited frame into the BO
+    ///   3. Create a DRM framebuffer from the BO
+    ///   4. Issue an async page-flip (the kernel swaps scanout on vblank)
+    ///   5. Push the replaced FB into `pending_fbs` for deferred free on
+    ///      page-flip completion (handled by [`receive_events`]).
+    ///
+    /// For CPU-scanout outputs the existing dumb-buffer copy path is used.
+    /// Outputs with neither GBM nor a CPU scanout buffer are silently skipped.
+    ///
+    /// Returns the count of outputs that were successfully presented.
+    pub fn present_frame(
+        &mut self,
+        src_width: u32,
+        src_height: u32,
+        bgra: &[u8],
+    ) -> Result<usize, anyhow::Error> {
+        let mut presented = 0usize;
+        let mut output_origin_x = 0u32;
+
+        for output in &mut self.outputs {
+            let presented_this = if let Some(gbm) = output.gbm.as_ref() {
+                let (new_fb, mut front) = match unsafe { gbm.lock_and_create_fb(&self.card) } {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        warn!(
+                            "GBM lock_and_create_fb failed for '{}': {} — skipping",
+                            output.name, e
+                        );
+                        output_origin_x = output_origin_x.saturating_add(output.width);
+                        continue;
+                    }
+                };
+
+                // Write the output's portion of the composited frame into the
+                // GBM buffer object. For single-output (the common case) the
+                // full composited frame is written directly; for multi-monitor
+                // we extract the horizontal slice belonging to this output.
+                let write_ok = if output_origin_x == 0 && src_width == output.width {
+                    front.write(bgra).is_ok()
+                } else {
+                    let src_pitch = src_width as usize * 4;
+                    let dst_bytes = output.height as usize * (output.width as usize * 4);
+                    let mut sub = Vec::with_capacity(dst_bytes);
+                    for row in 0..output.height {
+                        let off =
+                            row as usize * src_pitch + output_origin_x as usize * 4;
+                        let end = off + output.width as usize * 4;
+                        sub.extend_from_slice(&bgra[off..end]);
+                    }
+                    front.write(&sub).is_ok()
+                };
+
+                if !write_ok {
+                    warn!("GBM buffer write failed for '{}'", output.name);
+                    false
+                } else {
+                    let old_fb = std::mem::replace(&mut output.current_fb, new_fb);
+                    output.pending_fbs.push_back(old_fb);
+
+                    if let Err(e) = self
+                        .card
+                        .page_flip(output.crtc, new_fb, PageFlipFlags::EVENT, None)
+                    {
+                        warn!("page_flip failed for '{}': {}", output.name, e);
+                        output.pending_fbs.pop_back();
+                        output.current_fb = old_fb;
+                        false
+                    } else {
+                        true
+                    }
+                }
+            } else if let Some(scanout) = output.cpu_scanout.as_mut() {
+                let pitch = drm::buffer::Buffer::pitch(&scanout.buffer);
+                match self.card.map_dumb_buffer(&mut scanout.buffer) {
+                    Ok(mut mapping) => {
+                        copy_bgra_to_xrgb8888(
+                            bgra,
+                            src_width,
+                            src_height,
+                            output_origin_x,
+                            0,
+                            &mut mapping,
+                            output.width,
+                            output.height,
+                            pitch,
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to map dumb buffer for '{}': {}",
+                            output.name, e
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+
+            if presented_this {
+                presented += 1;
+            }
+            output_origin_x = output_origin_x.saturating_add(output.width);
+        }
+
+        if presented > 0 {
+            debug!(
+                "Presented frame {}x{} to {} output(s) (GBM + dumb)",
+                src_width, src_height, presented
+            );
+        }
+
+        Ok(presented)
+    }
+
     /// Fallback: create a dumb buffer + framebuffer (used when GBM is
     /// unavailable).
     fn create_dumb_framebuffer(
@@ -1073,6 +1196,21 @@ impl DrmBackend {
     ) -> Result<usize, anyhow::Error> {
         match self.kms.as_mut() {
             Some(kms) => kms.present_composited_frame(width, height, bgra),
+            None => Ok(0),
+        }
+    }
+
+    /// Present a composed BGRA frame to every connected output. Prefers
+    /// GBM page-flip where a [`GbmRenderState`] exists; falls back to the
+    /// CPU dumb-buffer copy path for outputs without GBM.
+    pub fn present_frame(
+        &mut self,
+        src_width: u32,
+        src_height: u32,
+        bgra: &[u8],
+    ) -> Result<usize, anyhow::Error> {
+        match self.kms.as_mut() {
+            Some(kms) => kms.present_frame(src_width, src_height, bgra),
             None => Ok(0),
         }
     }

@@ -90,7 +90,7 @@ impl XWaylandManager {
     pub async fn new(config: &XWaylandConfig) -> Result<Self> {
         info!("🔗 Initializing XWayland manager");
 
-        let mut manager = Self {
+        let manager = Self {
             _config: config.clone(),
             xwayland_process: None,
             display_number: None,

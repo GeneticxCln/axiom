@@ -268,6 +268,8 @@ prop_compose! {
             debug,
             max_fps,
             vsync,
+            default_terminal: "xterm".into(),
+            default_launcher: "dmenu_run".into(),
         }
     }
 }
@@ -303,6 +305,7 @@ prop_compose! {
             // here if a future invariant gate gets layered onto either
             // field.
             features: FeaturesConfig::default(),
+            output: OutputConfig::default(),
         }
     }
 }
