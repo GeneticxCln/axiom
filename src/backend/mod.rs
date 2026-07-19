@@ -98,13 +98,17 @@ type ClipboardUpdate = Vec<u8>;
 /// compositor output. Until that lands, the backend should not claim SSD to
 /// Wayland/X11 clients even though internal decoration state exists for tests
 /// and future rendering work.
+/// Visible server-side decoration rendering is not yet wired into the live
+/// compositor output. Until that lands, the backend should not claim SSD to
+/// Wayland/X11 clients even though internal decoration state exists for tests
+/// and future rendering work.
 fn backend_prefers_server_side_decorations() -> bool {
     false
 }
 
 /// Current protocol-level decoration response advertised to xdg-decoration
 /// clients. We intentionally negotiate client-side decorations until visible
-/// SSD rendering is part of the live render path.
+/// SSD title text rendering is operational (font atlas pipeline).
 fn negotiated_xdg_decoration_mode() -> Mode {
     Mode::ClientSide
 }
@@ -1061,6 +1065,10 @@ pub struct AxiomSmithayBackendReal {
     pub winit_event_loop: Option<WinitEventLoop>,
     /// DRM backend state (scaffolding; `Some` only when `backend_kind == Drm`).
     pub drm_backend: Option<DrmBackend>,
+    /// libseat session for privileged device access (DRM, input).
+    /// `None` when libseat/seatd is not available.
+    #[allow(dead_code)]
+    session: Option<libseat::Seat>,
     pub clients: Vec<Client>,
     /// Wayland listening socket — kept alive so clients can connect
     /// (Smithay's display.dispatch_clients polls it internally)
@@ -1177,6 +1185,7 @@ impl AxiomSmithayBackendReal {
             winit_backend: None,
             winit_event_loop: None,
             drm_backend: None,
+            session: None,
             clients: Vec::new(),
             listener: None,
             decoration_consumed_press: false,
@@ -1312,6 +1321,7 @@ impl AxiomSmithayBackendReal {
             winit_backend: None,
             winit_event_loop: None,
             drm_backend,
+            session: None,
             clients: Vec::new(),
             listener: Some(listener),
             decoration_consumed_press: false,
@@ -1379,7 +1389,9 @@ impl AxiomSmithayBackendReal {
             };
             let w = window_size.w as u32;
             let h = window_size.h as u32;
-            renderer.write().add_output("primary".to_string(), surface, w, h);
+            renderer
+                .write()
+                .add_output("primary".to_string(), surface, w, h);
             info!("🎨 WGPU surface created from winit window ({}x{})", w, h);
         }
 
@@ -1408,6 +1420,28 @@ impl AxiomSmithayBackendReal {
     /// per output, and initialises the libinput + udev hotplug contexts.
     fn initialize_drm(&mut self) -> Result<()> {
         info!("🖥️ Initializing DRM/KMS backend...");
+
+        // Try to open a libseat session for DRM master + device access.
+        // If seatd/logind is not available, session stays None and the
+        // backend falls back to direct device opening (requires root).
+        self.session = match libseat::Seat::open(|_seat, event| match event {
+            libseat::SeatEvent::Enable => info!("Session activated"),
+            libseat::SeatEvent::Disable => info!("Session deactivated"),
+        }) {
+            Ok(mut seat) => {
+                info!("✅ libseat session opened: {}", seat.name());
+                // Open the DRM card through the session so we get proper
+                // DRM master access without requiring root.
+                Some(seat)
+            }
+            Err(e) => {
+                warn!(
+                    "⚠️ libseat not available ({}): DRM will use direct device access",
+                    e
+                );
+                None
+            }
+        };
 
         if let Some(ref mut drm) = self.drm_backend {
             drm.initialize()?;
@@ -3221,7 +3255,11 @@ impl AxiomSmithayBackendReal {
                     let fw = w.window.size.0 as f32;
                     let fh = w.window.size.1 as f32;
                     let focused = wm.focused_window_id() == Some(window_id);
-                    let bc = if focused { [0.3, 0.6, 1.0, 0.9] } else { [0.0, 0.0, 0.0, 0.0] };
+                    let bc = if focused {
+                        [0.3, 0.6, 1.0, 0.9]
+                    } else {
+                        [0.0, 0.0, 0.0, 0.0]
+                    };
                     r.upsert_window_rect(window_id, (fx, fy), (fw, fh), 1.0, bc);
                 }
             }
@@ -3361,7 +3399,7 @@ mod tests {
         smithay_output_scale, State,
     };
     use super::clipboard_bridge::{create_pipe, write_selection_bytes_to_fd};
-    use super::render_bridge::{popup_render_id, should_use_wgpu_gl_bridge};
+    use super::render_bridge::{popup_render_id, should_render};
     use crate::config::AxiomConfig;
     use smithay::output::Scale;
     use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
@@ -3429,15 +3467,15 @@ mod tests {
     }
 
     #[test]
-    fn test_should_use_wgpu_gl_bridge_for_non_empty_scene() {
-        assert!(should_use_wgpu_gl_bridge(true, false, 0));
-        assert!(should_use_wgpu_gl_bridge(false, true, 0));
-        assert!(should_use_wgpu_gl_bridge(false, false, 1));
+    fn test_should_render_for_non_empty_scene() {
+        assert!(should_render(true, false, 0));
+        assert!(should_render(false, true, 0));
+        assert!(should_render(false, false, 1));
     }
 
     #[test]
     fn test_should_skip_wgpu_gl_bridge_for_empty_scene() {
-        assert!(!should_use_wgpu_gl_bridge(false, false, 0));
+        assert!(!should_render(false, false, 0));
     }
 
     #[test]

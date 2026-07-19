@@ -896,8 +896,7 @@ impl KmsState {
                     let dst_bytes = output.height as usize * (output.width as usize * 4);
                     let mut sub = Vec::with_capacity(dst_bytes);
                     for row in 0..output.height {
-                        let off =
-                            row as usize * src_pitch + output_origin_x as usize * 4;
+                        let off = row as usize * src_pitch + output_origin_x as usize * 4;
                         let end = off + output.width as usize * 4;
                         sub.extend_from_slice(&bgra[off..end]);
                     }
@@ -911,9 +910,9 @@ impl KmsState {
                     let old_fb = std::mem::replace(&mut output.current_fb, new_fb);
                     output.pending_fbs.push_back(old_fb);
 
-                    if let Err(e) = self
-                        .card
-                        .page_flip(output.crtc, new_fb, PageFlipFlags::EVENT, None)
+                    if let Err(e) =
+                        self.card
+                            .page_flip(output.crtc, new_fb, PageFlipFlags::EVENT, None)
                     {
                         warn!("page_flip failed for '{}': {}", output.name, e);
                         output.pending_fbs.pop_back();
@@ -941,10 +940,7 @@ impl KmsState {
                         true
                     }
                     Err(e) => {
-                        warn!(
-                            "Failed to map dumb buffer for '{}': {}",
-                            output.name, e
-                        );
+                        warn!("Failed to map dumb buffer for '{}': {}", output.name, e);
                         false
                     }
                 }

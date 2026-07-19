@@ -78,12 +78,12 @@ Axiom is built using Rust's `cargo` build system.
 ## Packaged session assets
 
 The repository now includes basic session packaging assets for downstream packages:
-- `packaging/axiom.desktop` — nested/windowed launcher
-- `packaging/axiom.session` — Wayland session entry for display managers
+- `packaging/axiom.desktop` — nested/windowed launcher (`axiom --windowed`)
+- `packaging/axiom-wayland.desktop` — Wayland session entry for display managers (`Exec=axiom-session`)
 - `packaging/axiom-session` — wrapper that starts `axiom --backend=drm` with user/system config discovery
 - `assets/logo.svg` — application/session icon source
 
-These assets are still **alpha-quality** and should be treated as early integration scaffolding, not a promise of a polished standalone desktop session.
+There is **no** `packaging/axiom.session` file; the display-manager session entry is `axiom-wayland.desktop` (installed as `axiom.desktop` under `wayland-sessions/` by packaging). These assets are still **alpha-quality** and should be treated as early integration scaffolding, not a promise of a polished standalone desktop session.
 
 ## First run
 

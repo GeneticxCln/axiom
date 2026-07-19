@@ -131,15 +131,13 @@ async fn wait_for_xwm_map_event(
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         while let Some(event) = xwm.poll_event() {
-            if let Some(mapped) = xwm.handle_event(&event)? {
-                if let XwmEvent::WindowMapped {
-                    x11_window_id,
-                    title,
-                    class,
-                } = mapped
-                {
-                    return Ok(Some((x11_window_id, title, class)));
-                }
+            if let Some(XwmEvent::WindowMapped {
+                x11_window_id,
+                title,
+                class,
+            }) = xwm.handle_event(&event)?
+            {
+                return Ok(Some((x11_window_id, title, class)));
             }
         }
         sleep(Duration::from_millis(50)).await;

@@ -127,12 +127,15 @@ run_integration_tests() {
         local xvfb_pid=$!
         sleep 2
         
-        run_test "Integration Tests" "cargo test --test integration_tests" true
+        # Integration failures must fail the suite (no soft-pass).
+        run_test "Integration Tests" "cargo test --test integration_tests --all-features" false
+        local integration_status=$?
         
         kill $xvfb_pid 2>/dev/null || true
+        return $integration_status
     else
         echo "Running integration tests without virtual display..."
-        run_test "Integration Tests" "cargo test --test integration_tests" true
+        run_test "Integration Tests" "cargo test --test integration_tests --all-features" false
     fi
 }
 

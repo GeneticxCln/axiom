@@ -17,8 +17,6 @@ use wgpu::{
     TextureUsages, TextureView, VertexState,
 };
 
-
-
 /// Different types of blur effects
 #[derive(Debug, Clone)]
 pub enum BlurType {
@@ -95,11 +93,7 @@ impl BlurRenderer {
     /// allocates a uniform buffer plus a reusable texture sampler.
     /// The intermediate texture for dual-pass blur is created lazily
     /// on the first [`apply_blur`] call.
-    pub fn new(
-        device: Arc<Device>,
-        queue: Arc<Queue>,
-        initial_params: BlurParams,
-    ) -> Result<Self> {
+    pub fn new(device: Arc<Device>, queue: Arc<Queue>, initial_params: BlurParams) -> Result<Self> {
         info!("🌊 Initializing GPU Blur Renderer...");
 
         // Create uniform buffer for blur parameters
@@ -163,18 +157,18 @@ impl BlurRenderer {
         let wgsl_h = super::shaders::generate_blur_wgsl("Horizontal", &weights);
         let wgsl_v = super::shaders::generate_blur_wgsl("Vertical", &weights);
 
-        let horizontal_shader = self.device.create_shader_module(
-            wgpu::ShaderModuleDescriptor {
+        let horizontal_shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("Horizontal Blur (dynamic sigma)"),
                 source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(wgsl_h)),
-            }
-        );
-        let vertical_shader = self.device.create_shader_module(
-            wgpu::ShaderModuleDescriptor {
+            });
+        let vertical_shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("Vertical Blur (dynamic sigma)"),
                 source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(wgsl_v)),
-            }
-        );
+            });
 
         // Create bind group layout for blur uniforms and textures
         let bind_group_layout =

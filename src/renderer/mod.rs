@@ -13,6 +13,9 @@
 
 #[cfg(debug_assertions)]
 use anyhow::Context;
+pub mod font_atlas;
+pub use font_atlas::{CachedGlyph, GlyphCache, TextQuad};
+
 use anyhow::Result;
 use log::{debug, info};
 use std::collections::HashMap;
@@ -142,10 +145,18 @@ pub struct AxiomRenderer {
     solid_pipeline: RenderPipeline,
     /// Bind group layout for the solid pipeline (projection uniform only).
     solid_bind_group_layout: BindGroupLayout,
+    #[allow(dead_code)]
+    text_pipeline: Option<RenderPipeline>,
+    #[allow(dead_code)]
+    text_bind_group_layout: Option<BindGroupLayout>,
+    #[allow(dead_code)]
+    glyph_cache: Option<crate::renderer::font_atlas::GlyphCache>,
 
     /// Per-frame decoration quads. Cleared each frame, populated by
     /// the compositor's `prepare_frame_data()` from DecorationManager.
     decoration_quads: Vec<DecorationQuad>,
+    #[allow(dead_code)]
+    text_quads: Vec<TextQuad>,
 
     /// Flipped when a wgpu primitive reports a recoverable-but-fatal
     /// error (driver crash, context lost, surface lost). Read by
@@ -296,7 +307,9 @@ impl AxiomRenderer {
             .unwrap_or(surface_caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
             format: surface_format,
             width,
             height,
@@ -444,7 +457,11 @@ impl AxiomRenderer {
             placeholder_bind_group_layout,
             solid_pipeline,
             solid_bind_group_layout,
+            text_pipeline: None,
+            text_bind_group_layout: None,
+            glyph_cache: None,
             decoration_quads: Vec::new(),
+            text_quads: Vec::new(),
             sampler,
             cached_projection_buffer: None,
             cached_projection_dims: (0, 0),
@@ -602,9 +619,8 @@ impl AxiomRenderer {
             create_placeholder_pipeline(&device, format)
                 .context("Failed to build placeholder render pipeline")?;
 
-        let (solid_pipeline, solid_bind_group_layout) =
-            create_solid_pipeline(&device, format)
-                .context("Failed to build solid decoration pipeline")?;
+        let (solid_pipeline, solid_bind_group_layout) = create_solid_pipeline(&device, format)
+            .context("Failed to build solid decoration pipeline")?;
 
         Ok(Self {
             device: Arc::new(device),
@@ -624,7 +640,11 @@ impl AxiomRenderer {
             placeholder_bind_group_layout,
             solid_pipeline,
             solid_bind_group_layout,
+            text_pipeline: None,
+            text_bind_group_layout: None,
+            glyph_cache: None,
             decoration_quads: Vec::new(),
+            text_quads: Vec::new(),
             sampler,
             cached_projection_buffer: None,
             cached_projection_dims: (0, 0),
@@ -790,21 +810,39 @@ impl AxiomRenderer {
             let y1 = quad.y + quad.h;
             let c = quad.color;
 
-            vertices.push(SolidVertex { position: [x0, y0], color: c });
-            vertices.push(SolidVertex { position: [x1, y0], color: c });
-            vertices.push(SolidVertex { position: [x0, y1], color: c });
-            vertices.push(SolidVertex { position: [x1, y0], color: c });
-            vertices.push(SolidVertex { position: [x1, y1], color: c });
-            vertices.push(SolidVertex { position: [x0, y1], color: c });
+            vertices.push(SolidVertex {
+                position: [x0, y0],
+                color: c,
+            });
+            vertices.push(SolidVertex {
+                position: [x1, y0],
+                color: c,
+            });
+            vertices.push(SolidVertex {
+                position: [x0, y1],
+                color: c,
+            });
+            vertices.push(SolidVertex {
+                position: [x1, y0],
+                color: c,
+            });
+            vertices.push(SolidVertex {
+                position: [x1, y1],
+                color: c,
+            });
+            vertices.push(SolidVertex {
+                position: [x0, y1],
+                color: c,
+            });
         }
 
-        let vertex_buf = self.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
+        let vertex_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Decoration Vertex Buffer"),
                 contents: bytemuck::cast_slice(&vertices),
                 usage: wgpu::BufferUsages::VERTEX,
-            },
-        );
+            });
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &self.solid_bind_group_layout,
@@ -1151,8 +1189,7 @@ impl AxiomRenderer {
 
         // Pre-build decoration vertex buffer and bind group before the
         // render pass so we don't need &self inside the pass block.
-        let decoration_resources =
-            self.prepare_decoration_resources(uniform_buffer);
+        let decoration_resources = self.prepare_decoration_resources(uniform_buffer);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1446,8 +1483,7 @@ impl AxiomRenderer {
 
         // Pre-build decoration GPU resources while we still have a
         // shared &self borrow (before the headless target borrow below).
-        let decoration_resources =
-            self.prepare_decoration_resources(proj_buffer);
+        let decoration_resources = self.prepare_decoration_resources(proj_buffer);
 
         // Get or (lazily) recreate the headless target at the requested
         // size. Reused across frames to avoid per-frame GPU churn.

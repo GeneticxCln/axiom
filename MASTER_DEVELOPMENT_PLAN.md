@@ -1,8 +1,8 @@
 # Axiom Master Development Plan
 
 **Status:** Active
-**Current Phase:** Phase 4 — Release Preparation ✅
-**Last Updated:** 2026-07-16
+**Current Phase:** Phase 4 — Alpha reliability / CI hardening (in progress)
+**Last Updated:** 2026-07-18
 
 ---
 
@@ -11,12 +11,12 @@
 Axiom is an **alpha-stage hybrid Wayland compositor** (v0.1.0) using Smithay 0.7 + WGPU, inspired by niri's scrollable workspaces and Hyprland's effects.
 
 ### Current reality
-- **227 tests passing** (183 unit + 44 integration)
-- **Clean build, zero clippy warnings**
-- **v0.1.0-alpha.1** tagged release
+- **Alpha prototype**, not a production desktop session replacement
 - Nested (`--windowed`) mode is the primary development target, using direct WGPU surface presentation
-- DRM/KMS path exists via CPU dumb-buffer software rendering
-- Documentation, packaging (Arch PKGBUILD + CI tarball), CI, benchmarks, property-based tests, and security audit all in place
+- DRM/KMS path exists (GBM + dumb-buffer fallback) but is **not release-ready**
+- **v0.1.0-alpha.1** tagged; packaging assets exist (PKGBUILD, desktop entries, `axiom-session`) but remain alpha scaffolding
+- CI, benchmarks, property-based tests, and security tooling are present; Priority 0 work is making smoke/security gates fail hard and keeping docs honest
+- **Test counts:** re-verify with a local baseline after CI fixes (historical alpha.1 notes claimed 183 unit + 44 integration)
 
 ---
 
@@ -113,49 +113,55 @@ Axiom is an **alpha-stage hybrid Wayland compositor** (v0.1.0) using Smithay 0.7
 
 ---
 
-## Phase 4: Release Preparation ✅
+## Phase 4: Release Preparation (partial — alpha.1 cut, hardening ongoing)
 
-### 1. Documentation ✅
+Phase 4 produced the **v0.1.0-alpha.1** tag and packaging scaffolding. It is **not** “release complete”: nested smoke CI was mis-invoked, some security steps soft-failed, and standalone session readiness remains incomplete. Treat remaining work as alpha reliability, not feature expansion.
+
+### 1. Documentation ✅ (with honesty pass)
 - `cargo doc` published — all modules have `//!` doc comments, architecture diagrams in `src/lib.rs`
 - Architecture overview — `docs/dev/RENDER_ARCHITECTURE.md` covers the rendering pipeline
-- User guide — `docs/user/RUNNING.md`, `docs/user/INSTALL.md`, `docs/user/CONFIGURATION.md` complete
-- Known limitations — `docs/user/LIMITATIONS.md` documents all known gaps
+- User guide — `docs/user/RUNNING.md`, `docs/user/INSTALL.md`, `docs/user/CONFIGURATION.md`
+- Known limitations — `docs/user/LIMITATIONS.md` documents known gaps
 - Security architecture — `docs/dev/SECURITY.md` documents threat model, IPC security, supply chain, known gaps
-- Release notes for v0.1.0-alpha.1 — `release-notes/v0.1.0-alpha.1.md` populated with real content
+- Release notes for v0.1.0-alpha.1 — `release-notes/v0.1.0-alpha.1.md`
+- ⏳ Keep living status docs aligned with README (alpha, nested-first, no false “production ready”)
 
-### 2. Packaging ✅
-- Arch PKGBUILD finalized — builds, installs session wrapper, desktop entries, icon, config, README, LICENSE
-- CI package job — builds release binary, validates desktop entries and session wrapper, creates tarball artifact
-- Binary release artifacts — CI uploads `axiom-v*-linux-amd64.tar.gz` as build artifact
-- `check_packaging_assets.sh` validates all packaging files + desktop entries in CI
-- `build_arch_package.sh` runs full PKGBUILD stages + smoke tests offline
+### 2. Packaging ⚠️ alpha scaffolding
+- Arch PKGBUILD, desktop entries, session wrapper, icon, config — present
+- CI package job builds tarball artifact after hard gates pass
+- `check_packaging_assets.sh` / `build_arch_package.sh` validate assets offline
+- There is **no** `packaging/axiom.session`; DM entry is `packaging/axiom-wayland.desktop` + `packaging/axiom-session`
 - ⏳ Flatpak manifest — deferred, non-blocking for alpha
+- ⏳ Session assets are not a polished standalone desktop promise
 
-### 3. Session integration ✅
+### 3. Session integration ⚠️ partial
 - `axiom.desktop` — nested launcher entry (`axiom --windowed`)
 - `axiom-wayland.desktop` — Wayland session entry for display managers; includes `X-Wayland-Compositor=true`
 - `axiom-session` — POSIX sh wrapper with config discovery (user → system → defaults)
 - ⏳ systemd-logind/seatd integration — deferred (DRM opens `/dev/input/event*` directly, noted in known limitations)
 
-### 4. Release automation ✅
+### 4. Release automation ✅ for alpha.1
 - Version `0.1.0` in `Cargo.toml`, tag `v0.1.0-alpha.1` exists
-- `CHANGELOG.md` created with full history from git log
-- `docs/dev/RELEASE_PROCESS.md` documents the 6-step release flow
-- `docs/dev/RELEASE_CHECKLIST.md` covers build/test gates, runtime checks, packaging, documentation, publication
-- `scripts/release_prep.sh` automates release preparation (check, draft-notes, print-publish, all)
-- `Makefile` targets: `release-check`, `release-prep`, `doc`, `doc-open`
+- `CHANGELOG.md`, release process/checklist, `scripts/release_prep.sh`, Makefile targets
 
-### 5. Security audit ✅
+### 5. Security audit ⚠️ tooling present; CI must fail hard
 - IPC socket directory `0o700`, socket file `0o600` — verified in code review
 - UID-based peer credential verification on all IPC connections
 - Connection semaphore (max 16), idle timeout (60s)
 - Config file saved with `0o600`
-- `cargo-deny` + `cargo-audit` in CI (`check_security.sh` script)
+- `cargo-deny` + `cargo-audit` via `scripts/check_security.sh` (CI must not swallow failures)
 - Security architecture documented in `docs/dev/SECURITY.md` with known gaps identified
 - ⏳ logind/seatd for DRM device access — deferred
 - ⏳ XWayland sandboxing (Landlock/seccomp) — deferred
 
-**Exit criteria:** `v0.1.0-alpha` tag cut. README accurate. Packaging builds from source. ✅
+### 6. Priority 0 reliability (current focus)
+- Fix nested smoke CI invocation (`AXIOM_SMOKE_MATRIX=true` + real binary path)
+- Make integration / smoke / security failures fail CI (no `|| true` soft-pass on hard gates)
+- Fix worst doc contradictions (`axiom.session`, phase/status claims)
+- Establish a real local build/test baseline
+
+**Exit criteria (alpha.1):** tag cut, packaging builds from source — met.  
+**Exit criteria (Phase 4 done):** hard CI gates green, docs match reality, nested path smoke matrix reliable — **in progress**.
 
 ---
 
@@ -178,4 +184,4 @@ Axiom is an **alpha-stage hybrid Wayland compositor** (v0.1.0) using Smithay 0.7
 4. ⏳ Smithay 0.8 migration (Phase 2.3) — deferred, no 0.8 release yet
 5. ✅ Multi-monitor polish (Phase 2.4)
 6. ✅ Testing & optimization (Phase 3)
-7. ✅ Release preparation (Phase 4)
+7. ⚠️ Release preparation (Phase 4) — alpha.1 cut; CI/doc reliability hardening in progress

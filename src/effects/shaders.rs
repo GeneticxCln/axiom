@@ -289,6 +289,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {{
     )
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;

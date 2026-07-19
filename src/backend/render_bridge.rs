@@ -1,10 +1,11 @@
-//! Transitional helpers kept for the DRM path which still uses
-//! `compose_full_frame` with CPU readback (→ dumb-buffer copy).
-//! The winit path now renders directly to a WGPU surface.
+//! Temporary helpers for the WGPU rendering path.
+//!
+//! `popup_render_id` assigns a render-ID namespace for popup surfaces
+//! staged into the WGPU scene graph via `update_window_texture`.
 
 /// Return `true` when the current frame has actual scene content.
 #[cfg(test)]
-pub(super) fn should_use_wgpu_gl_bridge(
+pub(super) fn should_render(
     has_tiled_windows: bool,
     has_floating_windows: bool,
     committed_popup_count: usize,

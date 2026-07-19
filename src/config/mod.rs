@@ -740,10 +740,16 @@ impl AxiomConfig {
         // like "HDMI-A-1" are the expected format.
         for (i, name) in self.output.order.iter().enumerate() {
             if name.is_empty() {
-                anyhow::bail!("output.order[{}] is empty — each entry must be a non-empty connector name", i);
+                anyhow::bail!(
+                    "output.order[{}] is empty — each entry must be a non-empty connector name",
+                    i
+                );
             }
             // Allow alphanumeric, hyphen, underscore, dash
-            if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            if !name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
                 anyhow::bail!(
                     "output.order[{}] = {:?} contains invalid characters — use alphanumeric, hyphen, or underscore",
                     i, name

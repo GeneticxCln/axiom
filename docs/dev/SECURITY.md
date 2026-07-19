@@ -25,7 +25,7 @@ Primary trust boundary: the Wayland socket and IPC socket. Clients connecting to
 ## DRM Mode
 
 - **Device access**: `/dev/input/event*` opened directly via `std::fs::OpenOptions::open()` — currently requires root or appropriate capabilities
-- **Session management**: Not yet integrated with logind/seatd (tracked in Phase 4.3)
+- **Session management**: Not yet integrated with logind/seatd (deferred; see Known Gaps below and MASTER_DEVELOPMENT_PLAN Phase 4 session integration)
 - **VT switching**: Not yet implemented — no text console restore on exit
 
 ## XWayland

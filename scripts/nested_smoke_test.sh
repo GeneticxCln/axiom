@@ -262,18 +262,19 @@ fi
 
 ORIGINAL_XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}"
 
-if [[ -n "${DISPLAY:-}" ]]; then
-    export WINIT_UNIX_BACKEND="${WINIT_UNIX_BACKEND:-x11}"
-    export XDG_RUNTIME_DIR="$TMP_ROOT/runtime"
-    mkdir -p "$XDG_RUNTIME_DIR"
-    chmod 700 "$XDG_RUNTIME_DIR"
-    log "Using X11 host backend via DISPLAY with isolated XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
-elif [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
     export WINIT_UNIX_BACKEND="${WINIT_UNIX_BACKEND:-wayland}"
     if [[ -z "$ORIGINAL_XDG_RUNTIME_DIR" ]]; then
         fail "WAYLAND_DISPLAY is set but XDG_RUNTIME_DIR is missing"
     fi
     log "Using Wayland host backend with existing XDG_RUNTIME_DIR=$ORIGINAL_XDG_RUNTIME_DIR"
+elif [[ -n "${DISPLAY:-}" ]]; then
+    export WINIT_UNIX_BACKEND="${WINIT_UNIX_BACKEND:-x11}"
+    unset WAYLAND_DISPLAY
+    export XDG_RUNTIME_DIR="$TMP_ROOT/runtime"
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 700 "$XDG_RUNTIME_DIR"
+    log "Using X11 host backend via DISPLAY with isolated XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
 else
     fail "No DISPLAY or WAYLAND_DISPLAY found. Run inside a desktop session or wrap with xvfb-run -a."
 fi

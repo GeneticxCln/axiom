@@ -1025,9 +1025,12 @@ impl AxiomIPCServer {
                         {
                             applied.push(key);
                         }
-                        ("effects.blur.radius"
+                        (
+                            "effects.blur.radius"
                             | "effects.animations.duration"
-                            | "workspace.scroll_speed", _) => {
+                            | "workspace.scroll_speed",
+                            _,
+                        ) => {
                             rejected.push((key, "invalid_or_out_of_range_value".into()));
                         }
                         _ => {

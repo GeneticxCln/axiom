@@ -174,7 +174,7 @@ async fn main() -> Result<()> {
     // The `mut` is required when `demo` feature is active so
     // run_comprehensive_test and run_phase4_effects_demo can
     // borrow the compositor mutably.
-    #[allow(unused_mut)]
+    #[cfg_attr(not(feature = "demo"), allow(unused_mut))]
     let mut compositor = AxiomCompositor::new(
         config.clone(),
         cli.windowed,

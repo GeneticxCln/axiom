@@ -334,8 +334,10 @@ fn test_remove_window_clears_minimized_floating_and_origin_state() {
     // minimized set and can be restored to the focused column.
     assert!(workspaces.minimize_window(77));
     assert!(workspaces.is_window_minimized(77));
-    assert!(!workspaces.originating_column.contains_key(&77),
-        "floating window was removed from column on float, so no origin recorded");
+    assert!(
+        !workspaces.originating_column.contains_key(&77),
+        "floating window was removed from column on float, so no origin recorded"
+    );
 
     let removed = workspaces.remove_window(77);
     assert!(
@@ -679,15 +681,26 @@ fn test_sync_tapes_with_config_order_respects_preference() {
     let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Config order reverses the natural DRM enumeration order
-    let config_order = ["DP-1".to_string(), "HDMI-A-1".to_string(), "eDP-1".to_string()];
+    let config_order = [
+        "DP-1".to_string(),
+        "HDMI-A-1".to_string(),
+        "eDP-1".to_string(),
+    ];
     workspaces.sync_tapes_with_outputs(
-        &["HDMI-A-1".to_string(), "eDP-1".to_string(), "DP-1".to_string()],
+        &[
+            "HDMI-A-1".to_string(),
+            "eDP-1".to_string(),
+            "DP-1".to_string(),
+        ],
         &config_order,
     );
 
     let order = workspaces.output_order.clone();
-    assert_eq!(order, vec!["DP-1", "HDMI-A-1", "eDP-1"],
-        "config order should take priority over DRM enumeration order");
+    assert_eq!(
+        order,
+        vec!["DP-1", "HDMI-A-1", "eDP-1"],
+        "config order should take priority over DRM enumeration order"
+    );
 }
 
 #[test]
@@ -697,14 +710,15 @@ fn test_sync_tapes_with_config_order_filters_absent_outputs() {
 
     // Config mentions an output not physically connected
     let config_order = ["Missing-Output".to_string(), "HDMI-A-1".to_string()];
-    workspaces.sync_tapes_with_outputs(
-        &["HDMI-A-1".to_string(), "DP-1".to_string()],
-        &config_order,
-    );
+    workspaces
+        .sync_tapes_with_outputs(&["HDMI-A-1".to_string(), "DP-1".to_string()], &config_order);
 
     let order = workspaces.output_order.clone();
-    assert_eq!(order, vec!["HDMI-A-1", "DP-1"],
-        "missing outputs in config should be filtered; remaining live outputs appended at end");
+    assert_eq!(
+        order,
+        vec!["HDMI-A-1", "DP-1"],
+        "missing outputs in config should be filtered; remaining live outputs appended at end"
+    );
 }
 
 #[test]
@@ -714,12 +728,15 @@ fn test_sync_tapes_with_empty_config_order_uses_natural_order() {
 
     workspaces.sync_tapes_with_outputs(
         &["eDP-1".to_string(), "HDMI-A-1".to_string()],
-        &[],  // empty config_order = natural order
+        &[], // empty config_order = natural order
     );
 
     let order = workspaces.output_order.clone();
-    assert_eq!(order, vec!["eDP-1", "HDMI-A-1"],
-        "empty config order should preserve the live enumeration order");
+    assert_eq!(
+        order,
+        vec!["eDP-1", "HDMI-A-1"],
+        "empty config order should preserve the live enumeration order"
+    );
 }
 
 /// correct layout dimensions on every call — no stale cached values
@@ -956,7 +973,7 @@ mod property_tests {
                 .unwrap_or(0);
 
             // Also verify every layout entry corresponds to a non-excluded window
-            for (wid, _rect) in &layouts {
+            for wid in layouts.keys() {
                 prop_assert!(
                     !excluded.contains(wid),
                     "Layout contains excluded (minimized/floating) window {}",

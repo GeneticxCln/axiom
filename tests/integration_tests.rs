@@ -2560,7 +2560,10 @@ async fn test_ipc_readonly_messages() -> Result<()> {
     // HealthCheck
     if let Some(sender) = ipc_server.command_sender_for_test() {
         sender.send(LazyUIMessage::HealthCheck).await.unwrap();
-        sender.send(LazyUIMessage::GetPerformanceReport).await.unwrap();
+        sender
+            .send(LazyUIMessage::GetPerformanceReport)
+            .await
+            .unwrap();
     }
 
     let (changed, actions) = ipc_server.process_messages(&mut config)?;
