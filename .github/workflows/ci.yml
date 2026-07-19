@@ -95,6 +95,60 @@ jobs:
         # Fail the job if the release binary cannot print help
         ./target/release/axiom --help
         
+
+  feature-off-test:
+    name: Feature-off Test Suite
+    runs-on: ubuntu-latest
+    # Validates the `cfg(not(feature = "placeholder-pipeline"))` integration
+    # tests (and any future feature-gated code paths) actually compile and
+    # pass under `--no-default-features`. These tests are stripped from the
+    # default-feature test job, so this lane is required for full coverage.
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libwayland-dev \
+          libxkbcommon-dev \
+          libegl1-mesa-dev \
+          libdrm-dev \
+          libgbm-dev \
+          libinput-dev \
+          libsystemd-dev \
+          libdbus-1-dev \
+          pkg-config \
+          xvfb
+
+    - name: Cache cargo registry + index + build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-build-no-defaults-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Run unit tests (no default features)
+      run: |
+        cargo test --lib --no-default-features -- --test-threads=1
+
+    - name: Run integration tests (no default features)
+      run: |
+        xvfb-run -a cargo test --test integration_tests --no-default-features
+
+    - name: Build release binary (no default features)
+      run: |
+        cargo build --release --no-default-features
+        ./target/release/axiom --help
+
   memory-safety:
     name: Memory Safety
     runs-on: ubuntu-latest

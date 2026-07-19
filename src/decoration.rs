@@ -639,7 +639,28 @@ impl DecorationManager {
         }
     }
 
-    /// Render window decorations (placeholder for GPU implementation)
+    /// Render window decorations (placeholder for GPU implementation).
+    ///
+    /// **Phase 1.A5 note:** this is a *defunct parallel code path*. The
+    /// live compositor pipeline builds decoration quads inline in
+    /// `compositor::prepare_frame_data` via the `DecorationManager`
+    /// map plus the `DecorationQuad` struct in `crate::renderer`, then
+    /// hands them to `renderer.set_decoration_quads`. This function
+    /// returns a different `DecorationRenderData` enum that no caller
+    /// reads. It exists as a historical placeholder from an earlier
+    /// live-SSD prototype and is preserved (with
+    /// `#[allow(dead_code)]`) so the public API surface stays
+    /// accessible to external tooling without surprise breakage, and
+    /// so a future PR can decide to either resurrect it or delete it
+    /// (tracked in Phase 2).
+    ///
+    /// **Do not call this from the live pipeline.** Use
+    /// `prepare_frame_data` plus `set_decoration_quads` instead.
+    #[allow(dead_code)]
+    #[deprecated(
+        since = "0.1.0",
+        note = "Defunct parallel path. Use `prepare_frame_data` + `renderer.set_decoration_quads` instead."
+    )]
     pub fn render_decorations(
         &self,
         window_id: u64,
@@ -752,7 +773,18 @@ pub enum ResizeEdge {
     BottomRight,
 }
 
-/// Decoration rendering data for GPU pipeline
+/// Decoration rendering data for GPU pipeline.
+///
+/// **Phase 1.A5 note:** see [`DecorationManager::render_decorations`].
+/// This enum is the return type of the *defunct parallel code path*
+/// and is retained (with `#[allow(dead_code)]`) so external tooling
+/// can still reference the type until Phase 2 revisits the live-SSD
+/// contract. New code MUST NOT pattern-match on its variants; the
+/// live pipeline never produces values of this type. Note: we do
+/// *not* mark the type itself `#[deprecated]` because the variants
+/// would then fire `-D deprecated` warnings on the defunct function's
+/// own body — capture the deprecation on the producer only.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum DecorationRenderData {
     None,

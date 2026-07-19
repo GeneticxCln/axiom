@@ -224,6 +224,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "smithay",
+ "static_assertions",
  "tempfile",
  "tokio",
  "tokio-test",

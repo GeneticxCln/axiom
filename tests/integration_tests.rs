@@ -915,11 +915,14 @@ async fn test_prepare_window_resources_idempotent() -> Result<()> {
 /// texture-less windows, `compose_full_frame` would silently drop
 /// them from the composed frame.
 ///
-/// **Debug-only.** In release builds, the placeholder pipeline is
+/// **Requires the `placeholder-pipeline` cargo feature.** When the
+/// feature is disabled (e.g. `cargo build --release --no-default-features`)
+/// the placeholder pipeline is compiled out and untextured windows
+/// stay invisible — see
 /// compiled out and untextured windows stay invisible — see
 /// `test_prepare_window_resources_skips_untextured_window` for the
 /// release-mode counterpart.
-#[cfg(debug_assertions)]
+#[cfg(feature = "placeholder-pipeline")]
 #[tokio::test]
 #[serial_test::serial]
 async fn test_prepare_window_resources_creates_buffers_for_placeholder_window() -> Result<()> {
@@ -982,11 +985,14 @@ async fn test_prepare_window_resources_creates_buffers_for_placeholder_window() 
 ///    cover a non-trivial share of the 128×64 canvas while the
 ///    background clear-color still dominates uncovered regions.
 ///
-/// **Debug-only.** In release builds, the placeholder pipeline is
+/// **Requires the `placeholder-pipeline` cargo feature.** When the
+/// feature is disabled (e.g. `cargo build --release --no-default-features`)
+/// the placeholder pipeline is compiled out and untextured windows
+/// stay invisible — see
 /// compiled out and untextured windows stay invisible — see
 /// `test_compose_full_frame_skips_untextured_windows` for the
 /// release-mode counterpart.
-#[cfg(debug_assertions)]
+#[cfg(feature = "placeholder-pipeline")]
 #[tokio::test]
 #[serial_test::serial]
 async fn test_compose_full_frame_with_mixed_windows() -> Result<()> {
@@ -1080,11 +1086,14 @@ async fn test_compose_full_frame_with_mixed_windows() -> Result<()> {
 /// untextured window's region of the framebuffer must remain at the
 /// clear color (no draw fired for the placeholder window).
 ///
-/// This is the release-mode counterpart of
+/// This is the feature-gated counterpart of
 /// `test_compose_full_frame_with_mixed_windows` — the test pair
 /// enforces the contract that windows are only visible after
 /// committing a real SHM buffer, matching Wayland semantics.
-#[cfg(not(debug_assertions))]
+/// Gated on `cfg(not(feature = "placeholder-pipeline"))` so it
+/// fires when the placeholder pipeline is opt-outed via
+/// `--no-default-features`.
+#[cfg(not(feature = "placeholder-pipeline"))]
 #[tokio::test]
 #[serial_test::serial]
 async fn test_compose_full_frame_skips_untextured_windows() -> Result<()> {
@@ -1150,14 +1159,16 @@ async fn test_compose_full_frame_skips_untextured_windows() -> Result<()> {
     Ok(())
 }
 
-/// Integration test: in **release** builds, `prepare_window_resources`
-/// must skip untextured (placeholder) windows entirely. They stay
-/// invisible until they commit a real SHM buffer, so allocating GPU
-/// resources for them would be wasted memory.
+/// Integration test: when the `placeholder-pipeline` Cargo feature
+/// is disabled, `prepare_window_resources` must skip untextured
+/// (placeholder) windows entirely. They stay invisible until they
+/// commit a real SHM buffer, so allocating GPU resources for them
+/// would be wasted memory.
 ///
-/// This is the release-mode counterpart of
+/// This is the feature-gated counterpart of
 /// `test_prepare_window_resources_creates_buffers_for_placeholder_window`.
-#[cfg(not(debug_assertions))]
+/// Gated on `cfg(not(feature = "placeholder-pipeline"))`.
+#[cfg(not(feature = "placeholder-pipeline"))]
 #[tokio::test]
 #[serial_test::serial]
 async fn test_prepare_window_resources_skips_untextured_window() -> Result<()> {

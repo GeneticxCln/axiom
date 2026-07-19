@@ -110,9 +110,9 @@ pub struct AxiomRenderer {
     /// semantics and prevents placeholder rectangles from masking
     /// rendering issues (a window with a broken texture upload will be
     /// visibly absent in release, instead of a misleading colored quad).
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "placeholder-pipeline")]
     placeholder_pipeline: RenderPipeline,
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "placeholder-pipeline")]
     placeholder_bind_group_layout: BindGroupLayout,
 
     /// WGPU Sampler
@@ -444,7 +444,7 @@ impl AxiomRenderer {
         // Placeholder pipeline for windows without a client texture.
         // Only built in debug builds — see the `placeholder_pipeline`
         // field doc for the release-build rationale.
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "placeholder-pipeline")]
         let (placeholder_pipeline, placeholder_bind_group_layout) =
             create_placeholder_pipeline(&device, config.format)
                 .context("Failed to build placeholder render pipeline")?;
@@ -467,9 +467,9 @@ impl AxiomRenderer {
             window_blurs: HashMap::with_capacity(64),
             headless_target: None,
             render_pipeline,
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "placeholder-pipeline")]
             placeholder_pipeline,
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "placeholder-pipeline")]
             placeholder_bind_group_layout,
             solid_pipeline,
             solid_bind_group_layout,
@@ -631,7 +631,7 @@ impl AxiomRenderer {
         // Placeholder pipeline for windows without a client texture.
         // Only built in debug builds — see the `placeholder_pipeline`
         // field doc for the release-build rationale.
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "placeholder-pipeline")]
         let (placeholder_pipeline, placeholder_bind_group_layout) =
             create_placeholder_pipeline(&device, format)
                 .context("Failed to build placeholder render pipeline")?;
@@ -651,9 +651,9 @@ impl AxiomRenderer {
             window_blurs: HashMap::with_capacity(64),
             headless_target: None,
             render_pipeline,
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "placeholder-pipeline")]
             placeholder_pipeline,
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "placeholder-pipeline")]
             placeholder_bind_group_layout,
             solid_pipeline,
             solid_bind_group_layout,
@@ -1009,20 +1009,24 @@ impl AxiomRenderer {
         self.cached_border_width = self.border_width;
 
         for window in &mut self.windows {
-            // In release builds, skip placeholder (texture-less) windows
-            // entirely — they stay invisible until they commit a real
-            // client buffer, so allocating GPU resources for them would
-            // be wasted memory. The placeholder pipeline that would
-            // consume these buffers isn't compiled in either.
-            #[cfg(not(debug_assertions))]
+            // When the `placeholder-pipeline` Cargo feature is
+            // disabled (i.e. built with `--no-default-features`), skip
+            // placeholder (texture-less) windows entirely — they
+            // stay invisible until they commit a real client buffer,
+            // so allocating GPU resources for them would be wasted
+            // memory. The placeholder pipeline that would consume
+            // these buffers is gated out by the same feature flag and
+            // therefore never sees them.
+            #[cfg(not(feature = "placeholder-pipeline"))]
             if window.texture_view.is_none() {
                 continue;
             }
 
-            // (Debug-only) Placeholder (texture-less) windows also receive
-            // vertex + uniform buffers — `compose_full_frame` draws them
-            // via the placeholder pipeline which binds the same cached
-            // buffers the textured pass uses.
+            // (Placeholder-pipeline) Placeholder (texture-less) windows
+            // also receive vertex + uniform buffers — `compose_full_frame`
+            // draws them via the placeholder pipeline (guarded by the
+            // `placeholder-pipeline` Cargo feature, default-on) which
+            // binds the same cached buffers the textured pass uses.
 
             // Uniform buffer invalidation: opacity, size, or border width
             let opacity_changed = (window.cached_opacity - window.opacity).abs() > f32::EPSILON;
@@ -1540,7 +1544,7 @@ impl AxiomRenderer {
         // for the duration of `self`, so the Vec outlives the render
         // pass that consumes it. Same pattern as `render_to_headless_target`.
         let mut textured_draws: Vec<(u64, wgpu::BindGroup, &wgpu::Buffer)> = Vec::new();
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "placeholder-pipeline")]
         let mut placeholder_draws: Vec<(u64, wgpu::BindGroup, &wgpu::Buffer)> = Vec::new();
 
         for window in &self.windows {
@@ -1576,11 +1580,16 @@ impl AxiomRenderer {
                 });
                 textured_draws.push((window.id, bg, vertex_buf));
             } else {
-                // In release builds, untextured windows stay invisible
-                // until they commit a real SHM buffer — no placeholder
-                // draw, no bind group, no pipeline bind. The window's
-                // region of the framebuffer is left at the clear color.
-                #[cfg(debug_assertions)]
+                // When the `placeholder-pipeline` Cargo feature is
+                // enabled (default), untextured windows draw through
+                // the placeholder pipeline — bind group, pipeline
+                // bind, vertex/uniform buffers reused. The window's
+                // region of the framebuffer is then filled with the
+                // placeholder WGSL output. When the feature is
+                // disabled (`--no-default-features`), this whole block
+                // is gated out, so the window's region is left at the
+                // clear color until the client commits a SHM buffer.
+                #[cfg(feature = "placeholder-pipeline")]
                 {
                     let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some(&format!("Compose Window {} Placeholder", window.id)),
@@ -1672,7 +1681,7 @@ impl AxiomRenderer {
             // Only compiled in debug builds — see the `placeholder_pipeline`
             // field doc. In release, untextured windows are not drawn at
             // all, leaving their region at the clear color.
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "placeholder-pipeline")]
             if !placeholder_draws.is_empty() {
                 rp.set_pipeline(&self.placeholder_pipeline);
                 for (_id, bg, vb) in &placeholder_draws {
@@ -1798,11 +1807,11 @@ impl AxiomRenderer {
         // (rust-lang/rust#15701), so we resolve the count first and then
         // hand the single value to `debug!`.
         let placeholder_count: usize = {
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "placeholder-pipeline")]
             {
                 placeholder_draws.len()
             }
-            #[cfg(not(debug_assertions))]
+            #[cfg(not(feature = "placeholder-pipeline"))]
             {
                 0
             }
@@ -2573,10 +2582,12 @@ pub fn create_projection_matrix(width: f32, height: f32) -> [[f32; 4]; 4] {
 /// holder with the right `'static` lifetime, but most callers only
 /// need the pipeline (the layout is owned by the renderer).
 ///
-/// **Debug-only.** This function (and the `include_str!("placeholder.wgsl")`
-/// it embeds) is compiled out in release builds — the placeholder
-/// pipeline is dropped at compile time, and the WGSL shader bytes never
-/// reach the release binary.
+/// **Guarded by the `placeholder-pipeline` Cargo feature (default-on).**
+/// This function (and the `include_str!("placeholder.wgsl")` it embeds)
+/// is compiled out when the feature is disabled via
+/// `--no-default-features` (or `--no-default-features --features …`
+/// opting out of `placeholder-pipeline`) — neither the placeholder
+/// pipeline nor the WGSL bytes reach the resulting binary.
 /// Build the solid-color render pipeline used for server-side decoration
 /// elements (titlebar backgrounds, close/minimize/maximize buttons).
 ///
@@ -2651,7 +2662,7 @@ pub fn create_solid_pipeline(
     Ok((pipeline, bind_group_layout))
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "placeholder-pipeline")]
 pub fn create_placeholder_pipeline(
     device: &Device,
     format: TextureFormat,

@@ -92,6 +92,16 @@ serde_json = "1.0"
 bytemuck = { version = "1.14", features = ["derive"] }  # For GPU buffer data
 ab_glyph = "0.2"  # Font atlas / glyph rendering for SSD title text
 parking_lot = "0.12"  # For RwLock synchronization
+# Compile-time invariant presence-check (Phase 1.A4 hardening).
+# Promoted to [dependencies] (was [dev-dependencies]) so the
+# `static_assertions::assert_fields!` call site at file scope in
+# `src/compositor.rs` is resolvable on every `cargo build` invocation,
+# not only on `cargo test`. The crate is no_std-friendly, no runtime
+# cost, and only emits a static assertion at compile time. TODO
+# before v0.2.0 publish: gate behind an optional
+# `compiletime-invariants = ["dep:static_assertions"]` feature so
+# downstream consumers can opt out.
+static_assertions = "1.1"
 
 # TODO: Add features when compositor dependencies are ready
 # [features]
@@ -103,13 +113,27 @@ parking_lot = "0.12"  # For RwLock synchronization
 [lib]
 name = "axiom"
 path = "src/lib.rs"
-
-
 # Features
 [features]
-default = []
+# Phase 1.A6: `placeholder-pipeline` is default-enabled so `cargo run`
+# (no feature flags) behaves identically to the prior
+# `cfg(debug_assertions)` contract — the placeholder renders for
+# windows that have not yet committed a real SHM/WGPU buffer. Set
+# `--no-default-features` (or pass `cargo build --release
+# --no-default-features`) to compile a release-without-placeholders
+# build, in which the placeholder pipeline + WGSL shader are not
+# compiled at all. With the feature left enabled (default), the release
+# binary embeds the placeholder WGSL (~2 KB) plus an extra wgpu RenderPipeline
+# slot — acceptable for dev/CI parity but worth knowing for packed archive
+# size. Packagers building for size-constrained images can opt out:
+#     cargo build --release --no-default-features
+default = ["placeholder-pipeline"]
 examples = []
 demo = []
+placeholder-pipeline = []
+
+
+
 
 # Development dependencies for testing
 [dev-dependencies]
@@ -120,8 +144,7 @@ proptest = "1.4"  # Property-based testing
 quickcheck = "1.0"  # QuickCheck-style testing
 # Integration testing utilities
 tempfile = "3.0"  # Temporary files and directories for tests
-serial_test = "3.0"  # Sequential test execution
-# Async testing utilities
+serial_test = "3.0"  # Sequential test execution# Async testing utilities
 futures-test = "0.3"
 
 [build-dependencies]
