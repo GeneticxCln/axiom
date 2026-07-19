@@ -64,9 +64,9 @@ impl From<anyhow::Error> for RendererError {
 /// Real GPU rendering pipeline
 pub struct AxiomRenderer {
     /// WGPU device for GPU operations (shared)
-    device: Arc<Device>,
+    pub device: Arc<Device>,
     /// Command queue for GPU commands (shared)
-    queue: Arc<Queue>,
+    pub queue: Arc<Queue>,
     /// WGPU Instance
     instance: Arc<Instance>,
     /// WGPU Adapter (for querying capabilities)

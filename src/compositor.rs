@@ -624,6 +624,35 @@ impl AxiomCompositor {
                 }
             }
             r.set_decoration_quads(decoration_quads);
+            let device = r.device.clone();
+            let queue = r.queue.clone();
+            #[allow(clippy::explicit_auto_deref)]
+            // Generate title text quads from decoration data
+            if let Some(cache) = r.glyph_cache.as_mut() {
+                let deco_guard = self.decoration_manager.read();
+                let decos = deco_guard.decorations();
+                let mut text_quads = Vec::new();
+                for (window_id, deco) in decos.iter() {
+                    if deco.mode != crate::decoration::DecorationMode::ServerSide {
+                        continue;
+                    }
+                    if let Some(wm) = self.window_manager.read().get_window(*window_id) {
+                        let tb_h = deco.titlebar_height as f32;
+                        let result = cache.layout_text(
+                            &deco.title,
+                            14.0,
+                            wm.window.position.0 as f32 + 8.0,
+                            wm.window.position.1 as f32 - tb_h + 4.0,
+                            &*device,
+                            &*queue,
+                        );
+                        if let Ok(qs) = result {
+                            text_quads.extend(qs);
+                        }
+                    }
+                }
+                r.set_text_quads(text_quads);
+            }
         }
 
         Ok(())
