@@ -76,6 +76,7 @@ pub mod workspace;
 pub mod xwayland;
 
 pub mod backend;
+pub mod sandbox;
 #[cfg(feature = "demo")]
 pub mod demo_phase4_effects;
 #[cfg(feature = "demo")]

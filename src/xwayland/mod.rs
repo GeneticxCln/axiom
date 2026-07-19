@@ -4,6 +4,7 @@
 //! via the XWayland compatibility layer.
 
 use crate::config::XWaylandConfig;
+use crate::sandbox;
 use anyhow::Result;
 use log::info;
 use std::collections::HashMap;
@@ -173,7 +174,13 @@ impl XWaylandManager {
         let display = self.find_free_display()?;
         info!("Found free X11 display: :{}", display);
 
-        // 2. Prepare XWayland command
+        // 2. Apply sandbox before spawning the untrusted XWayland process.
+        //    PR_SET_NO_NEW_PRIVS + seccomp filter deny dangerous syscalls
+        //    (ptrace, bpf, kernel module loading, raw I/O ports). These
+        //    restrictions are inherited by the child on fork/exec.
+        sandbox::apply_sandbox();
+
+        // 3. Prepare XWayland command
         let mut cmd = tokio::process::Command::new("Xwayland");
         cmd.arg(format!(":{}", display))
             .arg("-rootless") // Integrate with the parent Wayland compositor
@@ -199,7 +206,7 @@ impl XWaylandManager {
             None
         };
 
-        // 3. Spawn the process
+        // 4. Spawn the process
         match cmd.spawn() {
             Ok(child) => {
                 self.xwayland_process = Some(child);

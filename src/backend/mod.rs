@@ -1824,7 +1824,7 @@ impl AxiomSmithayBackendReal {
                 let hotplug = drm.drain_udev_events();
                 if hotplug {
                     info!("🔌 DRM hotplug event — triggering output re-enumeration");
-                    match drm.reenumerate_outputs() {
+                    match drm.apply_hotplug_diff() {
                         Ok((added, removed)) => {
                             if !added.is_empty() || !removed.is_empty() {
                                 self.call_drm_reenumerate_and_sync();

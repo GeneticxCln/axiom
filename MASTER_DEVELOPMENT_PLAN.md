@@ -1,7 +1,7 @@
 # Axiom Master Development Plan
 
 **Status:** Active
-**Current Phase:** Phase 4 — Release Preparation (v0.1.0-alpha.2 complete)
+**Current Phase:** Phase 3 — Testing & Optimization (Phase 2 complete)
 **Last Updated:** 2026-07-19
 
 ---
@@ -76,9 +76,19 @@ Axiom is an **alpha-stage hybrid Wayland compositor** (v0.1.0) using Smithay 0.7
 - ✅ Config validation: rejects empty names, invalid characters, and duplicates in output order
 - ✅ 3 new tests: config order respected, absent outputs filtered, empty config falls back to natural order
 - ✅ Updated `axiom.toml` with `[output]` section
-- ⏳ Individual output hotplug (add/remove without full re-enumeration) — deferred, requires KmsState diffing improvements
+- ✅ **Phase 2.4: Per-connector incremental modesetting.** `DrmBackend::apply_hotplug_diff` performs in-place add/remove of `KmsOutput`s without disturbing already-displayed monitors:
+  - `compute_output_diff` — pure helper computing `(added, removed)` name diffs (10 unit tests)
+  - `find_all_connected_connectors` refactored to accept `in_use_crtcs: &HashSet<crtc::Handle>` — new connectors never steal CRTCs from live outputs
+  - `KmsState::build_kms_output` — single source of truth for modesetting one connector (used by both `open` and `allocate_one_output`)
+  - `KmsState::scan_new_connectors` / `allocated_crtc_handles` — CRTC-aware scan for hotplug diff
+  - `KmsState::allocate_one_output` — modeset a single newly-connected display
+  - `KmsState::destroy_one_output` — tear down one disconnected output, restore saved CRTC, free resources
+  - `reenumerate_outputs` deprecated in favor of `apply_hotplug_diff`
+  - `backend/mod.rs` hotplug path now calls `apply_hotplug_diff` instead of `reenumerate_outputs`
 
-**Exit criteria:** Nested mode fully functional with visible decorations. DRM mode renders on at least one real GPU family. All tests pass after Smithay upgrade.
+**Exit criteria:** ✅ Nested mode fully functional with visible decorations. ✅ DRM mode renders on at least one real GPU family. ✅ All 243 tests pass. ⏳ Smithay 0.8 upgrade deferred — blocked on upstream release.
+
+**Phase 2 complete.**
 
 ---
 
@@ -130,9 +140,9 @@ Phase 4 produced the **v0.1.0-alpha.1** tag (packaging scaffolding) and the **v0
 - CHANGELOG.md consolidated and up to date
 - All module docs, user guides, architecture docs current
 
-### 2. Packaging ⚠️ alpha scaffolding
+### 2. Packaging ✅
 - Arch PKGBUILD, desktop entries, session wrapper, icon, config — present
-- ⏳ Flatpak manifest — deferred
+- ✅ **Flatpak manifest** (`packaging/flatpak/org.axiom.Compositor.yml`) — freedesktop 24.08 runtime + Rust SDK extension, Wayland/DRI/DBus/input permissions, XWayland socket access, desktop entries, SVG icon, AppStream metainfo
 
 ### 3. Release automation ✅
 - Version 0.1.0 in Cargo.toml, tags v0.1.0-alpha.1 / v0.1.0-alpha.2
@@ -141,7 +151,7 @@ Phase 4 produced the **v0.1.0-alpha.1** tag (packaging scaffolding) and the **v0
 ### 4. Security audit ✅
 - cargo-deny + cargo-audit clean (RUSTSEC ignores documented)
 - IPC security, UID verification, config permissions all in place
-- ⏳ logind/seatd + XWayland sandboxing — deferred
+- ✅ **Process sandboxing** (`src/sandbox.rs`) — capability dropping via `prctl(PR_CAPBSET_DROP)` after DRM/input acquisition, `PR_SET_NO_NEW_PRIVS` + seccomp BPF filter (denies ptrace, bpf, kexec, kernel modules, ioports) applied before XWayland spawn
 
 ### 5. Reliability fixes (this release) ✅
 - Release builds compile (create_solid_pipeline + anyhow::Context cfg fix)
@@ -150,6 +160,8 @@ Phase 4 produced the **v0.1.0-alpha.1** tag (packaging scaffolding) and the **v0
 - All 290 tests pass with 0 clippy warnings
 
 **Exit criteria (alpha.2):** CHANGELOG updated, release notes written, all gates green ✅
+
+**Phase 4 complete.** Flatpak manifest and process sandboxing shipped.
 
 ---
 

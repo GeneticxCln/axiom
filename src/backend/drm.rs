@@ -15,6 +15,7 @@
 //!   └── DrmSession    — libinput + calloop event loop
 //! ```
 
+use crate::sandbox;
 use calloop::generic::Generic;
 use calloop::{EventLoop, Interest, LoopHandle, Mode as CalloopMode, PostAction};
 use drm::control::{
@@ -25,7 +26,7 @@ use drm::Device;
 use gbm::{BufferObjectFlags, Device as GbmDevice, Format as GbmFormat};
 use input::{Libinput, LibinputInterface};
 use log::{debug, info, warn};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs::File;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
@@ -400,6 +401,32 @@ fn copy_bgra_to_xrgb8888(
 }
 
 // ============================================================================
+// Pure helpers
+// ============================================================================
+
+/// Compute the set difference between two output name lists.
+/// Returns `(added, removed)` — names present in `new` but not in
+/// `existing` (added), and names in `existing` but not in `new`
+/// (removed). Pure: no hardware access, no allocation beyond the two
+/// return vectors.
+pub fn compute_output_diff(
+    existing: &[String],
+    new: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let old_set: HashSet<&str> = existing.iter().map(|s| s.as_str()).collect();
+    let new_set: HashSet<&str> = new.iter().map(|s| s.as_str()).collect();
+    let added: Vec<String> = new_set
+        .difference(&old_set)
+        .map(|s| s.to_string())
+        .collect();
+    let removed: Vec<String> = old_set
+        .difference(&new_set)
+        .map(|s| s.to_string())
+        .collect();
+    (added, removed)
+}
+
+// ============================================================================
 // KMS State — multi-output modesetting (GBM-backed)
 // ============================================================================
 
@@ -430,7 +457,9 @@ impl KmsState {
             resources.encoders(),
         );
 
-        let candidates = Self::find_all_connected_connectors(&card, &resources)?;
+        let empty_crtcs = HashSet::new();
+        let candidates =
+            Self::find_all_connected_connectors(&card, &resources, &empty_crtcs)?;
         if candidates.is_empty() {
             return Err(anyhow::anyhow!(
                 "No connected display connector with a compatible encoder/CRTC found"
@@ -441,8 +470,8 @@ impl KmsState {
 
         // Track which CRTCs are already in use so two outputs never
         // claim the same CRTC.
-        let mut used_crtcs: std::collections::HashSet<crtc::Handle> =
-            std::collections::HashSet::new();
+        let mut used_crtcs: HashSet<crtc::Handle> =
+            HashSet::new();
         let mut outputs: Vec<KmsOutput> = Vec::with_capacity(candidates.len());
 
         for (connector, encoder, crtc, mode, physical_w_mm, physical_h_mm, conn_name) in candidates
@@ -457,129 +486,22 @@ impl KmsState {
             }
             used_crtcs.insert(crtc);
 
-            let (width, height) = mode.size();
-            let width = width as u32;
-            let height = height as u32;
-            info!(
-                "Display '{}': {}x{} @ {} Hz, {}x{}mm",
-                conn_name,
-                width,
-                height,
-                mode.vrefresh() as f32 / 1000.0,
-                physical_w_mm,
-                physical_h_mm,
-            );
+        let output = Self::build_kms_output(
+            &card,
+            connector,
+            encoder,
+            crtc,
+            mode,
+            physical_w_mm,
+            physical_h_mm,
+            conn_name,
+        )?;
 
-            let scale_factor = scale_factor_from_edid(width, height, physical_w_mm, physical_h_mm);
-            let saved_crtc = Some(card.get_crtc(crtc)?);
-
-            // Skip GBM in test mode to avoid SIGSEGV on CI/VMs.
-            let gbm = if cfg!(test) {
-                debug!("Skipping GBM init in test mode — using dumb-buffer fallback");
-                None
-            } else {
-                let raw_fd = card.raw_fd();
-                GbmRenderState::new(raw_fd, width, height)
-                    .map_err(|e| {
-                        warn!(
-                            "GBM init failed for '{}' ({}); falling back to dumb buffer",
-                            conn_name, e
-                        );
-                        e
-                    })
-                    .ok()
-            };
-
-            // Allocate a CPU-writable scanout buffer for the current standalone
-            // alpha path. GBM is kept around for future GPU-direct presentation,
-            // but the compositor output currently lands in a dumb buffer.
-            let cpu_scanout = match Self::create_cpu_scanout_buffer(&card, width, height) {
-                Ok(scanout) => Some(scanout),
-                Err(e) => {
-                    warn!(
-                        "Failed to create CPU scanout for '{}' ({}); falling back to legacy path",
-                        conn_name, e
-                    );
-                    None
-                }
-            };
-
-            if let Some(scanout_fb) = cpu_scanout.as_ref().map(|scanout| scanout.fb) {
-                card.set_crtc(crtc, Some(scanout_fb), (0, 0), &[connector], Some(mode))?;
-
-                outputs.push(KmsOutput {
-                    connector,
-                    crtc,
-                    encoder,
-                    mode,
-                    width,
-                    height,
-                    physical_width_mm: physical_w_mm,
-                    physical_height_mm: physical_h_mm,
-                    scale_factor,
-                    name: conn_name,
-                    gbm,
-                    cpu_scanout,
-                    current_fb: scanout_fb,
-                    saved_crtc,
-                    pending_fbs: VecDeque::new(),
-                });
-            } else if let Some(ref gbm_state) = gbm {
-                // SAFETY: Initial modeset — no prior EGL rendering.
-                let (fb, _front) = unsafe { gbm_state.lock_and_create_fb(&card)? };
-                card.set_crtc(crtc, Some(fb), (0, 0), &[connector], Some(mode))?;
-                // SAFETY: `front` is dropped unused — the initial modeset only
-                // needs the framebuffer handle, not the buffer object contents.
-                // GBM retains ownership of the buffer; dropping it here returns
-                // it to the GBM surface pool for future `lock_front_buffer` calls.
-
-                outputs.push(KmsOutput {
-                    connector,
-                    crtc,
-                    encoder,
-                    mode,
-                    width,
-                    height,
-                    physical_width_mm: physical_w_mm,
-                    physical_height_mm: physical_h_mm,
-                    scale_factor,
-                    name: conn_name,
-                    gbm,
-                    cpu_scanout: None,
-                    current_fb: fb,
-                    saved_crtc,
-                    pending_fbs: VecDeque::new(),
-                });
-            } else {
-                let (fb, _dumb) = Self::create_dumb_framebuffer(&card, width, height)?;
-                card.set_crtc(crtc, Some(fb), (0, 0), &[connector], Some(mode))?;
-
-                outputs.push(KmsOutput {
-                    connector,
-                    crtc,
-                    encoder,
-                    mode,
-                    width,
-                    height,
-                    physical_width_mm: physical_w_mm,
-                    physical_height_mm: physical_h_mm,
-                    scale_factor,
-                    name: conn_name,
-                    gbm: None,
-                    cpu_scanout: None,
-                    current_fb: fb,
-                    saved_crtc,
-                    pending_fbs: VecDeque::new(),
-                });
-            }
-
-            info!(
-                "Output '{}' initialized: {}x{} @ {:.1}x scale",
-                outputs.last().unwrap().name,
-                width,
-                height,
-                scale_factor,
-            );
+        info!(
+            "Output '{}' initialized: {}x{} @ {:.1}x scale",
+            output.name, output.width, output.height, output.scale_factor
+        );
+        outputs.push(output);
         }
 
         Ok(KmsState { card, outputs })
@@ -589,9 +511,14 @@ impl KmsState {
     /// Returns tuples of (connector, encoder, crtc, mode, physical_w_mm,
     /// physical_h_mm, connector_name). CRTC allocation is handled by the
     /// caller so duplicates can be detected.
+    ///
+    /// When `in_use_crtcs` is non-empty, compatible CRTCs that are already
+    /// claimed by existing outputs are skipped so a newly-arrived connector
+    /// can never steal a CRTC from an already-displayed monitor.
     fn find_all_connected_connectors(
         card: &Card,
         resources: &ResourceHandles,
+        in_use_crtcs: &HashSet<crtc::Handle>,
     ) -> Result<Vec<ConnectorInfo>, anyhow::Error> {
         let mut results = Vec::new();
 
@@ -632,7 +559,11 @@ impl KmsState {
                     .map_err(|e| anyhow::anyhow!("Failed to get encoder info: {}", e))?;
 
                 let compatible = resources.filter_crtcs(enc_info.possible_crtcs());
-                if let Some(&crtc_h) = compatible.first() {
+                // Pick the first compatible CRTC that is NOT already
+                // in use by an existing output. This prevents a
+                // newly-hotplugged monitor from stealing a CRTC
+                // that is actively driving another display.
+                if let Some(&crtc_h) = compatible.iter().find(|c| !in_use_crtcs.contains(c)) {
                     info!(
                         "KMS config: {conn_name} {:?} → encoder {:?} → CRTC {:?} @ {}x{}",
                         conn, enc, crtc_h, w, h
@@ -1001,6 +932,249 @@ impl KmsState {
 
         Ok((fb, dumb))
     }
+
+    // ── Per-connector incremental modesetting (Phase 2.4) ──────────────────
+
+    /// Single source of truth for modesetting one connector.
+    /// Called by both [`open`] (initial enumeration) and
+    /// [`allocate_one_output`] (incremental hotplug add).
+    #[allow(clippy::too_many_arguments)]
+    fn build_kms_output(
+        card: &Card,
+        connector: connector::Handle,
+        encoder: encoder::Handle,
+        crtc: crtc::Handle,
+        mode: Mode,
+        physical_w_mm: u32,
+        physical_h_mm: u32,
+        conn_name: String,
+    ) -> Result<KmsOutput, anyhow::Error> {
+        let (w, h) = mode.size();
+        let width = w as u32;
+        let height = h as u32;
+        info!(
+            "Display '{}': {}x{} @ {} Hz, {}x{}mm",
+            conn_name,
+            width,
+            height,
+            mode.vrefresh() as f32 / 1000.0,
+            physical_w_mm,
+            physical_h_mm,
+        );
+
+        let scale_factor = scale_factor_from_edid(width, height, physical_w_mm, physical_h_mm);
+        let saved_crtc = Some(card.get_crtc(crtc)?);
+
+        let gbm = if cfg!(test) {
+            debug!("Skipping GBM init in test mode — using dumb-buffer fallback");
+            None
+        } else {
+            let raw_fd = card.raw_fd();
+            GbmRenderState::new(raw_fd, width, height)
+                .map_err(|e| {
+                    warn!(
+                        "GBM init failed for '{}' ({}); falling back to dumb buffer",
+                        conn_name, e
+                    );
+                    e
+                })
+                .ok()
+        };
+
+        let cpu_scanout = match Self::create_cpu_scanout_buffer(card, width, height) {
+            Ok(scanout) => Some(scanout),
+            Err(e) => {
+                warn!(
+                    "Failed to create CPU scanout for '{}' ({}); falling back to legacy path",
+                    conn_name, e
+                );
+                None
+            }
+        };
+
+        let output = if let Some(scanout) = cpu_scanout {
+            let scanout_fb = scanout.fb;
+            card.set_crtc(crtc, Some(scanout_fb), (0, 0), &[connector], Some(mode))?;
+            KmsOutput {
+                connector,
+                crtc,
+                encoder,
+                mode,
+                width,
+                height,
+                physical_width_mm: physical_w_mm,
+                physical_height_mm: physical_h_mm,
+                scale_factor,
+                name: conn_name,
+                gbm,
+                cpu_scanout: Some(scanout),
+                current_fb: scanout_fb,
+                saved_crtc,
+                pending_fbs: VecDeque::new(),
+            }
+        } else if let Some(ref gbm_state) = gbm {
+            let (fb, _front) = unsafe { gbm_state.lock_and_create_fb(card)? };
+            card.set_crtc(crtc, Some(fb), (0, 0), &[connector], Some(mode))?;
+            KmsOutput {
+                connector,
+                crtc,
+                encoder,
+                mode,
+                width,
+                height,
+                physical_width_mm: physical_w_mm,
+                physical_height_mm: physical_h_mm,
+                scale_factor,
+                name: conn_name,
+                gbm,
+                cpu_scanout: None,
+                current_fb: fb,
+                saved_crtc,
+                pending_fbs: VecDeque::new(),
+            }
+        } else {
+            let (fb, _dumb) = Self::create_dumb_framebuffer(card, width, height)?;
+            card.set_crtc(crtc, Some(fb), (0, 0), &[connector], Some(mode))?;
+            KmsOutput {
+                connector,
+                crtc,
+                encoder,
+                mode,
+                width,
+                height,
+                physical_width_mm: physical_w_mm,
+                physical_height_mm: physical_h_mm,
+                scale_factor,
+                name: conn_name,
+                gbm: None,
+                cpu_scanout: None,
+                current_fb: fb,
+                saved_crtc,
+                pending_fbs: VecDeque::new(),
+            }
+        };
+
+        Ok(output)
+    }
+
+    /// Collect the set of CRTC handles currently claimed by live outputs.
+    /// Used by [`scan_new_connectors`] to prevent a newly-hotplugged
+    /// connector from stealing a CRTC already driving another display.
+    fn allocated_crtc_handles(&self) -> HashSet<crtc::Handle> {
+        self.outputs.iter().map(|o| o.crtc).collect()
+    }
+
+    /// Scan for connected connectors, excluding CRTCs already in use by
+    /// existing outputs. Returns candidates for new displays only.
+    fn scan_new_connectors(&self) -> Result<Vec<ConnectorInfo>, anyhow::Error> {
+        let resources = self.card.resource_handles()?;
+        let in_use = self.allocated_crtc_handles();
+        debug!(
+            "scan_new_connectors: {} CRTC(s) already allocated",
+            in_use.len()
+        );
+        Self::find_all_connected_connectors(&self.card, &resources, &in_use)
+    }
+
+    /// Modeset a single newly-connected display output without disturbing
+    /// already-displayed monitors. The connector must match a candidate
+    /// returned by [`scan_new_connectors`] (i.e. its CRTC is not already
+    /// claimed); if no free CRTC is available this returns an error.
+    pub fn allocate_one_output(&mut self, conn_name: &str) -> Result<(), anyhow::Error> {
+        let candidates = self.scan_new_connectors()?;
+        let target = candidates
+            .iter()
+            .find(|(_, _, _, _, _, _, name)| name == conn_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Connector '{}' not found among newly-connected candidates \
+                     ({} candidate(s) scanned)",
+                    conn_name,
+                    candidates.len()
+                )
+            })?;
+
+        let &(connector, encoder, crtc, mode, physical_w_mm, physical_h_mm, ref name) = target;
+        let output = Self::build_kms_output(
+            &self.card,
+            connector,
+            encoder,
+            crtc,
+            mode,
+            physical_w_mm,
+            physical_h_mm,
+            name.clone(),
+        )?;
+
+        info!(
+            "🔌 Hotplug add: output '{}' modeset (CRTC {:?})",
+            output.name,
+            u32::from(output.crtc)
+        );
+        self.outputs.push(output);
+        Ok(())
+    }
+
+    /// Tear down a single disconnected output — restore its saved CRTC
+    /// state, drain pending page-flips, free framebuffers, and release
+    /// GBM resources for this output only. Unaffected outputs remain
+    /// byte-for-byte intact.
+    pub fn destroy_one_output(&mut self, conn_name: &str) -> Result<(), anyhow::Error> {
+        let idx = self
+            .outputs
+            .iter()
+            .position(|o| o.name == conn_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "destroy_one_output: no output named '{}' ({} output(s) live)",
+                    conn_name,
+                    self.outputs.len()
+                )
+            })?;
+
+        let mut output = self.outputs.remove(idx);
+
+        // Drain pending page-flips for this CRTC before freeing
+        // framebuffers — DRM retains GEM references during scanout.
+        while let Some(pending_fb) = output.pending_fbs.pop_front() {
+            if pending_fb != output.current_fb {
+                let _ = self.card.destroy_framebuffer(pending_fb);
+            }
+        }
+
+        // Restore the original CRTC state saved at modeset time.
+        if let Some(ref saved) = output.saved_crtc {
+            if let Some(fb_handle) = saved.framebuffer() {
+                let (saved_x, saved_y) = saved.position();
+                let _ = self.card.set_crtc(
+                    output.crtc,
+                    Some(fb_handle),
+                    (saved_x, saved_y),
+                    &[output.connector],
+                    saved.mode(),
+                );
+            }
+        }
+
+        // Free framebuffers + buffers.
+        if let Some(scanout) = output.cpu_scanout.take() {
+            if output.current_fb != scanout.fb {
+                let _ = self.card.destroy_framebuffer(output.current_fb);
+            }
+            let _ = self.card.destroy_framebuffer(scanout.fb);
+            let _ = self.card.destroy_dumb_buffer(scanout.buffer);
+        } else {
+            let _ = self.card.destroy_framebuffer(output.current_fb);
+        }
+        drop(output.gbm.take());
+
+        info!(
+            "🔌 Hotplug remove: output '{}' torn down (CRTC {:?})",
+            conn_name,
+            u32::from(output.crtc)
+        );
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for KmsState {
@@ -1206,6 +1380,11 @@ impl DrmBackend {
 
         self.init_libinput();
         self.init_calloop_loop()?;
+
+        // Phase 4: Drop Linux capabilities after acquiring DRM master
+        // and opening input devices. The compositor no longer needs
+        // CAP_SYS_ADMIN, CAP_NET_ADMIN, etc. for ongoing operation.
+        sandbox::drop_capabilities();
 
         info!("DRM/KMS backend fully initialized");
         Ok(output_count)
@@ -1539,6 +1718,12 @@ impl DrmBackend {
     /// or destroy Smithay `Output` objects and workspace tapes.
     ///
     /// The existing KMS state is replaced with the new one.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use `apply_hotplug_diff` for incremental (no-screen-flash) hotplug. \
+                This method does a full KMS teardown and re-open, which causes every \
+                connected monitor to briefly go black."
+    )]
     pub fn reenumerate_outputs(&mut self) -> Result<(Vec<String>, Vec<String>), anyhow::Error> {
         let device_path = self.primary_device.as_deref().unwrap_or("/dev/dri/card0");
         info!("🔄 Re-enumerating DRM outputs on {}", device_path);
@@ -1546,24 +1731,16 @@ impl DrmBackend {
         let new_kms = KmsState::open(device_path)?;
 
         // Diff: which outputs are new and which are gone?
-        let old_names: std::collections::HashSet<&str> = self
+        let old_names: Vec<String> = self
             .kms
             .as_ref()
-            .map(|k| k.outputs.iter().map(|o| o.name.as_str()).collect())
+            .map(|k| k.outputs.iter().map(|o| o.name.clone()).collect())
             .unwrap_or_default();
 
-        let new_names: std::collections::HashSet<&str> =
-            new_kms.outputs.iter().map(|o| o.name.as_str()).collect();
+        let new_names: Vec<String> =
+            new_kms.outputs.iter().map(|o| o.name.clone()).collect();
 
-        let added: Vec<String> = new_names
-            .difference(&old_names)
-            .map(|s| s.to_string())
-            .collect();
-
-        let removed: Vec<String> = old_names
-            .difference(&new_names)
-            .map(|s| s.to_string())
-            .collect();
+        let (added, removed) = compute_output_diff(&old_names, &new_names);
 
         if added.is_empty() && removed.is_empty() {
             info!("Hotplug re-enumeration: no changes detected");
@@ -1579,6 +1756,85 @@ impl DrmBackend {
         // Replace old KMS state with new.
         if let Some(mut old) = self.kms.replace(new_kms) {
             old.cleanup()?;
+        }
+
+        Ok((added, removed))
+    }
+
+    /// Apply per-connector incremental modesetting after a hotplug event.
+    ///
+    /// Unlike [`reenumerate_outputs`] (which tears down and re-opens ALL
+    /// outputs, causing every connected monitor to flash), this method:
+    ///
+    /// 1. Scans for newly-connected connectors via
+    ///    [`KmsState::scan_new_connectors`] (which skips CRTCs already
+    ///    claimed by existing outputs).
+    /// 2. Computes the diff via [`compute_output_diff`].
+    /// 3. Destroys disconnected outputs via
+    ///    [`KmsState::destroy_one_output`] (restoring their saved CRTC
+    ///    state and freeing framebuffers/GBM resources).
+    /// 4. Allocates newly-connected outputs via
+    ///    [`KmsState::allocate_one_output`] (modesetting one connector
+    ///    at a CRTC that was free at scan time).
+    ///
+    /// Already-displayed monitors are **not touched** — their CRTC,
+    /// encoder, mode, GBM surface, and CPU scanout buffer are preserved
+    /// byte-for-byte across the hotplug. No screen flash.
+    ///
+    /// Returns `(Vec<String> added, Vec<String> removed)` matching the
+    /// downstream hotplug-handler contract (same shape as
+    /// [`reenumerate_outputs`]). Early-returns `Ok` with both vectors
+    /// empty on a no-op udev event.
+    pub fn apply_hotplug_diff(
+        &mut self,
+    ) -> Result<(Vec<String>, Vec<String>), anyhow::Error> {
+        let Some(ref mut kms) = self.kms else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+
+        let existing: Vec<String> = kms.outputs.iter().map(|o| o.name.clone()).collect();
+
+        // Full scan: find ALL currently-connected connectors (not just
+        // ones with free CRTCs). We need every connected connector for
+        // an accurate diff — otherwise already-displayed monitors (whose
+        // CRTCs are in use) would be falsely reported as removed.
+        let resources = kms.card.resource_handles()?;
+        let all_connected = KmsState::find_all_connected_connectors(
+            &kms.card,
+            &resources,
+            &HashSet::new(),
+        )?;
+        let all_names: Vec<String> = all_connected
+            .iter()
+            .map(|(_, _, _, _, _, _, name)| name.clone())
+            .collect();
+
+        let (added, removed) = compute_output_diff(&existing, &all_names);
+
+        if added.is_empty() && removed.is_empty() {
+            info!("Hotplug diff: no changes detected");
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        info!(
+            "🔌 Hotplug diff: {} added, {} removed — applying incrementally",
+            added.len(),
+            removed.len()
+        );
+
+        // Remove disconnected outputs first (free their CRTCs for
+        // potential reuse by newly-connected displays).
+        for name in &removed {
+            if let Err(e) = kms.destroy_one_output(name) {
+                warn!("Failed to destroy removed output '{}': {}", name, e);
+            }
+        }
+
+        // Allocate newly-connected outputs.
+        for name in &added {
+            if let Err(e) = kms.allocate_one_output(name) {
+                warn!("Failed to allocate new output '{}': {}", name, e);
+            }
         }
 
         Ok((added, removed))
@@ -1628,6 +1884,97 @@ impl Default for DrmBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── compute_output_diff (Phase 2.4) ───────────────────────────────────
+
+    #[test]
+    fn test_compute_output_diff_empty() {
+        let (added, removed) = compute_output_diff(&[], &[]);
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_compute_output_diff_identical() {
+        let a = vec!["HDMI-A-1".into(), "eDP-1".into()];
+        let b = vec!["HDMI-A-1".into(), "eDP-1".into()];
+        let (added, removed) = compute_output_diff(&a, &b);
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_compute_output_diff_single_add() {
+        let a = vec!["eDP-1".into()];
+        let b = vec!["eDP-1".into(), "HDMI-A-1".into()];
+        let (added, removed) = compute_output_diff(&a, &b);
+        assert_eq!(added, vec!["HDMI-A-1"]);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_compute_output_diff_single_remove() {
+        let a = vec!["eDP-1".into(), "HDMI-A-1".into()];
+        let b = vec!["eDP-1".into()];
+        let (added, removed) = compute_output_diff(&a, &b);
+        assert_eq!(removed, vec!["HDMI-A-1"]);
+        assert!(added.is_empty());
+    }
+
+    #[test]
+    fn test_compute_output_diff_mixed() {
+        let a = vec!["eDP-1".into(), "HDMI-A-1".into()];
+        let b = vec!["eDP-1".into(), "DP-1".into()];
+        let (added, removed) = compute_output_diff(&a, &b);
+        assert_eq!(added, vec!["DP-1"]);
+        assert_eq!(removed, vec!["HDMI-A-1"]);
+    }
+
+    #[test]
+    fn test_compute_output_diff_replace() {
+        let a = vec!["VGA-1".into()];
+        let b = vec!["HDMI-A-1".into()];
+        let (added, removed) = compute_output_diff(&a, &b);
+        assert_eq!(added, vec!["HDMI-A-1"]);
+        assert_eq!(removed, vec!["VGA-1"]);
+    }
+
+    #[test]
+    fn test_compute_output_diff_idempotent() {
+        let a = vec!["eDP-1".into()];
+        let (added, removed) = compute_output_diff(&a, &a);
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_compute_output_diff_duplicates() {
+        // Duplicates in input are treated as a single logical name
+        // because the impl uses HashSet internally.
+        let a = vec!["eDP-1".into(), "eDP-1".into()];
+        let b = vec!["eDP-1".into()];
+        let (added, removed) = compute_output_diff(&a, &b);
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_compute_output_diff_case_sensitive() {
+        let a = vec!["hdmi-a-1".into()];
+        let b = vec!["HDMI-A-1".into()];
+        let (added, removed) = compute_output_diff(&a, &b);
+        assert_eq!(added, vec!["HDMI-A-1"]);
+        assert_eq!(removed, vec!["hdmi-a-1"]);
+    }
+
+    #[test]
+    fn test_compute_output_diff_both_empty_string_slices() {
+        let a: Vec<String> = vec![];
+        let b: Vec<String> = vec![];
+        let (added, removed) = compute_output_diff(&a, &b);
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
+    }
 
     // ── BackendKind ────────────────────────────────────────────────────────
 

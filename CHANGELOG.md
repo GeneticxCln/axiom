@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Phase 2: Core feature completion — COMPLETE ✅
+
+#### Phase 2.4: Per-connector incremental modesetting ✅
+
+- **`DrmBackend::apply_hotplug_diff` — per-connector incremental modesetting.** In-place add/remove of [`KmsOutput`]s without disturbing already-displayed monitors. Re-scans the device via `KmsState::scan_new_connectors` (which reserves CRTCs already held by `self.kms.outputs`), diffs names via `compute_output_diff`, and then **destroys** disconnected outputs via `KmsState::destroy_one_output` (which restores the saved CRTC state and tears down framebuffers/GBM surfaces) before **allocating** newly-connected outputs via `KmsState::allocate_one_output` (which modesets one connector at a CRTC that was free at scan time). The unchanged outputs' CRTC / encoder / mode / GBM surface / CPU scanout buffer are preserved byte-for-byte across the hotplug. **No screen flash on already-displayed monitors.** Returns `(Vec<String> added, Vec<String> removed)` matching the projected downstream hotplug-handler contract; early-outs on no-op udev events.
+- **`compute_output_diff` — pure helper behind the diff math.** Free function in `src/backend/drm.rs` taking `&[String]` existing + `&[String]` new and returning `(Vec<String> added, Vec<String> removed)`. Pure: no hardware, no allocation beyond the two return vectors. Unit-tested in `mod tests` for empty / identical / single-add / single-remove / mixed / replace / idempotent / duplicates / case-sensitive / both-empty cases (10 tests, all clippy-clean).
+- **`find_all_connected_connectors` — CRTC-aware connector scan.** Refactored to take an `in_use_crtcs: &HashSet<crtc::Handle>` argument and skip CRTCs that are already pinned by existing outputs. Picks the first compatible CRTC that is NOT in use, so newly-arrived connectors can never steal a CRTC from an already-displayed monitor. Called from both `KmsState::open` (with an empty set) and `KmsState::scan_new_connectors` (with `allocated_crtc_handles()`).
+- **`KmsState::allocate_one_output` / `destroy_one_output` / `allocated_crtc_handles` / `scan_new_connectors` / `build_kms_output`.** New per-connector modeset primitives. Single source of truth: `build_kms_output` is the helper that knows how to modeset one connector (CPU scanout / GBM / dumb fallback branches), and both `KmsState::open` (initial enumeration) and `allocate_one_output` (incremental hotplug add) call it.
+
+### Build / Feature gates
+
+- **Placeholder WGSL pipeline is now controlled by a Cargo feature, not `cfg(debug_assertions)`.** The `placeholder-pipeline` feature is **default-on**, preserving the previous dev-mode behaviour where untextured windows draw through the placeholder pipeline. To replicate the prior release behaviour (no placeholder WGSL embedded in the binary), build with `cargo build --release --no-default-features`. The release binary now ships the embedded `placeholder.wgsl` (~2 KB) and an additional `wgpu::RenderPipeline` slot by default; opt out via `--no-default-features` if binary size matters.
+
+### CI
+
+- **Feature-off integration tests now have a CI lane.** A new `feature-off-test` GitHub Actions job runs `cargo test --no-default-features --test integration_tests --lib` so the `cfg(not(feature = "placeholder-pipeline"))`-gated tests in `tests/integration_tests.rs` (`test_compose_full_frame_skips_untextured_windows`, `test_prepare_window_resources_skips_untextured_window`) actually execute under CI.
+
+### Hardening
+
+- **Phase 1.A4 drop-order invariant** is now backstopped by a `static_assertions::assert_fields!` compile-time check in `compositor::tests::test_phase1_a4_drop_order_symbols_locked`. The macro enforces field *presence* (any rename of `state` / `winit_backend` / `winit_event_loop` triggers a compile error in CI); declaration *order* remains the responsibility of the SAFETY comment in `backend/mod.rs::AxiomSmithayBackendReal::initialize_winit`, documented inline.
+
 ## v0.1.0-alpha.2 (2026-07-19)
 
 ### Features
