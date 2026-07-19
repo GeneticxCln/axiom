@@ -1,6 +1,56 @@
 # Changelog
 
-## v0.1.0-alpha.1 (2026-07-15)
+## v0.1.0-alpha.2 (2026-07-19)
+
+### Features
+- Server-side decoration quads rendered via WGPU solid-color pipeline
+- Font atlas / glyph cache (ab_glyph) for future title text rendering
+- Font atlas text pipeline compiled into renderer (ensure_text_pipeline)
+- libseat/seatd/logind session management for DRM device access
+- Session-aware LibinputDevice (opens devices through seatd when available)
+- DRM connector/CRTC/encoder/mode enumeration with GBM surface creation
+- Seatd daemon integration: graceful fallback when no session manager
+- Metrics client example (IPC GetPerformanceReport query)
+- IPC fuzz tests: malformed JSON, truncated UTF-8, extreme values
+
+### Performance
+- Surface format: prefer Bgra8UnormSrgb (matches headless pipeline default)
+- render_to_surface_auto now receives config by parameter (avoids redundant lookup)
+- Decoration quads use dedicated solid pipeline (separate from window render)
+- Cached staging buffer reuse for DRM readback path
+
+### Testing
+- 233 tests passing (187 unit + 2 bin + 44 integration)
+- 4 new IPC fuzz/malformed-input tests
+- Code coverage script (cargo-tarpaulin)
+- Coverage CI job uploading to Codecov
+- 6 property-based layout invariants maintained
+- Shell syntax validation (bash -n) for all scripts
+
+### Bug Fixes
+- render_to_surface_auto: surface config lookup after remove_entry crash
+- Pipeline format mismatch: Bgra8UnormSrgb vs Rgba8UnormSrgb validation error
+- Nested (winit) mode: no more surface timeout / emergency shutdown
+- Nested mode hangs on X11 with WINIT_UNIX_BACKEND and EGL_BAD_CONFIG
+- Smoke test prefers Wayland backend when available (avoids X11 EGL issues)
+- Cargo-deny config: remove deprecated deny = [] key
+- Advisory cleanup: remove stale RUSTSEC-2026-0190, document all ignores
+- Clippy: items_after_test_module, for_kv_map, collapsible_match
+- Formatting: cargo fmt across all source files
+- Config tests: remove stale fields (lazy_loading, scale_factor, etc.)
+- Remove unused deps: libloading, gl, mockall
+- render_bridge: rename should_use_wgpu_gl_bridge → should_render
+- SSD backend_prefers_server_side_decorations: doc matches reality
+
+### Refactoring
+- renderer/mod.rs module docs: complete WGPU-only rendering path documentation
+- DRM hardware validation matrix tracked in docs/dev/DRM_HARDWARE_MATRIX.md
+- Backend struct sealed: session stored in AxiomSmithayBackendReal + DrmBackend
+
+### Dependencies
+- ab_glyph 0.2: font atlas rasterization for decoration title text
+- libseat 0.2: seat management for DRM/input device access
+- smithay: enable backend_session_libseat feature
 
 ### Features
 - WGPU-only compositing pipeline — replaces legacy dual GL/WGPU render path
