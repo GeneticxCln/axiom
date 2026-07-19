@@ -2007,7 +2007,7 @@ mod tests {
     fn test_fuzz_truncated_utf8() {
         let bytes: &[u8] = &[0xff, 0xfe, 0x80, 0x00, 0x7f];
         let s = String::from_utf8_lossy(bytes);
-        let result = serde_json::from_str::<crate::ipc::LazyUIMessage>(s.as_ref());
+        let _ = serde_json::from_str::<crate::ipc::LazyUIMessage>(s.as_ref());
     }
 
     /// Fuzz: numerically extreme values in known fields must not panic.

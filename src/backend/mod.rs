@@ -19,6 +19,9 @@ use crate::workspace::ScrollableWorkspaces;
 use anyhow::Result;
 use log::{debug, info, warn};
 
+use smithay::wayland::foreign_toplevel_list::{
+    ForeignToplevelHandle, ForeignToplevelListHandler, ForeignToplevelListState,
+};
 use std::collections::{HashMap, HashSet};
 use std::os::unix::io::OwnedFd;
 use std::sync::{mpsc, Arc};
@@ -36,7 +39,8 @@ use smithay::{
         renderer::{gles::GlesRenderer, utils::on_commit_buffer_handler},
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
-    delegate_compositor, delegate_data_device, delegate_seat, delegate_shm, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_foreign_toplevel_list, delegate_seat,
+    delegate_shm, delegate_xdg_shell,
     input::{
         keyboard::{FilterResult, XkbConfig},
         pointer::{AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, MotionEvent},
@@ -211,6 +215,8 @@ pub struct State {
 
     // Keep ToplevelSurface handles alive (they get destroyed when dropped)
     pub toplevels: HashMap<u32, ToplevelSurface>,
+    pub toplevel_handles: HashMap<u32, ForeignToplevelHandle>,
+    pub foreign_toplevel_list_state: ForeignToplevelListState,
 
     // Running state
     pub running: bool,
@@ -478,15 +484,14 @@ impl State {
 
         self.x11_window_map.insert(x11_window_id, window_id);
 
-        // TODO: mint ForeignToplevelHandle via foreign_toplevel_list_state
-        // when Smithay ≥0.8 (delegate_foreign_toplevel_list! macro).
-
         window_id
     }
 
     pub fn destroy_window(&mut self, surface_id: u32) {
-        // TODO: send_closed + remove_toplevel on the ForeignToplevelHandle
-        // when Smithay ≥0.8 (delegate_foreign_toplevel_list! macro).
+        // Remove the ForeignToplevelHandle for external taskbars/docks
+        if let Some(handle) = self.toplevel_handles.remove(&surface_id) {
+            handle.send_closed();
+        }
         // Release the toplevel handle to prevent memory leaks
         self.toplevels.remove(&surface_id);
 
@@ -727,6 +732,12 @@ impl SeatHandler for State {
     }
 }
 
+impl ForeignToplevelListHandler for State {
+    fn foreign_toplevel_list_state(&mut self) -> &mut ForeignToplevelListState {
+        &mut self.foreign_toplevel_list_state
+    }
+}
+
 impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
@@ -767,6 +778,13 @@ impl XdgShellHandler for State {
             "🪟 New XDG toplevel: surface={} title={:?} app_id={:?}",
             surface_id, display_title, app_id
         );
+
+        // Create ForeignToplevelHandle for external taskbars/docks
+        let ftl_handle = self
+            .foreign_toplevel_list_state
+            .new_toplevel::<State>(display_title.clone(), app_id.clone().unwrap_or_default());
+        self.toplevel_handles.insert(surface_id, ftl_handle);
+        self.needs_redraw = true;
 
         self.create_window_from_surface(surface_id, display_title, app_id, wl_surface.clone());
         self.update_surface_fractional_scale(&wl_surface);
@@ -1047,6 +1065,7 @@ delegate_shm!(State);
 delegate_seat!(State);
 delegate_xdg_shell!(State);
 delegate_data_device!(State);
+delegate_foreign_toplevel_list!(State);
 smithay::delegate_fractional_scale!(State);
 smithay::delegate_xdg_decoration!(State);
 smithay::delegate_output!(State);
@@ -1158,6 +1177,8 @@ impl AxiomSmithayBackendReal {
             xwm: None,
             decoration_manager: decoration_manager.clone(),
             toplevels: HashMap::new(),
+            toplevel_handles: HashMap::new(),
+            foreign_toplevel_list_state: ForeignToplevelListState::new::<State>(&display.handle()),
             running: true,
             needs_redraw: true,
             window_width: 1920,
@@ -1274,6 +1295,8 @@ impl AxiomSmithayBackendReal {
             xwm: None,
             decoration_manager: decoration_manager.clone(),
             toplevels: HashMap::new(),
+            toplevel_handles: HashMap::new(),
+            foreign_toplevel_list_state: ForeignToplevelListState::new::<State>(&display.handle()),
             running: true,
             needs_redraw: true,
             window_width: 1920,
