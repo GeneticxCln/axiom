@@ -788,6 +788,17 @@ impl AxiomRenderer {
         self.decoration_quads.clear();
     }
 
+    /// Clear text quads (called at the start of each frame).
+    #[allow(dead_code)]
+    pub fn clear_text_quads(&mut self) {
+        self.text_quads.clear();
+    }
+
+    /// Set the per-frame text quads for decoration title rendering.
+    #[allow(dead_code)]
+    pub fn set_text_quads(&mut self, quads: Vec<TextQuad>) {
+        self.text_quads = quads;
+    }
     /// Pre-build decoration GPU resources (vertex buffer + bind group)
     /// before the render pass so that the pass block does not need &self.
     /// Returns `None` when there are no decoration quads to draw.
@@ -927,7 +938,7 @@ impl AxiomRenderer {
             let result = loop {
                 match surface.get_current_texture() {
                     Ok(frame) => {
-                        let render_result = self.render_to_surface_auto(&surface, &frame);
+                        let render_result = self.render_to_surface_auto(&surface, &frame, &config);
                         if render_result.is_ok() {
                             frame.present();
                         }
@@ -1190,6 +1201,7 @@ impl AxiomRenderer {
         // Pre-build decoration vertex buffer and bind group before the
         // render pass so we don't need &self inside the pass block.
         let decoration_resources = self.prepare_decoration_resources(uniform_buffer);
+        let text_resources = self.prepare_text_resources(uniform_buffer);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1226,6 +1238,15 @@ impl AxiomRenderer {
                 render_pass.set_bind_group(0, deco_bg, &[]);
                 render_pass.set_vertex_buffer(0, deco_vb.slice(..));
                 render_pass.draw(0..deco_count, 0..1);
+                // Draw title text.
+                if let Some(ref text_pipe) = self.text_pipeline {
+                    if let Some((ref text_bg, ref text_vb, text_count)) = text_resources.as_ref() {
+                        render_pass.set_pipeline(text_pipe);
+                        render_pass.set_bind_group(0, text_bg, &[]);
+                        render_pass.set_vertex_buffer(0, text_vb.slice(..));
+                        render_pass.draw(0..*text_count, 0..1);
+                    }
+                }
             }
         }
 
@@ -1778,6 +1799,189 @@ impl AxiomRenderer {
         Ok(result)
     }
 
+    /// Pre-build text GPU resources from cached text quads.
+    #[allow(dead_code)]
+    fn prepare_text_resources(
+        &self,
+        projection_buffer: &Buffer,
+    ) -> Option<(wgpu::BindGroup, wgpu::Buffer, u32)> {
+        if self.text_quads.is_empty() {
+            return None;
+        }
+        let glyph_cache = self.glyph_cache.as_ref()?;
+        let text_bgl = self.text_bind_group_layout.as_ref()?;
+
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Font Sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let atlas_view = glyph_cache.texture().create_view(&Default::default());
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Text Bind Group"),
+            layout: text_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: projection_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let mut verts: Vec<f32> = Vec::with_capacity(self.text_quads.len() * 24);
+        for tq in &self.text_quads {
+            for pos in [
+                [tq.x, tq.y, tq.uv_min[0], tq.uv_min[1]],
+                [tq.x + tq.w, tq.y, tq.uv_max[0], tq.uv_min[1]],
+                [tq.x, tq.y + tq.h, tq.uv_min[0], tq.uv_max[1]],
+                [tq.x + tq.w, tq.y, tq.uv_max[0], tq.uv_min[1]],
+                [tq.x, tq.y + tq.h, tq.uv_min[0], tq.uv_max[1]],
+                [tq.x + tq.w, tq.y + tq.h, tq.uv_max[0], tq.uv_max[1]],
+            ] {
+                verts.extend_from_slice(&pos);
+            }
+        }
+        let vb = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Text VBO"),
+                contents: bytemuck::cast_slice(&verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+        Some((bg, vb, (self.text_quads.len() * 6) as u32))
+    }
+
+    /// Lazily create the text rendering pipeline and bind group layout.
+    /// Called on first text render when `text_pipeline` is None.
+    #[allow(dead_code)]
+    pub fn ensure_text_pipeline(&mut self) -> Result<()> {
+        use crate::renderer::font_atlas::GlyphCache;
+
+        if self.text_pipeline.is_some() {
+            return Ok(());
+        }
+
+        let text_bgl = self
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Text Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Text Pipeline Layout"),
+                bind_group_layouts: &[&text_bgl],
+                push_constant_ranges: &[],
+            });
+
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Text Shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("text.wgsl").into()),
+            });
+
+        let text_pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Text Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_main",
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<[f32; 4]>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                offset: 0,
+                                shader_location: 0,
+                                format: wgpu::VertexFormat::Float32x2,
+                            },
+                            wgpu::VertexAttribute {
+                                offset: 8,
+                                shader_location: 1,
+                                format: wgpu::VertexFormat::Float32x2,
+                            },
+                        ],
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+            });
+
+        let glyph_cache = GlyphCache::new(&self.device)?;
+
+        self.text_pipeline = Some(text_pipeline);
+        self.text_bind_group_layout = Some(text_bgl);
+        self.glyph_cache = Some(glyph_cache);
+
+        info!("Text rendering pipeline initialized");
+        Ok(())
+    }
+
     /// Get instance for external use (creating surfaces)
     pub fn instance(&self) -> Arc<Instance> {
         self.instance.clone()
@@ -2007,21 +2211,11 @@ impl AxiomRenderer {
         &mut self,
         surface: &wgpu::Surface<'_>,
         surface_texture: &wgpu::SurfaceTexture,
+        config: &wgpu::SurfaceConfiguration,
     ) -> Result<()> {
         use cgmath::Vector2;
 
-        // Composite windows first — use first surface's config for
-        // projection (single-output path; multi-output callers should
-        // use the dedicated render_output path).
-        let config_clone = self
-            .surfaces
-            .values()
-            .next()
-            .map(|(_, c)| c.clone())
-            .ok_or_else(|| {
-                anyhow::anyhow!("render_to_surface_auto: no surface config available")
-            })?;
-        self.render_to_surface(surface, &config_clone, surface_texture)?;
+        self.render_to_surface(surface, config, surface_texture)?;
 
         let view = surface_texture
             .texture
