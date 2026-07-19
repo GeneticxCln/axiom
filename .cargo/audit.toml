@@ -9,4 +9,6 @@ ignore = [
     "RUSTSEC-2026-0197",
     # anyhow downcast_mut unsoundness (unused)
     "RUSTSEC-2026-0190",
+    # ttf-parser unmaintained (used by font-kit for font discovery)
+    "RUSTSEC-2026-0192",
 ]

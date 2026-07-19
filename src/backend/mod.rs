@@ -98,23 +98,19 @@ use self::xwm::AxiomXwm;
 type CachedBufferData = std::rc::Rc<std::cell::RefCell<Option<(Vec<u8>, i32, i32)>>>;
 type ClipboardUpdate = Vec<u8>;
 
-/// Visible server-side decoration rendering is not yet wired into the live
-/// compositor output. Until that lands, the backend should not claim SSD to
-/// Wayland/X11 clients even though internal decoration state exists for tests
-/// and future rendering work.
-/// Visible server-side decoration rendering is not yet wired into the live
-/// compositor output. Until that lands, the backend should not claim SSD to
-/// Wayland/X11 clients even though internal decoration state exists for tests
-/// and future rendering work.
+/// Server-side decorations are now rendered via the WGPU solid-color pipeline
+/// and the font atlas text pipeline. Title text rendering falls back gracefully
+/// when system fonts are unavailable (titlebars still render with solid colors
+/// and buttons).
 fn backend_prefers_server_side_decorations() -> bool {
-    false
+    true
 }
 
-/// Current protocol-level decoration response advertised to xdg-decoration
-/// clients. We intentionally negotiate client-side decorations until visible
-/// SSD title text rendering is operational (font atlas pipeline).
+/// The compositor now renders visible SSD decoration quads (titlebar
+/// backgrounds and buttons) and title text (when system fonts are available).
+/// Negotiate server-side decorations with clients that request them.
 fn negotiated_xdg_decoration_mode() -> Mode {
-    Mode::ClientSide
+    Mode::ServerSide
 }
 
 // ============================================================================
@@ -439,7 +435,7 @@ impl State {
         self.surfaces.insert(surface_id, surface_data);
         self.window_map.insert(window_id, surface_id);
 
-        // Register decoration state, but do not claim visible SSD yet.
+        // Register decoration state — SSD rendering is now live via WGPU.
         self.decoration_manager.write().add_window(
             window_id,
             visible_title,
@@ -1024,9 +1020,14 @@ impl XdgDecorationHandler for State {
         toplevel.send_configure();
 
         if let Some(window_id) = self.window_id_for_surface(toplevel.wl_surface()) {
+            let mode = if negotiated == Mode::ServerSide {
+                crate::decoration::DecorationMode::ServerSide
+            } else {
+                crate::decoration::DecorationMode::ClientSide
+            };
             self.decoration_manager
                 .write()
-                .set_decoration_mode(window_id, crate::decoration::DecorationMode::ClientSide);
+                .set_decoration_mode(window_id, mode);
         }
     }
 
@@ -1038,9 +1039,14 @@ impl XdgDecorationHandler for State {
         toplevel.send_configure();
 
         if let Some(window_id) = self.window_id_for_surface(toplevel.wl_surface()) {
+            let mode = if negotiated == Mode::ServerSide {
+                crate::decoration::DecorationMode::ServerSide
+            } else {
+                crate::decoration::DecorationMode::ClientSide
+            };
             self.decoration_manager
                 .write()
-                .set_decoration_mode(window_id, crate::decoration::DecorationMode::ClientSide);
+                .set_decoration_mode(window_id, mode);
         }
     }
 
@@ -1052,9 +1058,14 @@ impl XdgDecorationHandler for State {
         toplevel.send_configure();
 
         if let Some(window_id) = self.window_id_for_surface(toplevel.wl_surface()) {
+            let mode = if negotiated == Mode::ServerSide {
+                crate::decoration::DecorationMode::ServerSide
+            } else {
+                crate::decoration::DecorationMode::ClientSide
+            };
             self.decoration_manager
                 .write()
-                .set_decoration_mode(window_id, crate::decoration::DecorationMode::ClientSide);
+                .set_decoration_mode(window_id, mode);
         }
     }
 }
@@ -1843,6 +1854,29 @@ impl AxiomSmithayBackendReal {
                 DeviceEvent::Added(dev) => {
                     let name = dev.device().name().to_owned();
                     info!("libinput device added: {}", name);
+
+                    // Apply configured pointer acceleration if the device
+                    // supports it (libinput expects speed in [-1.0, 1.0]).
+                    let mut device = dev.device().clone();
+                    if device.has_capability(input::DeviceCapability::Pointer)
+                        && device.config_accel_is_available()
+                    {
+                        let speed = self.state.config.input.mouse_accel.clamp(-1.0, 1.0);
+                        if (speed - self.state.config.input.mouse_accel).abs() > f64::EPSILON {
+                            debug!(
+                                "mouse_accel {:.2} clamped to libinput range [-1.0, 1.0] → {:.2}",
+                                self.state.config.input.mouse_accel, speed
+                            );
+                        }
+                        if let Err(e) = device.config_accel_set_speed(speed) {
+                            warn!(
+                                "⚠️ Failed to set pointer accel speed {:.2} on '{}': {:?}",
+                                speed, name, e
+                            );
+                        } else {
+                            info!("🐁 Pointer '{}' accel speed set to {:.2}", name, speed);
+                        }
+                    }
                 }
                 DeviceEvent::Removed(dev) => {
                     let name = dev.device().name().to_owned();
@@ -3457,11 +3491,11 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_delegates_ssd_to_client_by_default() {
-        // SSD render infrastructure exists (solid.wgsl + decoration quad pipeline)
-        // but title text rendering is deferred, so we still prefer client-side.
-        assert!(!backend_prefers_server_side_decorations());
-        assert_eq!(negotiated_xdg_decoration_mode(), Mode::ClientSide);
+    fn test_backend_prefers_server_side_decorations() {
+        // SSD rendering is now live via WGPU solid-color + text pipelines.
+        // Title text falls back gracefully when system fonts are unavailable.
+        assert!(backend_prefers_server_side_decorations());
+        assert_eq!(negotiated_xdg_decoration_mode(), Mode::ServerSide);
     }
 
     #[test]

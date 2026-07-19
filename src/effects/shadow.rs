@@ -13,8 +13,8 @@ use std::sync::Arc;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BlendState, Buffer, BufferDescriptor, BufferUsages,
     ColorTargetState, ColorWrites, CommandEncoder, Device, FragmentState, MultisampleState,
-    PrimitiveState, Queue, RenderPipeline, RenderPipelineDescriptor, TextureFormat,
-    TextureView, VertexState,
+    PrimitiveState, Queue, RenderPipeline, RenderPipelineDescriptor, TextureFormat, TextureView,
+    VertexState,
 };
 
 use super::shaders::{ShaderManager, ShaderType};

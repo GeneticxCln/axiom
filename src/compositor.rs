@@ -174,6 +174,9 @@ impl AxiomCompositor {
             .write()
             .set_border_width(config.window.border_width as f32);
 
+        // Wire vsync preference to the WGPU present mode selector
+        renderer.write().set_vsync(config.general.vsync);
+
         // Initialize server-side decoration manager (must be created before
         // the Smithay backend so it can receive a clone).
         let minimize_enabled = config.features.enable_minimize;
@@ -456,7 +459,10 @@ impl AxiomCompositor {
             r.clear_text_quads();
             let fmt = wgpu::TextureFormat::Bgra8UnormSrgb;
             if let Err(e) = r.ensure_text_pipeline(fmt) {
-                log::warn!("Text pipeline init failed (title rendering unavailable): {}", e);
+                log::warn!(
+                    "Text pipeline init failed (title rendering unavailable): {}",
+                    e
+                );
             }
         }
 
@@ -1159,11 +1165,11 @@ impl AxiomCompositor {
             .write()
             .update_config(self.config.workspace.clone());
 
-        // Update renderer border width from config
+        // Update renderer border width and vsync from config
         if let Some(renderer) = &self.renderer {
-            renderer
-                .write()
-                .set_border_width(self.config.window.border_width as f32);
+            let mut r = renderer.write();
+            r.set_border_width(self.config.window.border_width as f32);
+            r.set_vsync(self.config.general.vsync);
         }
 
         // Future: Update Input Manager, etc.

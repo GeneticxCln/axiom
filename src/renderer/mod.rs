@@ -11,7 +11,6 @@
 
 #![allow(clippy::too_many_lines)]
 
-#[cfg(debug_assertions)]
 use anyhow::Context;
 pub mod font_atlas;
 pub use font_atlas::{CachedGlyph, GlyphCache, TextQuad};
@@ -139,6 +138,10 @@ pub struct AxiomRenderer {
     /// buffers need invalidation (border width is baked into each uniform).
     cached_border_width: f32,
 
+    /// When true, prefer Fifo/Mailbox present modes (vsync on).
+    /// When false, prefer Immediate (tearing / no vsync).
+    vsync_enabled: bool,
+
     /// Solid-color render pipeline for server-side decoration elements
     /// (titlebar backgrounds, close/minimize/maximize buttons).
     /// Shares the cached projection uniform buffer at binding 0.
@@ -255,6 +258,23 @@ struct WindowUniforms {
     border_color: [f32; 4],
 }
 
+/// Select the best WGPU present mode given vsync preference.
+/// When vsync is disabled and `Immediate` is available, use it (tearing).
+/// Otherwise falls back to the first available mode (typically `Fifo`).
+fn select_present_mode_for_vsync(
+    vsync_enabled: bool,
+    caps: &[wgpu::PresentMode],
+) -> wgpu::PresentMode {
+    if !vsync_enabled {
+        for mode in caps {
+            if *mode == wgpu::PresentMode::Immediate {
+                return wgpu::PresentMode::Immediate;
+            }
+        }
+    }
+    caps.first().copied().unwrap_or(wgpu::PresentMode::Fifo)
+}
+
 impl AxiomRenderer {
     /// Create a new real GPU renderer with an actual surface
     pub async fn new(surface: wgpu::Surface<'static>, width: u32, height: u32) -> Result<Self> {
@@ -309,7 +329,7 @@ impl AxiomRenderer {
             format: surface_format,
             width,
             height,
-            present_mode: surface_caps.present_modes[0],
+            present_mode: select_present_mode_for_vsync(true, &surface_caps.present_modes),
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -465,6 +485,7 @@ impl AxiomRenderer {
             cached_readback_dims: (0, 0),
             border_width: 2.0,
             cached_border_width: 2.0,
+            vsync_enabled: true,
             device_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
@@ -648,6 +669,7 @@ impl AxiomRenderer {
             cached_readback_dims: (0, 0),
             border_width: 2.0,
             cached_border_width: 2.0,
+            vsync_enabled: true,
             device_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
@@ -681,7 +703,7 @@ impl AxiomRenderer {
             format: surface_format,
             width,
             height,
-            present_mode: surface_caps.present_modes[0],
+            present_mode: select_present_mode_for_vsync(true, &surface_caps.present_modes),
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -691,7 +713,14 @@ impl AxiomRenderer {
         self.surfaces.insert(name, (surface, config));
     }
 
-    /// Remove an output surface
+    /// Set whether VSync is enabled. When toggled at runtime, any
+    /// existing surfaces are NOT automatically reconfigured — a
+    /// surface resize or add_output is required to pick up the new
+    /// present_mode.
+    pub fn set_vsync(&mut self, enabled: bool) {
+        self.vsync_enabled = enabled;
+    }
+
     pub fn remove_output(&mut self, name: &str) {
         info!("🔌 Renderer: Removing output '{}'", name);
         self.surfaces.remove(name);
@@ -2548,7 +2577,6 @@ pub fn create_projection_matrix(width: f32, height: f32) -> [[f32; 4]; 4] {
 /// it embeds) is compiled out in release builds — the placeholder
 /// pipeline is dropped at compile time, and the WGSL shader bytes never
 /// reach the release binary.
-#[cfg(debug_assertions)]
 /// Build the solid-color render pipeline used for server-side decoration
 /// elements (titlebar backgrounds, close/minimize/maximize buttons).
 ///
@@ -2623,6 +2651,7 @@ pub fn create_solid_pipeline(
     Ok((pipeline, bind_group_layout))
 }
 
+#[cfg(debug_assertions)]
 pub fn create_placeholder_pipeline(
     device: &Device,
     format: TextureFormat,

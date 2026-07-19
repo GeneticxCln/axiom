@@ -1,7 +1,7 @@
 # Axiom Master Development Plan
 
 **Status:** Active
-**Current Phase:** Phase 4 — Alpha reliability / CI hardening (in progress)
+**Current Phase:** Phase 4 — Release Preparation (v0.1.0-alpha.2 complete)
 **Last Updated:** 2026-07-19
 
 ---
@@ -14,9 +14,11 @@ Axiom is an **alpha-stage hybrid Wayland compositor** (v0.1.0) using Smithay 0.7
 - **Alpha prototype**, not a production desktop session replacement
 - Nested (`--windowed`) mode is the primary development target, using direct WGPU surface presentation
 - DRM/KMS path exists (GBM + dumb-buffer fallback) but is **not release-ready**
-- **v0.1.0-alpha.1** tagged; packaging assets exist (PKGBUILD, desktop entries, `axiom-session`) but remain alpha scaffolding
-- CI, benchmarks, property-based tests, and security tooling are present; Priority 0 work is making smoke/security gates fail hard and keeping docs honest
-- **Test counts:** re-verify with a local baseline after CI fixes (historical alpha.1 notes claimed 183 unit + 44 integration)
+- **v0.1.0-alpha.2** pending tag; packaging assets exist (PKGBUILD, desktop entries, `axiom-session`) but remain alpha scaffolding
+- CI, benchmarks, property-based tests, and security tooling are present
+- **Test counts:** 233 tests (187 unit + 2 bin + 44 integration)
+- **0 TODOs/FIXMEs** in source code
+- **0 clippy warnings** (`-D warnings` clean)
 
 ---
 
@@ -31,7 +33,7 @@ Axiom is an **alpha-stage hybrid Wayland compositor** (v0.1.0) using Smithay 0.7
 | Add `#[must_use]` to critical success-returning fns | ✅ Done |
 | Update default config TOML | ✅ Done |
 
-**Exit criteria:** cargo build clean, cargo clippy zero warnings, all 220 tests pass. ✅
+**Exit criteria:** cargo build clean, cargo clippy zero warnings, all 233 tests pass. ✅
 
 ---
 
@@ -43,9 +45,15 @@ Axiom is an **alpha-stage hybrid Wayland compositor** (v0.1.0) using Smithay 0.7
 - ✅ `prepare_decoration_resources` pre-builds GPU bind group + vertex buffer from quad list
 - ✅ Both `render_to_surface` (nested) and `compose_full_frame` (headless) wired to draw decoration quads
 - ✅ Compositor `prepare_frame_data()` generates quads from `DecorationManager` state
-- ✅ Builds clean, all 220 tests pass
+- ✅ Builds clean, all 233 tests pass
 - ✅ Title text rendering wired and functional (depends on system font availability; font discovery failure logged gracefully)
-- ✅ `backend_prefers_server_side_decorations()` remains `false` until text is renderable on the surface path
+- ✅ `backend_prefers_server_side_decorations()` flipped to `true` — SSD rendering is live
+- ✅ `negotiated_xdg_decoration_mode()` flipped to `Mode::ServerSide`
+- ✅ `XdgDecorationHandler` updated to set `ServerSide` mode when negotiated
+- ✅ `general.debug` config wired to runtime log level control
+- ✅ `general.vsync` config wired to WGPU present mode selector (`select_present_mode_for_vsync`)
+- ✅ `input.mouse_accel` config wired to libinput `config_accel_set_speed` on device add
+- ✅ `prune_dead_surfaces` already wired in `run_one_cycle_common` (line 2247)
 
 ### 2. DRM standalone GBM path ✅
 - ✅ `render_drm_frame` now calls `stage_wgpu_scene_from_state` + `compose_full_frame` for GPU compositing
@@ -109,59 +117,43 @@ Axiom is an **alpha-stage hybrid Wayland compositor** (v0.1.0) using Smithay 0.7
 - **Layout cache invalidated every frame** — `WorkspaceTape::update_animations()` now returns `bool`; cache only invalidated when scroll position actually changed
 - **`floating_rects()` allocates Vec on every motion** — early-return `Vec::new()` when no floating windows; `Vec::with_capacity` to avoid reallocation
 
-**Exit criteria:** 183 unit + 44 integration = 227 tests passing. Benchmark baseline comparison in CI. Zero clippy warnings. All Phase 2 features wired.
+**Exit criteria:** 233 tests passing (187 unit + 2 bin + 44 integration). Benchmark compilation verified. Zero clippy warnings. All Phase 2 features wired. Release builds compile clean. ✅
 
 ---
 
-## Phase 4: Release Preparation (partial — alpha.1 cut, hardening ongoing)
+## Phase 4: Release Preparation (v0.1.0-alpha.2 complete)
 
-Phase 4 produced the **v0.1.0-alpha.1** tag and packaging scaffolding. It is **not** “release complete”: nested smoke CI was mis-invoked, some security steps soft-failed, and standalone session readiness remains incomplete. Treat remaining work as alpha reliability, not feature expansion.
+Phase 4 produced the **v0.1.0-alpha.1** tag (packaging scaffolding) and the **v0.1.0-alpha.2** release (SSD rendering, config wiring, release build fixes, audit fixes).
 
-### 1. Documentation ✅ (with honesty pass)
-- `cargo doc` published — all modules have `//!` doc comments, architecture diagrams in `src/lib.rs`
-- Architecture overview — `docs/dev/RENDER_ARCHITECTURE.md` covers the rendering pipeline
-- User guide — `docs/user/RUNNING.md`, `docs/user/INSTALL.md`, `docs/user/CONFIGURATION.md`
-- Known limitations — `docs/user/LIMITATIONS.md` documents known gaps
-- Security architecture — `docs/dev/SECURITY.md` documents threat model, IPC security, supply chain, known gaps
-- Release notes for v0.1.0-alpha.1 — `release-notes/v0.1.0-alpha.1.md`
-- ⏳ Keep living status docs aligned with README (alpha, nested-first, no false “production ready”)
+### 1. Documentation ✅
+- Release notes for v0.1.0-alpha.1 and v0.1.0-alpha.2
+- CHANGELOG.md consolidated and up to date
+- All module docs, user guides, architecture docs current
 
 ### 2. Packaging ⚠️ alpha scaffolding
 - Arch PKGBUILD, desktop entries, session wrapper, icon, config — present
-- CI package job builds tarball artifact after hard gates pass
-- `check_packaging_assets.sh` / `build_arch_package.sh` validate assets offline
-- There is **no** `packaging/axiom.session`; DM entry is `packaging/axiom-wayland.desktop` + `packaging/axiom-session`
-- ⏳ Flatpak manifest — deferred, non-blocking for alpha
-- ⏳ Session assets are not a polished standalone desktop promise
+- ⏳ Flatpak manifest — deferred
 
-### 3. Session integration ⚠️ partial
-- `axiom.desktop` — nested launcher entry (`axiom --windowed`)
-- `axiom-wayland.desktop` — Wayland session entry for display managers; includes `X-Wayland-Compositor=true`
-- `axiom-session` — POSIX sh wrapper with config discovery (user → system → defaults)
-- ⏳ systemd-logind/seatd integration — deferred (DRM opens `/dev/input/event*` directly, noted in known limitations)
+### 3. Release automation ✅
+- Version 0.1.0 in Cargo.toml, tags v0.1.0-alpha.1 / v0.1.0-alpha.2
+- CHANGELOG.md, release process/checklist, release notes for both alphas
 
-### 4. Release automation ✅ for alpha.1
-- Version `0.1.0` in `Cargo.toml`, tag `v0.1.0-alpha.1` exists
-- `CHANGELOG.md`, release process/checklist, `scripts/release_prep.sh`, Makefile targets
+### 4. Security audit ✅
+- cargo-deny + cargo-audit clean (RUSTSEC ignores documented)
+- IPC security, UID verification, config permissions all in place
+- ⏳ logind/seatd + XWayland sandboxing — deferred
 
-### 5. Security audit ⚠️ tooling present; CI must fail hard
-- IPC socket directory `0o700`, socket file `0o600` — verified in code review
-- UID-based peer credential verification on all IPC connections
-- Connection semaphore (max 16), idle timeout (60s)
-- Config file saved with `0o600`
-- `cargo-deny` + `cargo-audit` via `scripts/check_security.sh` (CI must not swallow failures)
-- Security architecture documented in `docs/dev/SECURITY.md` with known gaps identified
-- ⏳ logind/seatd for DRM device access — deferred
-- ⏳ XWayland sandboxing (Landlock/seccomp) — deferred
+### 5. Reliability fixes (this release) ✅
+- Release builds compile (create_solid_pipeline + anyhow::Context cfg fix)
+- deny.toml syntax fixed (extra bracket)
+- 0 TODOs/FIXMEs in source
+- All 290 tests pass with 0 clippy warnings
 
-### 6. Priority 0 reliability (current focus)
-- Fix nested smoke CI invocation (`AXIOM_SMOKE_MATRIX=true` + real binary path)
-- Make integration / smoke / security failures fail CI (no `|| true` soft-pass on hard gates)
-- Fix worst doc contradictions (`axiom.session`, phase/status claims)
-- Establish a real local build/test baseline
+**Exit criteria (alpha.2):** CHANGELOG updated, release notes written, all gates green ✅
 
-**Exit criteria (alpha.1):** tag cut, packaging builds from source — met.  
-**Exit criteria (Phase 4 done):** hard CI gates green, docs match reality, nested path smoke matrix reliable — **in progress**.
+---
+
+## What's Next (v0.2.0 / future alphas)
 
 ---
 

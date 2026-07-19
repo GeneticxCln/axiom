@@ -80,12 +80,11 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging
-    if cli.debug {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
-    } else {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    }
+    // Initialize logging — CLI flag or config can enable debug.
+    // Config is not loaded yet at this point, so we defer a possible
+    // re-init below. The CLI flag always takes priority.
+    let log_level = if cli.debug { "debug" } else { "info" };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level)).init();
 
     // Set global panic handler
     std::panic::set_hook(Box::new(|info| {
@@ -117,6 +116,13 @@ async fn main() -> Result<()> {
             AxiomConfig::default()
         }
     };
+
+    // Honor config.general.debug (in addition to the CLI flag).
+    // `log::set_max_level` works after env_logger has been initialized.
+    if config.general.debug {
+        log::set_max_level(log::LevelFilter::Debug);
+        debug!("Debug logging enabled via config");
+    }
 
     // Override config with CLI flags
     let mut config = config;
