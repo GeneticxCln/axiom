@@ -1974,4 +1974,73 @@ mod tests {
             "partial ACK JSON must list the rejected field name. JSON: {s}"
         );
     }
+
+    /// Fuzz: malformed JSON should not panic — returns serde error.
+    #[test]
+    fn test_fuzz_malformed_json() {
+        let cases = [
+            "",
+            " ",
+            "	",
+            "not json at all",
+            "{invalid json::",
+            "[[[",
+            "null",
+            "true",
+            "false",
+            r#"{"type": 123}"#,
+            r#"{"type": "UnknownMessage"}"#,
+            r#"{"type": "HealthCheck", "bad_extra_field": null}"#,
+            r#"{"command": "nonexistent"}"#,
+            r#""#,
+            "\x00\x01",
+        ];
+        for input in &cases {
+            let result = serde_json::from_str::<crate::ipc::LazyUIMessage>(input);
+            // Must not panic. Err is expected for all malformed inputs.
+            let _ = result;
+        }
+    }
+
+    /// Fuzz: truncated/perverse UTF-8 must not panic.
+    #[test]
+    fn test_fuzz_truncated_utf8() {
+        let bytes: &[u8] = &[0xff, 0xfe, 0x80, 0x00, 0x7f];
+        let s = String::from_utf8_lossy(bytes);
+        let result = serde_json::from_str::<crate::ipc::LazyUIMessage>(s.as_ref());
+    }
+
+    /// Fuzz: numerically extreme values in known fields must not panic.
+    #[test]
+    fn test_fuzz_extreme_numeric_fields() {
+        let cases = [
+            r#"{"type":"SetConfig","key":"effects.blur.radius","value":-1e308}"#,
+            r#"{"type":"SetConfig","key":"effects.animations.duration","value":1e308}"#,
+            r#"{"type":"SetConfig","key":"workspace.scroll_speed","value":-1.0}"#,
+            r#"{"type":"SetConfig","key":"workspace.scroll_speed","value":1e308}"#,
+            r#"{"type":"OptimizeConfig","changes":[["effects.blur.radius",-1e308]],"reason":"fuzz"}"#,
+            r#"{"type":"GetPerformanceReport"}"#,
+        ];
+        for input in &cases {
+            let result = serde_json::from_str::<crate::ipc::LazyUIMessage>(input);
+            let _ = result;
+        }
+    }
+
+    /// Fuzz: deeply nested or oversized input must not OOM or panic.
+    #[test]
+    fn test_fuzz_deep_nesting() {
+        // 256 levels of nesting
+        let deep = (0..256).map(|_| "{\"x\":").collect::<String>() + "42" + &"}".repeat(256);
+        let result = serde_json::from_str::<crate::ipc::LazyUIMessage>(&deep);
+        let _ = result;
+
+        // Very large string value
+        let huge = format!(
+            r#"{{"type":"SetConfig","key":"{}","value":0.0}}"#,
+            "a".repeat(65536)
+        );
+        let result = serde_json::from_str::<crate::ipc::LazyUIMessage>(&huge);
+        let _ = result;
+    }
 }
