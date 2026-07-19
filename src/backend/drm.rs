@@ -46,6 +46,12 @@ pub struct Card {
 
 impl Card {
     /// Open a DRM card device node (e.g. `/dev/dri/card0`).
+    pub fn from_fd(fd: OwnedFd) -> Self {
+        Card { fd }
+    }
+
+    /// Open a DRM device node by filesystem path. Requires appropriate
+    /// capabilities unless a libseat session is held.
     pub fn open(path: &str) -> Result<Self, anyhow::Error> {
         let file = File::open(path)
             .map_err(|e| anyhow::anyhow!("Failed to open DRM device {}: {}", path, e))?;
@@ -1010,15 +1016,32 @@ impl std::fmt::Debug for KmsState {
 /// In a production compositor this would go through libseat/logind,
 /// but for now we open `/dev/input/event*` directly (requires root or
 /// appropriate capabilities).
-struct LibinputDevice;
+struct LibinputDevice(pub *mut libseat::Seat);
 
 impl LibinputInterface for LibinputDevice {
     fn open_restricted(&mut self, path: &Path, flags: i32) -> Result<OwnedFd, i32> {
-        std::fs::OpenOptions::new()
-            .custom_flags(flags)
-            .open(path)
-            .map(|f| f.into())
-            .map_err(|e| e.raw_os_error().unwrap_or(libc::EACCES))
+        if self.0.is_null() {
+            // Fallback: direct device opening (requires root)
+            std::fs::OpenOptions::new()
+                .custom_flags(flags)
+                .open(path)
+                .map(|f| f.into())
+                .map_err(|e| e.raw_os_error().unwrap_or(libc::EACCES))
+        } else {
+            let seat = unsafe { &mut *self.0 };
+            match seat.open_device::<&Path>(&path) {
+                Ok(device) => {
+                    let raw = device.as_fd().as_raw_fd();
+                    let dup = unsafe { libc::dup(raw) };
+                    if dup < 0 {
+                        Err(libc::EACCES)
+                    } else {
+                        Ok(unsafe { OwnedFd::from_raw_fd(dup) })
+                    }
+                }
+                Err(_) => Err(libc::EACCES),
+            }
+        }
     }
 
     fn close_restricted(&mut self, fd: OwnedFd) {
@@ -1091,6 +1114,8 @@ pub struct DrmBackend {
     pub available: bool,
     pub primary_device: Option<String>,
     pub kms: Option<KmsState>,
+    /// libseat session for privileged DRM/input device access.
+    pub session: Option<libseat::Seat>,
     /// libinput context for input device discovery via udev.
     /// `None` when DRM backend was not initialized or when no
     /// `/dev/dri/card*` device was found.
@@ -1143,6 +1168,7 @@ impl DrmBackend {
             available,
             primary_device,
             kms: None,
+            session: None,
             libinput: None,
             calloop_loop: None,
             calloop_handle: None,
@@ -1309,7 +1335,12 @@ impl DrmBackend {
 
         info!("Initializing libinput context with udev seat discovery");
 
-        let mut libinput = Libinput::new_with_udev(LibinputDevice);
+        let libinput_device = LibinputDevice(
+            self.session
+                .as_mut()
+                .map_or(std::ptr::null_mut(), |s| s as *mut libseat::Seat),
+        );
+        let mut libinput = Libinput::new_with_udev(libinput_device);
 
         if libinput.udev_assign_seat("seat0").is_err() {
             warn!("libinput: udev_assign_seat failed — no input devices will be discovered");

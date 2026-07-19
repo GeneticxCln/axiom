@@ -1444,10 +1444,12 @@ impl AxiomSmithayBackendReal {
         };
 
         if let Some(ref mut drm) = self.drm_backend {
+            drm.session = self.session.take();
             drm.initialize()?;
         } else {
             warn!("DRM backend selected but DrmBackend state is missing — re-probing");
             let mut drm = DrmBackend::new();
+            drm.session = self.session.take();
             drm.initialize()?;
             self.drm_backend = Some(drm);
         }
