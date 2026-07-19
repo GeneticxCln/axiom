@@ -150,7 +150,7 @@ pub struct AxiomRenderer {
     #[allow(dead_code)]
     text_bind_group_layout: Option<BindGroupLayout>,
     #[allow(dead_code)]
-    glyph_cache: Option<crate::renderer::font_atlas::GlyphCache>,
+    pub glyph_cache: Option<crate::renderer::font_atlas::GlyphCache>,
 
     /// Per-frame decoration quads. Cleared each frame, populated by
     /// the compositor's `prepare_frame_data()` from DecorationManager.

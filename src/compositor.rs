@@ -453,6 +453,8 @@ impl AxiomCompositor {
             r.clear_shadows();
             r.clear_blurs();
             r.clear_decoration_quads();
+            r.clear_text_quads();
+            let _ = r.ensure_text_pipeline();
         }
 
         // Collect render data from windows
