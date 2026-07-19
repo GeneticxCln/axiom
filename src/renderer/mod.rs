@@ -145,17 +145,13 @@ pub struct AxiomRenderer {
     solid_pipeline: RenderPipeline,
     /// Bind group layout for the solid pipeline (projection uniform only).
     solid_bind_group_layout: BindGroupLayout,
-    #[allow(dead_code)]
     text_pipeline: Option<RenderPipeline>,
-    #[allow(dead_code)]
     text_bind_group_layout: Option<BindGroupLayout>,
-    #[allow(dead_code)]
     pub glyph_cache: Option<crate::renderer::font_atlas::GlyphCache>,
 
     /// Per-frame decoration quads. Cleared each frame, populated by
     /// the compositor's `prepare_frame_data()` from DecorationManager.
     decoration_quads: Vec<DecorationQuad>,
-    #[allow(dead_code)]
     text_quads: Vec<TextQuad>,
 
     /// Flipped when a wgpu primitive reports a recoverable-but-fatal
@@ -789,13 +785,11 @@ impl AxiomRenderer {
     }
 
     /// Clear text quads (called at the start of each frame).
-    #[allow(dead_code)]
     pub fn clear_text_quads(&mut self) {
         self.text_quads.clear();
     }
 
     /// Set the per-frame text quads for decoration title rendering.
-    #[allow(dead_code)]
     pub fn set_text_quads(&mut self, quads: Vec<TextQuad>) {
         self.text_quads = quads;
     }
@@ -1800,7 +1794,6 @@ impl AxiomRenderer {
     }
 
     /// Pre-build text GPU resources from cached text quads.
-    #[allow(dead_code)]
     fn prepare_text_resources(
         &self,
         projection_buffer: &Buffer,
@@ -1863,8 +1856,7 @@ impl AxiomRenderer {
 
     /// Lazily create the text rendering pipeline and bind group layout.
     /// Called on first text render when `text_pipeline` is None.
-    #[allow(dead_code)]
-    pub fn ensure_text_pipeline(&mut self) -> Result<()> {
+    pub fn ensure_text_pipeline(&mut self, format: wgpu::TextureFormat) -> Result<()> {
         use crate::renderer::font_atlas::GlyphCache;
 
         if self.text_pipeline.is_some() {
@@ -1949,7 +1941,7 @@ impl AxiomRenderer {
                     module: &shader,
                     entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                        format,
                         blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],

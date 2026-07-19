@@ -273,17 +273,28 @@ pub struct TextQuad {
     pub uv_max: [f32; 2],
 }
 
+const DEFAULT_FONT_PATHS: &[&str] = &[
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+];
+
 fn load_font_bytes() -> Result<Vec<u8>> {
-    for path in &[
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ] {
-        if let Ok(data) = std::fs::read(path) {
-            return Ok(data);
+    for path in DEFAULT_FONT_PATHS {
+        match std::fs::read(path) {
+            Ok(data) => {
+                log::info!("Loaded font from {}", path);
+                return Ok(data);
+            }
+            Err(e) => {
+                log::debug!("Font path {} not available: {}", path, e);
+            }
         }
     }
-    anyhow::bail!("No font file. Install DejaVu Sans.")
+    anyhow::bail!(
+        "No system font found. Tried: {}. Install DejaVu Sans, Noto Sans, or Liberation Sans.",
+        DEFAULT_FONT_PATHS.join(", ")
+    )
 }

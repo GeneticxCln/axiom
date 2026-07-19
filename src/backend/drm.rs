@@ -526,9 +526,12 @@ impl KmsState {
                 });
             } else if let Some(ref gbm_state) = gbm {
                 // SAFETY: Initial modeset — no prior EGL rendering.
-                let (fb, front) = unsafe { gbm_state.lock_and_create_fb(&card)? };
+                let (fb, _front) = unsafe { gbm_state.lock_and_create_fb(&card)? };
                 card.set_crtc(crtc, Some(fb), (0, 0), &[connector], Some(mode))?;
-                drop(front);
+                // SAFETY: `front` is dropped unused — the initial modeset only
+                // needs the framebuffer handle, not the buffer object contents.
+                // GBM retains ownership of the buffer; dropping it here returns
+                // it to the GBM surface pool for future `lock_front_buffer` calls.
 
                 outputs.push(KmsOutput {
                     connector,

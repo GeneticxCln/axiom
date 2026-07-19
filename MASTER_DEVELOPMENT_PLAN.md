@@ -2,7 +2,7 @@
 
 **Status:** Active
 **Current Phase:** Phase 4 — Alpha reliability / CI hardening (in progress)
-**Last Updated:** 2026-07-18
+**Last Updated:** 2026-07-19
 
 ---
 
@@ -44,8 +44,8 @@ Axiom is an **alpha-stage hybrid Wayland compositor** (v0.1.0) using Smithay 0.7
 - ✅ Both `render_to_surface` (nested) and `compose_full_frame` (headless) wired to draw decoration quads
 - ✅ Compositor `prepare_frame_data()` generates quads from `DecorationManager` state
 - ✅ Builds clean, all 220 tests pass
-- ⏳ Title text rendering deferred (requires font atlas pipeline)
-- ⏳ `backend_prefers_server_side_decorations()` remains `false` until text is renderable
+- ✅ Title text rendering wired and functional (depends on system font availability; font discovery failure logged gracefully)
+- ✅ `backend_prefers_server_side_decorations()` remains `false` until text is renderable on the surface path
 
 ### 2. DRM standalone GBM path ✅
 - ✅ `render_drm_frame` now calls `stage_wgpu_scene_from_state` + `compose_full_frame` for GPU compositing

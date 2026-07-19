@@ -454,7 +454,10 @@ impl AxiomCompositor {
             r.clear_blurs();
             r.clear_decoration_quads();
             r.clear_text_quads();
-            let _ = r.ensure_text_pipeline();
+            let fmt = wgpu::TextureFormat::Bgra8UnormSrgb;
+            if let Err(e) = r.ensure_text_pipeline(fmt) {
+                log::warn!("Text pipeline init failed (title rendering unavailable): {}", e);
+            }
         }
 
         // Collect render data from windows

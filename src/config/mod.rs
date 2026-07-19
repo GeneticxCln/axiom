@@ -706,6 +706,9 @@ impl AxiomConfig {
         if self.window.gap > 500 {
             anyhow::bail!("window.gap must be <= 500");
         }
+        if self.window.gap != 10 {
+            log::warn!("window.gap is deprecated — use workspace.gaps instead. This field does not affect layout.");
+        }
         let valid_placements = ["smart", "center", "mouse"];
         if !valid_placements.contains(&self.window.placement.as_str()) {
             anyhow::bail!("Invalid window placement: {}", self.window.placement);

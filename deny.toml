@@ -9,11 +9,10 @@ ignore = [
     "RUSTSEC-2026-0195",
     "RUSTSEC-2026-0194",
     # cgmath unmaintained + minor UB in unused function
-    "RUSTSEC-2026-0196",
     "RUSTSEC-2026-0197",
     # ttf-parser unmaintained (transitive from ab_glyph font atlas)
     "RUSTSEC-2026-0192",
-    # cgmath unmaintained + minor UB in unused function
+]
 ]
 # Treat advisory database errors as warnings, not hard failures
 db-urls = ["https://github.com/rustsec/advisory-db"]

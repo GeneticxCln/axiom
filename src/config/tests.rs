@@ -131,20 +131,11 @@ toggle_minimize = 'Super+grave'
 
 [xwayland]
 enabled = false
-lazy_loading = true
-scale_factor = 1.0
 
 [general]
 debug = false
 max_fps = 0
 vsync = true
-compositor_name = "axiom"
-socket_name = "axiom"
-log_level = "info"
-enable_debug_output = false
-max_clients = 100
-config_path = '~/.config/axiom/config.toml'
-startup_apps = []
 "#;
 
     fs::write(&file_path, test_config)?;

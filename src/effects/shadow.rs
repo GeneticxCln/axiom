@@ -13,8 +13,8 @@ use std::sync::Arc;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BlendState, Buffer, BufferDescriptor, BufferUsages,
     ColorTargetState, ColorWrites, CommandEncoder, Device, FragmentState, MultisampleState,
-    PrimitiveState, Queue, RenderPipeline, RenderPipelineDescriptor, Texture, TextureFormat,
-    TextureUsages, TextureView, VertexState,
+    PrimitiveState, Queue, RenderPipeline, RenderPipelineDescriptor, TextureFormat,
+    TextureView, VertexState,
 };
 
 use super::shaders::{ShaderManager, ShaderType};
@@ -64,19 +64,9 @@ pub struct ShadowRenderer {
 
     // Render pipelines for shadow effects
     drop_shadow_pipeline: Option<RenderPipeline>,
-    // Reserve for InnerShadow pipeline (future shadow modes)
-    #[allow(dead_code)]
-    inner_shadow_pipeline: Option<RenderPipeline>,
 
     // Uniform buffers
     shadow_params_buffer: Buffer,
-
-    // Shadow map textures for complex shadows
-    // Shadow map textures for complex shadows (reserved for Ultra quality)
-    #[allow(dead_code)]
-    shadow_map_texture: Option<Texture>,
-    #[allow(dead_code)]
-    shadow_map_view: Option<TextureView>,
 
     // Current shadow settings
     current_quality: ShadowQuality,
@@ -127,10 +117,7 @@ impl ShadowRenderer {
             queue,
             shader_manager,
             drop_shadow_pipeline: None,
-            inner_shadow_pipeline: None,
             shadow_params_buffer,
-            shadow_map_texture: None,
-            shadow_map_view: None,
             current_quality: quality,
             global_shadow_params: initial_params,
             last_render_time: std::time::Duration::from_millis(0),
@@ -538,41 +525,6 @@ impl ShadowRenderer {
     /// Get performance statistics
     pub fn get_performance_stats(&self) -> (std::time::Duration, ShadowQuality) {
         (self.last_render_time, self.current_quality)
-    }
-
-    /// Create a shadow map texture for advanced shadow techniques (reserved for Ultra quality)
-    #[allow(dead_code)]
-    fn ensure_shadow_map(&mut self, size: Vector2<u32>) -> Result<()> {
-        let needs_creation = self
-            .shadow_map_texture
-            .as_ref()
-            .is_none_or(|texture| texture.width() != size.x || texture.height() != size.y);
-
-        if needs_creation && matches!(self.current_quality, ShadowQuality::Ultra) {
-            debug!("🗺️ Creating shadow map texture: {}x{}", size.x, size.y);
-
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Shadow Map Texture"),
-                size: wgpu::Extent3d {
-                    width: size.x,
-                    height: size.y,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: TextureFormat::Depth32Float,
-                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-            self.shadow_map_texture = Some(texture);
-            self.shadow_map_view = Some(view);
-        }
-
-        Ok(())
     }
 
     /// Optimize shadow parameters based on performance
