@@ -171,9 +171,10 @@ impl AxiomCompositor {
                         LazyUIMessage::WorkspaceCommand { action, parameters } => {
                             self.dispatch_workspace_command(&action, &parameters);
                         }
-                        // ponytail: EffectsControl and SetWindowBlur removed
-                        // with the effects engine deletion. Add back when
-                        // effects are re-integrated.
+                        LazyUIMessage::SetClipboard { text } => {
+                            self.set_clipboard(text);
+                        }
+                        // ponytail: SetWindowBlur removed with effects engine
                         _ => {
                             warn!("Unexpected pending action variant from IPC queue");
                         }
@@ -690,6 +691,19 @@ impl AxiomCompositor {
 }
 
 impl AxiomCompositor {
+    /// Set the compositor clipboard content from IPC command.
+    fn set_clipboard(&mut self, text: String) {
+        self.smithay_backend.set_clipboard_data(text.into_bytes());
+    }
+
+    /// Get a sender for injecting IPC commands in tests.
+    pub fn ipc_command_sender(&self) -> tokio::sync::mpsc::Sender<LazyUIMessage> {
+        self.ipc_server
+            .command_sender_for_test()
+            .expect("IPC command sender should be available in tests")
+            .clone()
+    }
+
     /// Test/debug accessor — see `AxiomSmithayBackendReal::debug_clipboard_cache`.
     pub fn debug_clipboard_cache(&self) -> Option<Vec<u8>> {
         self.smithay_backend.debug_clipboard_cache()

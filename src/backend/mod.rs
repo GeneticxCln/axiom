@@ -310,6 +310,12 @@ pub struct State {
     /// Most recent cursor icon requested via `cursor_image()` callback.
     /// Applied to the winit window at the start of `render()`.
     pub cursor_icon: Option<CursorIcon>,
+
+    /// Active drag-and-drop icon surface (set when a client starts a DnD
+    /// operation with an icon). Rendered as an overlay at the pointer position.
+    dnd_icon: Option<WlSurface>,
+    /// Whether a drag-and-drop session is currently active.
+    dnd_active: bool,
 }
 
 impl State {
@@ -541,12 +547,14 @@ impl State {
     /// Return the DPI scale factor for the currently focused output.
     /// Returns the scale factor of the focused output. The source of truth is
     /// the Output's own scale (tracked in `output_scale_factors`), not the
-    /// workspace tape copy. Falls back to 1.0 when no output is registered.
+    /// workspace tape copy. Falls back to the first available output's scale,
+    /// or 1.0 when no output is registered.
     pub fn focused_output_scale(&self) -> f64 {
+        let focused = self.workspace_manager.read().focused_output().to_string();
         self.output_scale_factors
-            .values()
-            .next()
+            .get(&focused)
             .copied()
+            .or_else(|| self.output_scale_factors.values().next().copied())
             .unwrap_or(1.0)
     }
 
@@ -995,14 +1003,38 @@ impl ClientDndGrabHandler for State {
     fn started(
         &mut self,
         _source: Option<WlDataSource>,
-        _icon: Option<WlSurface>,
+        icon: Option<WlSurface>,
         _seat: Seat<Self>,
     ) {
         debug!("🖐️ Client-initiated drag-and-drop started");
+        self.dnd_active = true;
+        self.dnd_icon = icon;
+        // If there's an icon surface, register it so commits are picked up
+        // for texture import during rendering.
+        if let Some(ref surf) = self.dnd_icon {
+            let id = surf.id().protocol_id();
+            self.surfaces.entry(id).or_insert(SurfaceData {
+                window_id: None,
+                title: String::new(),
+                app_id: None,
+                size: (0, 0),
+                committed: false,
+                surface: Some(surf.clone()),
+            });
+        }
+        self.needs_redraw = true;
     }
 
     fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {
         debug!("🖐️ Client-initiated drag-and-drop finished");
+        self.dnd_active = false;
+        // Clean up the drag icon surface from our tracking
+        if let Some(ref icon) = self.dnd_icon {
+            let id = icon.id().protocol_id();
+            self.surfaces.remove(&id);
+        }
+        self.dnd_icon = None;
+        self.needs_redraw = true;
     }
 }
 
@@ -1126,6 +1158,10 @@ pub struct AxiomSmithayBackendReal {
     /// or resizing it by an edge/corner. While active, pointer motion events
     /// reposition/resize the window and button release commits the change.
     interaction: Option<WindowInteraction>,
+    /// Touch-based interactive window manipulation (move or resize).
+    /// Mirrors `interaction` but for touch events. Tracked separately so
+    /// pointer and touch can each have their own active interaction.
+    touch_interaction: Option<WindowInteraction>,
 }
 
 /// Type of interactive window manipulation in progress.
@@ -1215,6 +1251,8 @@ impl AxiomSmithayBackendReal {
             clipboard_source: None,
             clipboard_fetch_pending: false,
             cursor_icon: None,
+            dnd_icon: None,
+            dnd_active: false,
         };
 
         Ok(Self {
@@ -1228,6 +1266,7 @@ impl AxiomSmithayBackendReal {
             listener: None,
             decoration_consumed_press: false,
             interaction: None,
+            touch_interaction: None,
         })
     }
 
@@ -1244,6 +1283,13 @@ impl AxiomSmithayBackendReal {
         // Parse backend kind from config BEFORE config is moved into State.
         let backend_kind = BackendKind::from_config_str(&config.backend.kind);
         info!("Backend kind: {:?}", backend_kind);
+
+        // Capture config.output.order BEFORE config is moved into State.
+        let config_output_order = config.output.order.clone();
+
+        // Clone the workspace_manager Arc so we can sync tapes after state
+        // construction (the original is moved into State).
+        let wm_for_sync = workspace_manager.clone();
 
         let display: Display<State> = Display::new()?;
         let dh = display.handle();
@@ -1326,11 +1372,21 @@ impl AxiomSmithayBackendReal {
             clipboard_source: None,
             clipboard_fetch_pending: false,
             cursor_icon: None,
+            dnd_icon: None,
+            dnd_active: false,
         };
 
         let socket_name = format!("wayland-axiom-{}", std::process::id());
         let listener = ListeningSocket::bind(&socket_name)?;
         info!("📡 Wayland socket: {}", socket_name);
+
+        // Sync workspace tapes with configured outputs.
+        // This ensures the tape infrastructure aligns with config.output.order.
+        {
+            let mut wm = wm_for_sync.write();
+            let live_outputs = vec!["Axiom-Output-0".to_string()];
+            wm.sync_tapes_with_outputs(&live_outputs, &config_output_order);
+        }
 
         Ok(Self {
             display,
@@ -1343,6 +1399,7 @@ impl AxiomSmithayBackendReal {
             listener: Some(listener),
             decoration_consumed_press: false,
             interaction: None,
+            touch_interaction: None,
         })
     }
 
@@ -1485,6 +1542,10 @@ impl AxiomSmithayBackendReal {
                     None,
                 );
             }
+            // Track the output's scale for `focused_output_scale`.
+            self.state
+                .output_scale_factors
+                .insert("Axiom-Output-0".into(), host_scale);
             self.state.needs_redraw = true;
         }
 

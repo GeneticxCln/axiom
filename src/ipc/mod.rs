@@ -51,16 +51,11 @@ const KNOWN_WORKSPACE_ACTIONS: &[&str] = &[
     "toggle_fullscreen",
 ];
 
-/// Maximum accepted blur radius in **pixels**. Anything above this is
-/// rejected as out-of-range to prevent absurd GPU work. The unit suffix is
-/// exposed in Python/dashboard clients via the rejection reason, which
-/// mentions `0..=32` so an off-by-one normalised float gets caught early.
-const MAX_EFFECTS_BLUR_RADIUS_PX: f32 = 32.0;
-/// Maximum accepted animation speed multiplier (1.0 = realtime, >1 faster).
-#[cfg(test)]
-const MAX_EFFECTS_ANIMATION_SPEED: f32 = 10.0;
+
 /// Maximum accepted animation duration in milliseconds.
 const MAX_ANIMATION_DURATION_MS: u32 = 10_000;
+/// Maximum accepted blur radius in pixels (0..=32).
+const MAX_EFFECTS_BLUR_RADIUS_PX: f64 = 32.0;
 /// Maximum accepted scroll speed.
 const MAX_SCROLL_SPEED: f64 = 100.0;
 /// Maximum size of a single line from an IPC client (64 KiB).
@@ -119,41 +114,7 @@ fn is_known_workspace_action(action: &str) -> bool {
     KNOWN_WORKSPACE_ACTIONS.contains(&action)
 }
 
-/// Validates a `LazyUIMessage::EffectsControl.blur_radius`. Returns
-/// `Some(radius)` on success and `None` for non-finite or out-of-range
-/// values. The compositor side of the IPC mirror in `process_messages`
-/// can rely on this having been called before applying the change.
-///
-/// **Status after Issue #2 single-dispatch fix:** no production path
-/// calls this — rate-validation is now deferred entirely to
-/// `EffectsEngine::apply_live_effects_control` which re-validates inline
-/// as defense in depth. Kept as `pub(super)` for tests
-/// (`test_validate_blur_radius`) and any future direct callers.
-#[cfg(test)]
-fn validate_blur_radius(radius: f32) -> Option<f32> {
-    if radius.is_finite() && (0.0..=MAX_EFFECTS_BLUR_RADIUS_PX).contains(&radius) {
-        Some(radius)
-    } else {
-        None
-    }
-}
 
-/// Validates a `LazyUIMessage::EffectsControl.animation_speed`. Returns
-/// `Some(speed)` on success and `None` otherwise.
-///
-/// **Status after Issue #2 single-dispatch fix:** no production path
-/// calls this — animation-speed validation is deferred to
-/// `EffectsEngine::apply_live_effects_control` which re-validates inline
-/// as defense in depth. Kept as `pub(super)` for tests
-/// (`test_validate_animation_speed`) and any future direct callers.
-#[cfg(test)]
-fn validate_animation_speed(speed: f32) -> Option<f32> {
-    if speed.is_finite() && (0.0..=MAX_EFFECTS_ANIMATION_SPEED).contains(&speed) {
-        Some(speed)
-    } else {
-        None
-    }
-}
 
 /// Messages sent from Axiom to Lazy UI (performance metrics, events)
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -225,21 +186,6 @@ pub enum AxiomMessage {
         note: String,
     },
 
-    /// Effects engine status, pushed after each `PerformanceReport` (and
-    /// on any effects configuration change via `EffectsControl`). Tells
-    /// monitoring clients whether GPU-accelerated post-processing (blur,
-    /// shadow, rounded corners) is available and currently enabled.
-    EffectsStatus {
-        timestamp: u64,
-        /// Whether the GPU pipeline initialised successfully at startup.
-        effects_gpu_available: bool,
-        /// Whether effects are currently enabled (runtime toggle).
-        effects_enabled: bool,
-        /// Whether blur is enabled in the config (read-only gate).
-        blur_enabled: bool,
-        /// Current blur radius in pixels (global, live value).
-        blur_radius: f32,
-    },
 }
 
 /// Messages sent from Lazy UI to Axiom (optimization commands)
@@ -272,13 +218,6 @@ pub enum LazyUIMessage {
         parameters: serde_json::Value,
     },
 
-    /// Effects control
-    EffectsControl {
-        enabled: Option<bool>,
-        blur_radius: Option<f32>,
-        animation_speed: Option<f32>,
-    },
-
     /// Per-window blur control. `radius` in pixels (0..=32); 0 disables blur.
     SetWindowBlur { window_id: u64, radius: f32 },
 
@@ -287,6 +226,11 @@ pub enum LazyUIMessage {
 
     /// Request performance report
     GetPerformanceReport,
+
+    /// Set compositor clipboard content
+    SetClipboard {
+        text: String,
+    },
 }
 
 /// IPC server for handling communication with Lazy UI
@@ -404,44 +348,6 @@ impl AxiomIPCServer {
                 "accepted": accepted,
                 "status": if accepted { "queued_for_execution" } else { "unknown_action" },
                 "dispatched_via_mpsc": accepted,
-            }),
-        }
-    }
-
-    /// Build the EffectsControl ACK UserEvent (single source of truth).
-    /// `partially_queued` when at least one field failed range or
-    /// finite-validation; `queued_for_execution` when all fields passed.
-    /// Surface area mirrors WorkspaceCommand: a discriminator field that
-    /// disambiguates VALIDATION-time ACK from EXECUTION-time ACK, plus the
-    /// existing `accepted`/`rejected` arrays for per-field diagnostics.
-    ///
-    /// **Status after Issue #2 single-dispatch fix:** the per-client
-    /// handler no longer constructs EffectsControl ACKs inline (it
-    /// forwards to `cmd_tx` and the compositor's dispatch arm owns the
-    /// lifecycle). This constructor remains available for tests and
-    /// any future code path that wants to emit a typed ACK without
-    /// going through the IPC channel.
-    #[cfg(test)]
-    pub(super) fn build_effects_control_ack(
-        accepted: Vec<String>,
-        rejected: Vec<(String, String)>,
-    ) -> AxiomMessage {
-        AxiomMessage::UserEvent {
-            // Fail loudly on a pre-1970 system clock rather than silently
-            // emitting `timestamp: 0`. Symmetric with build_workspace_command_ack.
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock before UNIX_EPOCH — compositor hardware fault")
-                .as_secs(),
-            event_type: "EffectsControlAck".into(),
-            details: serde_json::json!({
-                "status": if rejected.is_empty() {
-                    "queued_for_execution"
-                } else {
-                    "partially_queued"
-                },
-                "accepted": accepted,
-                "rejected": rejected,
             }),
         }
     }
@@ -699,18 +605,15 @@ impl AxiomIPCServer {
                     }                        debug!("📨 Received IPC message: {}", trimmed);
                         match serde_json::from_str::<LazyUIMessage>(trimmed) {
                             Ok(message) => {
-                                // Issue #2 real fix (not the cosmetic ACK-schema
-                                // patch from prior session): command-type messages
-                                // (WorkspaceCommand, EffectsControl) follow a
-                                // SINGLE-DISPATCH path. The IPC layer forwards
-                                // them to the compositor via `cmd_tx` and emits
-                                // a minimal `*Queued` ACK. The compositor's
+                                // Command-type messages (WorkspaceCommand,
+                                // SetWindowBlur) follow a SINGLE-DISPATCH
+                                // path. The IPC layer forwards them to the
+                                // compositor via `cmd_tx` and emits a minimal
+                                // `*Queued` ACK. The compositor's
                                 // `process_messages` drain loop in
                                 // `AxiomCompositor::process_events` owns both
                                 // validation (whitelist + range checks) AND
-                                // actual state mutation via
-                                // `dispatch_workspace_command` /
-                                // `dispatch_effects_control`.
+                                // actual state mutation.
                                 //
                                 // Pre-fix behaviour ran the same message through
                                 // TWO paths:
@@ -746,21 +649,20 @@ impl AxiomIPCServer {
                                 let is_command_type = matches!(
                                     message,
                                     LazyUIMessage::WorkspaceCommand { .. }
-                                        | LazyUIMessage::EffectsControl { .. }
                                         | LazyUIMessage::SetWindowBlur { .. }
+                                        | LazyUIMessage::SetClipboard { .. }
                                 );
                                 if is_command_type {
                                     // SINGLE DISPATCH (Issue #2 real fix):
-                                    // WorkspaceCommand + EffectsControl
+                                    // WorkspaceCommand + SetWindowBlur
                                     // messages are forwarded to the compositor
                                     // via `cmd_tx` ONLY — no inline ACK from
                                     // `process_lazy_ui_message` — so the
                                     // compositor's `process_messages` drain
-                                    // + `dispatch_workspace_command` /
-                                    // `dispatch_effects_control` arms own the
-                                    // full mutation lifecycle. This collapses
-                                    // the pre-fix duplicate-validation path
-                                    // that monitoring tooling observed as
+                                    // arms own the full mutation lifecycle.
+                                    // This collapses the pre-fix
+                                    // duplicate-validation path that
+                                    // monitoring tooling observed as
                                     // "executed twice".
                                     //
                                     // Per-reviewer Q2: capture `cmd_tx.send`
@@ -770,11 +672,11 @@ impl AxiomIPCServer {
                                     // status.
                                     //
                                     // Per-reviewer Q3: keep the original
-                                    // `WorkspaceCommandAck` /
-                                    // `EffectsControlAck` `event_type`
-                                    // discriminator for backward compat with
-                                    // IPC clients (lazy_ui_client.py matched
-                                    // on these strings). The new
+                                    // `WorkspaceCommandAck` / `SetWindowBlurAck`
+                                    // `event_type` discriminator for backward
+                                    // compat with IPC clients
+                                    // (lazy_ui_client.py matched on these
+                                    // strings). The new
                                     // `status: queued_for_compositor_dispatch`
                                     // discriminator is additive — old clients
                                     // matching on `event_type` still work.
@@ -836,16 +738,6 @@ impl AxiomIPCServer {
                                                 "dispatched_via_mpsc": true,
                                             });
                                         }
-                                        LazyUIMessage::EffectsControl { .. } => {
-                                            cmd_event_type = "EffectsControlAck";
-                                            cmd_details = serde_json::json!({
-                                                "status": "queued_for_compositor_dispatch",
-                                                "executor": "process_messages",
-                                                "note": "per-field diagnostics dropped — compositor owns validation",
-                                                "accepted": true,
-                                                "dispatched_via_mpsc": true,
-                                            });
-                                        }
                                         LazyUIMessage::SetWindowBlur { window_id, radius } => {
                                             cmd_event_type = "SetWindowBlurAck";
                                             cmd_details = serde_json::json!({
@@ -856,13 +748,23 @@ impl AxiomIPCServer {
                                                 "dispatched_via_mpsc": true,
                                             });
                                         }
+                                        LazyUIMessage::SetClipboard { text } => {
+                                            cmd_event_type = "SetClipboardAck";
+                                            cmd_details = serde_json::json!({
+                                                "status": "queued_for_compositor_dispatch",
+                                                "text_length": text.len(),
+                                                "accepted": true,
+                                                "dispatched_via_mpsc": true,
+                                            });
+                                        }
                                         // `is_command_type` already gated the
-                                        // WorkspaceCommand / EffectsControl /
-                                        // SetWindowBlur branch above; the remaining 5
-                                        // variants (OptimizeConfig / GetConfig
-                                        // / SetConfig / HealthCheck /
-                                        // GetPerformanceReport) flow into
-                                        // the wildcard catch-all below as a
+                                        // WorkspaceCommand / SetWindowBlur /
+                                        // SetClipboard branch above; the
+                                        // remaining 5 variants
+                                        // (OptimizeConfig / GetConfig /
+                                        // SetConfig / HealthCheck /
+                                        // GetPerformanceReport) flow into the
+                                        // wildcard catch-all below as a
                                         // defensive no-op so the match is
                                         // exhaustive over `LazyUIMessage`.
                                         // `unreachable!()` is statically
@@ -873,7 +775,7 @@ impl AxiomIPCServer {
                                         // because the outer `is_command_type`
                                         // predicate already returned `true`.
                                         _ => unreachable!(
-                                            "is_command_type gated WorkspaceCommand / EffectsControl / SetWindowBlur"
+                                            "is_command_type gated WorkspaceCommand / SetWindowBlur / SetClipboard"
                                         ),
                                     }
                                     // Q2: capture the send result; build the
@@ -899,10 +801,10 @@ impl AxiomIPCServer {
                                         Err(e) => {
                                             ack_event_type = match cmd_event_type {
                                                 "WorkspaceCommandAck" => "WorkspaceCommandAckFailed",
-                                                "EffectsControlAck" => "EffectsControlAckFailed",
                                                 "SetWindowBlurAck" => "SetWindowBlurAckFailed",
+                                                "SetClipboardAck" => "SetClipboardAckFailed",
                                                 _ => unreachable!(
-                                                    "cmd_event_type is one of the three command-type acks"
+                                                    "cmd_event_type is WorkspaceCommandAck, SetWindowBlurAck, or SetClipboardAck"
                                                 ),
                                             };
                                             let reason = format!(
@@ -1118,7 +1020,7 @@ impl AxiomIPCServer {
                 Self::send_message(writer, &ack).await?;
             }
 
-            // Command-type messages (WorkspaceCommand, EffectsControl) are
+            // Command-type messages (WorkspaceCommand, SetWindowBlur) are
             // gated upstream in `handle_client`'s single-dispatch branch
             // (Issue #2 real fix). They are forwarded to the compositor
             // via `cmd_tx` ONLY — no inline ACK — so the compositor's
@@ -1126,10 +1028,7 @@ impl AxiomIPCServer {
             // mutation path. The arms below are kept (with debug logging)
             // so a future drift between the upstream gate and this match
             // surfaces as a `debug!` log rather than a panic or compile
-            // error. `build_workspace_command_ack` /
-            // `build_effects_control_ack` remain available as
-            // `pub(super)` constructors for tests and any future caller
-            // that needs the typed ACK shape.
+            // error.
             LazyUIMessage::WorkspaceCommand { action, .. } => {
                 debug!(
                     "⚠️ WorkspaceCommand({action}) reached process_lazy_ui_message \
@@ -1137,16 +1036,16 @@ impl AxiomIPCServer {
                      it via cmd_tx only"
                 );
             }
-            LazyUIMessage::EffectsControl { .. } => {
+            LazyUIMessage::SetWindowBlur { .. } => {
                 debug!(
-                    "⚠️ EffectsControl reached process_lazy_ui_message \
+                    "⚠️ SetWindowBlur reached process_lazy_ui_message \
                      — upstream gate in handle_client should have dispatched \
                      it via cmd_tx only"
                 );
             }
-            LazyUIMessage::SetWindowBlur { .. } => {
+            LazyUIMessage::SetClipboard { .. } => {
                 debug!(
-                    "⚠️ SetWindowBlur reached process_lazy_ui_message \
+                    "⚠️ SetClipboard reached process_lazy_ui_message \
                      — upstream gate in handle_client should have dispatched \
                      it via cmd_tx only"
                 );
@@ -1224,25 +1123,6 @@ impl AxiomIPCServer {
                     current_workspace: snapshot.current_workspace,
                     note,
                 };
-                // The `effects_gpu_available` field is additive on the wire
-                // schema (serde flatten via PerformanceMetrics variant or a
-                // dedicated extension). The PerformanceReport variant
-                // doesn't carry it today; we surface it through the
-                // dedicated `EffectsStatus` follow-up message that
-                // monitoring clients can poll on demand. For now the per-
-                // client ACK includes the boolean in the `details`
-                // payload so old readers can ignore it without breaking.
-                if metrics_handle.is_some() {
-                    let effects_status = AxiomMessage::EffectsStatus {
-                        timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-                        effects_gpu_available: snapshot.effects_gpu_available,
-                        effects_enabled: snapshot.effects_enabled,
-                        blur_enabled: snapshot.blur_enabled,
-                        blur_radius: snapshot.blur_radius,
-                    };
-                    Self::send_message(writer, &effects_status).await?;
-                    debug!("📤 Sent EffectsStatus follow-up");
-                }
                 Self::send_message(writer, &report).await?;
             }
         }
@@ -1277,7 +1157,7 @@ impl AxiomIPCServer {
     ///   wrote to the config-owned path. Callers typically call
     ///   `update_subsystems_config()` and refresh the IPC handle when set.
     /// - `pending_actions`: messages from `WorkspaceCommand` /
-    ///   `EffectsControl` (already validated at the per-client layer) that
+    ///   `SetWindowBlur` (already validated at the per-client layer) that
     ///   the compositor owns — they require real subsystem access that the
     ///   IPC server does not hold. Caller is responsible for dispatch.
     pub fn process_messages(
@@ -1358,8 +1238,8 @@ impl AxiomIPCServer {
                     // Sub-system-bound actions: validated upstream, dispatched
                     // by the compositor in `AxiomCompositor::process_events`.
                     LazyUIMessage::WorkspaceCommand { .. }
-                    | LazyUIMessage::EffectsControl { .. }
-                    | LazyUIMessage::SetWindowBlur { .. } => {
+                    | LazyUIMessage::SetWindowBlur { .. }
+                    | LazyUIMessage::SetClipboard { .. } => {
                         pending_actions.push(message);
                     }
                     _ => {
@@ -1762,38 +1642,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_blur_radius() {
-        // Valid: in-range finite values
-        assert_eq!(validate_blur_radius(0.0), Some(0.0));
-        assert_eq!(validate_blur_radius(8.5), Some(8.5));
-        assert_eq!(
-            validate_blur_radius(MAX_EFFECTS_BLUR_RADIUS_PX),
-            Some(MAX_EFFECTS_BLUR_RADIUS_PX)
-        );
-        // Invalid: out of range or non-finite
-        assert_eq!(validate_blur_radius(-1.0), None);
-        assert_eq!(validate_blur_radius(MAX_EFFECTS_BLUR_RADIUS_PX + 0.1), None);
-        assert_eq!(validate_blur_radius(f32::NAN), None);
-        assert_eq!(validate_blur_radius(f32::INFINITY), None);
-    }
-
-    #[test]
-    fn test_validate_animation_speed() {
-        assert_eq!(validate_animation_speed(0.0), Some(0.0));
-        assert_eq!(validate_animation_speed(1.5), Some(1.5));
-        assert_eq!(
-            validate_animation_speed(MAX_EFFECTS_ANIMATION_SPEED),
-            Some(MAX_EFFECTS_ANIMATION_SPEED)
-        );
-        assert_eq!(validate_animation_speed(-0.5), None);
-        assert_eq!(
-            validate_animation_speed(MAX_EFFECTS_ANIMATION_SPEED + 1.0),
-            None
-        );
-        assert_eq!(validate_animation_speed(f32::NAN), None);
-    }
-
-    #[test]
     fn test_performance_report_serialization() {
         // Confirm the typed `PerformanceReport` variant round-trips through
         // serde_json with all fields preserved. This is the typed-schema
@@ -1952,45 +1800,6 @@ mod tests {
         assert!(
             s.contains(r#""accepted":false"#),
             "unknown ACK must preserve legacy 'accepted' bool for compat. JSON: {s}"
-        );
-    }
-
-    /// Issue #2 regression: EffectsControl ACK must distinguish full vs
-    /// partial validation via the `"status"` discriminator.
-    /// `partially_queued` when at least one field failed range/finite
-    /// checks; `queued_for_execution` when all fields passed. Calls the
-    /// actual production constructor
-    /// (`AxiomIPCServer::build_effects_control_ack`) so the test fails
-    /// when production regresses. Pins both cases.
-    #[test]
-    fn test_effects_control_ack_schema_distinguishes_partial() {
-        // All fields accepted.
-        let ack_full = AxiomIPCServer::build_effects_control_ack(
-            vec!["enabled=true".to_string(), "blur_radius=4.0".to_string()],
-            Vec::new(),
-        );
-        let s = serde_json::to_string(&ack_full).unwrap();
-        assert!(
-            s.contains(r#""status":"queued_for_execution""#),
-            "full ACK JSON must carry status:queued_for_execution. JSON: {s}"
-        );
-
-        // At least one field rejected.
-        let ack_partial = AxiomIPCServer::build_effects_control_ack(
-            vec!["enabled=false".to_string()],
-            vec![(
-                "blur_radius".to_string(),
-                "out_of_range_0..=32px".to_string(),
-            )],
-        );
-        let s = serde_json::to_string(&ack_partial).unwrap();
-        assert!(
-            s.contains(r#""status":"partially_queued""#),
-            "partial ACK JSON must carry status:partially_queued. JSON: {s}"
-        );
-        assert!(
-            s.contains("blur_radius"),
-            "partial ACK JSON must list the rejected field name. JSON: {s}"
         );
     }
 

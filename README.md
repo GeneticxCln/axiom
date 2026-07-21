@@ -27,9 +27,7 @@ What is true today:
 What is not true yet:
 - Axiom is **not** in "production polish".
 - Packaging and release assets are still incomplete.
-- Multi-monitor, fractional scaling, and touch input still need work.
-- Full drag-and-drop data transfer is not yet implemented; clipboard works in
-  both directions (compositor→client and Wayland-client→compositor capture).
+- Multi-monitor and fractional scaling still need work.
 
 ## Vision
 
@@ -55,14 +53,14 @@ Axiom explores a compositor UX that combines:
   server-side decoration titlebars/buttons) via `SolidColorRenderElement` /
   `TextureRenderElement`, then submitted
 - Live resize via `WinitEvent::Resized` updates the workspace viewport + output mode
+- Drag-and-drop protocol: client-initiated DnD sessions tracked, icon surface rendered
+- Touch input handling: down/motion/up/cancel with touch-based window move/resize
+- SetClipboard IPC command: compositor→clipboard data push via Unix socket
 
 ## What Is Still Incomplete
 
-- Standalone DRM/KMS compositor path (removed — winit is the only backend)
-- Robust multi-monitor behavior
+- Single-output only (winit, no multi-monitor support)
 - Fractional scaling / HiDPI polish
-- Touch input
-- Full drag-and-drop data transfer
 - All 8 resize edges are wired (Left/Right/Top/Bottom + 4 corners)
 - Release-ready packaging and session assets
 
@@ -138,11 +136,11 @@ All 10 `WorkspaceCommand` actions are wired end-to-end and enforced against a
 whitelist (`KNOWN_WORKSPACE_ACTIONS`) in production. Unknown actions are
 rejected with an `unknown_action` ACK.
 
-### Effects control
+### Clipboard control
 
-`LazyUIMessage::EffectsControl` is accepted by the IPC layer, but effects are
-no-ops — the effects module was removed. The config `effects` section is
-retained as data only.
+`LazyUIMessage::SetClipboard { text }` pushes arbitrary text into the Wayland
+compositor clipboard, making it available for clients to paste. The command is
+wired end-to-end: IPC server → compositor → `set_clipboard_data()`.
 
 ### Try the test client
 ```bash

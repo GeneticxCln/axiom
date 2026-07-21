@@ -585,39 +585,6 @@ async fn test_ipc_workspace_command_flow() -> Result<()> {
     Ok(())
 }
 
-/// Test IPC EffectsControl message flow
-#[tokio::test]
-#[serial_test::serial]
-async fn test_ipc_effects_control_flow() -> Result<()> {
-    use axiom::config::AxiomConfig;
-    use axiom::ipc::LazyUIMessage;
-
-    let mut config = AxiomConfig::default();
-    let mut ipc_server = AxiomIPCServer::new();
-
-    ipc_server.start()?;
-
-    let cmd = LazyUIMessage::EffectsControl {
-        enabled: Some(false),
-        blur_radius: Some(8.0),
-        animation_speed: None,
-    };
-
-    if let Some(sender) = ipc_server.command_sender_for_test() {
-        sender.send(cmd).await.unwrap();
-    }
-
-    let (changed, actions) = ipc_server.process_messages(&mut config)?;
-
-    // EffectsControl is forwarded to pending_actions
-    assert!(!changed);
-    assert_eq!(actions.len(), 1);
-
-    ipc_server.shutdown().await?;
-
-    Ok(())
-}
-
 /// Test IPC OptimizeConfig message correctly mutates config
 #[tokio::test]
 async fn test_ipc_optimize_config_flow() -> Result<()> {
@@ -654,6 +621,81 @@ async fn test_ipc_optimize_config_flow() -> Result<()> {
     assert_ne!(config.effects.blur.radius, original_blur);
 
     ipc_server.shutdown().await?;
+
+    Ok(())
+}
+
+/// Test that SetClipboard IPC message is correctly forwarded
+#[tokio::test]
+async fn test_ipc_set_clipboard_flow() -> Result<()> {
+    use axiom::config::AxiomConfig;
+    use axiom::ipc::LazyUIMessage;
+
+    let mut config = AxiomConfig::default();
+    let mut ipc_server = AxiomIPCServer::new();
+
+    // Start the server (creates broadcast and command channels)
+    ipc_server.start()?;
+
+    // Simulate sending a SetClipboard command through the command channel
+    let cmd = LazyUIMessage::SetClipboard {
+        text: "Hello from IPC test".into(),
+    };
+
+    if let Some(sender) = ipc_server.command_sender_for_test() {
+        sender.send(cmd).await.unwrap();
+    }
+
+    // Process the message
+    let (changed, actions) = ipc_server.process_messages(&mut config)?;
+
+    // SetClipboard is a command-type message — forwarded to pending_actions
+    assert!(!changed, "SetClipboard should not change config");
+    assert_eq!(actions.len(), 1, "one pending action");
+    match &actions[0] {
+        LazyUIMessage::SetClipboard { text } => {
+            assert_eq!(text, "Hello from IPC test");
+        }
+        _ => panic!("Expected SetClipboard"),
+    }
+
+    ipc_server.shutdown().await?;
+
+    Ok(())
+}
+
+/// Test that SetClipboard IPC command is dispatched through the compositor
+#[tokio::test]
+#[serial_test::serial]
+async fn test_compositor_set_clipboard_dispatch() -> Result<()> {
+    use axiom::config::AxiomConfig;
+    use axiom::ipc::LazyUIMessage;
+
+    let config = AxiomConfig::default();
+    let (mut compositor, _ws, _wm, _im) = make_test_compositor(config).await?;
+
+    // Get the IPC server's command sender from the compositor
+    let sender = compositor.ipc_command_sender();
+
+    // Send SetClipboard command
+    let cmd = LazyUIMessage::SetClipboard {
+        text: "compositor test clipboard".into(),
+    };
+    sender.send(cmd).await.unwrap();
+
+    // Run a tick — this should process the IPC message
+    // and call set_clipboard_data on the backend.
+    let result = compositor.tick_for_test().await;
+    assert!(result.is_ok(), "tick should succeed");
+
+    // Verify the clipboard cache was populated
+    let cached = compositor.debug_clipboard_cache();
+    assert!(cached.is_some(), "clipboard cache should be populated");
+    assert_eq!(
+        cached.as_deref().unwrap(),
+        b"compositor test clipboard",
+        "clipboard data should match set text"
+    );
 
     Ok(())
 }

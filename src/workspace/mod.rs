@@ -803,6 +803,11 @@ impl ScrollableWorkspaces {
         })
     }
 
+    /// Return the currently focused output ID.
+    pub fn focused_output(&self) -> &str {
+        &self.focused_output
+    }
+
     /// Return the known tape IDs in sorted order.
     pub fn known_tape_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.tapes.keys().cloned().collect();

@@ -2,7 +2,7 @@
 pkgname=axiom-compositor-git
 pkgver=0.1.0.r$(git rev-list --count HEAD).$(git rev-parse --short HEAD)
 pkgrel=1
-pkgdesc="Hybrid Wayland compositor prototype with scrollable workspaces and visual effects"
+pkgdesc="Winit-only Wayland compositor with niri-inspired scrollable workspaces (GLES rendering)"
 arch=('x86_64')
 url="https://github.com/GeneticxCln/axiom"
 license=('GPL3')
@@ -10,9 +10,7 @@ depends=(
     'wayland'
     'libxkbcommon'
     'mesa'
-    'libinput'
     'systemd-libs'
-    'vulkan-icd-loader'
 )
 makedepends=(
     'rust'
@@ -22,10 +20,7 @@ makedepends=(
     'pkgconf'
 )
 optdepends=(
-    'xorg-xwayland: X11 application support'
-    'vulkan-intel: Intel GPU support'
-    'vulkan-radeon: AMD GPU support'
-    'nvidia-utils: NVIDIA GPU support'
+    'xorg-xwayland: X11 application support (via host compositor)'
 )
 provides=('axiom-compositor')
 conflicts=('axiom-compositor')
@@ -46,12 +41,12 @@ build() {
     cd "$srcdir/axiom"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
-    cargo build --frozen --release --all-features
+    cargo build --frozen --release
 }
 
 check() {
     cd "$srcdir/axiom"
-    cargo test --frozen --all-features
+    cargo test --frozen
 }
 
 package() {

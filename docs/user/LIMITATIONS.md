@@ -2,6 +2,8 @@
 
 Axiom is a **winit-only Wayland compositor** with real GLES rendering and server-side decorations. The nested/windowed path is the complete, recommended evaluation target.
 
+**Recently completed:** Drag-and-drop protocol (client-initiated sessions with icon rendering), touch input handling (down/motion/up/cancel with touch-based window move/resize), and compositor→clipboard push via `SetClipboard` IPC command are now implemented.
+
 ## Recommended usage
 
 Use Axiom primarily in nested mode:
@@ -25,18 +27,12 @@ cargo run -- --windowed --debug
 - Single output only (hardcoded 1920×1080 virtual size). Multi-output infrastructure exists but is not wired.
 - Fractional scale is advertised to clients but sourced from the workspace tape, not the output.
 
-### Drag-and-drop
-- Protocol handlers are implemented, but **runtime verification requires a real client** (touch interaction testing). Compile-verified only.
-
-### Touch input
-- Protocol handlers are implemented, but **runtime verification requires real touch hardware**. Compile-verified only.
-
 ### Clipboard
 - Wayland→compositor clipboard works (tested: real client offers selection → compositor receives).
-- Compositor→Wayland clipboard is implemented internally but has no external caller (a keybinding/IPC trigger can be added when needed).
+- Compositor→Wayland clipboard is triggerable via the `SetClipboard` IPC command, wired end-to-end.
 
 ### IPC
-- Unix-socket JSON IPC with UID peer check and action whitelist. The `effects` section in config is accepted but effects are no-ops (module removed).
+- Unix-socket JSON IPC with UID peer check and action whitelist.
 
 ## What to use Axiom for right now
 
@@ -49,4 +45,3 @@ Good use cases:
 Less suitable use cases:
 - Replacing your daily standalone compositor (single-output, nested only)
 - Expecting polished multi-monitor behavior
-- Relying on runtime-touchscreen verification

@@ -1,5 +1,7 @@
 #!/usr/bin/env sh
-# Launch Axiom as a standalone DRM session.
+# Launch Axiom as a Wayland compositor session.
+#
+# The compositor is winit-only (GLES) and runs inside the host display server.
 #
 # Preference order for config:
 # 1. User config in $XDG_CONFIG_HOME/axiom/axiom.toml (or ~/.config/...)
@@ -26,9 +28,9 @@ USER_CONFIG="$CONFIG_HOME/axiom/axiom.toml"
 SYSTEM_CONFIG="/etc/axiom/axiom.toml"
 
 if [ -f "$USER_CONFIG" ]; then
-    exec axiom --config "$USER_CONFIG" --backend=drm "$@"
+    exec axiom --config "$USER_CONFIG" "$@"
 elif [ -f "$SYSTEM_CONFIG" ]; then
-    exec axiom --config "$SYSTEM_CONFIG" --backend=drm "$@"
+    exec axiom --config "$SYSTEM_CONFIG" "$@"
 else
-    exec axiom --backend=drm "$@"
+    exec axiom "$@"
 fi

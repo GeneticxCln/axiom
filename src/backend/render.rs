@@ -241,6 +241,35 @@ fn render_scene_into(
             }
         }
     }
+    // Import DnD icon texture before frame creation so renderer is available.
+    let _dnd_bid: Option<ObjectId> = if state.dnd_active {
+        state.dnd_icon.as_ref().and_then(|icon_surface| {
+            let icon_buf: Option<WlBuffer> = with_states(icon_surface, |states| {
+                match states.cached_state.get::<SurfaceAttributes>().current().buffer {
+                    Some(BufferAssignment::NewBuffer(ref b)) => Some(b.clone()),
+                    _ => None,
+                }
+            });
+            icon_buf.and_then(|buf| {
+                let bid = buf.id();
+                if state.texture_cache.get(&bid).is_none() {
+                    match renderer.import_buffer(&buf, None, &[]) {
+                        Some(Ok(tex)) => {
+                            let tb = TextureBuffer::from_texture(
+                                &*renderer, tex, 1, Transform::Normal, None,
+                            );
+                            state.texture_cache.insert(bid.clone(), tb);
+                        }
+                        Some(Err(e)) => warn!("⚠️ Failed to import DnD icon buffer: {:?}", e),
+                        None => {}
+                    }
+                }
+                Some(bid)
+            })
+        })
+    } else {
+        None
+    };
     let mut frame =
         renderer.render(framebuffer, Size::from((w, h)), Transform::Normal)?;
     frame.clear(
@@ -325,6 +354,36 @@ fn render_scene_into(
                     let bg2 = be.geometry(smithay::utils::Scale::from(1.0));
                     <SolidColorRenderElement as RenderElement<GlesRenderer>>::draw(
                         &be, &mut frame, be.src(), bg2, &[bg2], &[],
+                    )?;
+                }
+            }
+        }
+    }
+    // If a DnD session is active with a drag icon, render it
+    // at the current pointer position as an overlay.
+    if state.dnd_active {
+        if let Some(ref icon_surface) = state.dnd_icon {
+            let icon_buf: Option<WlBuffer> = with_states(icon_surface, |states| {
+                match states.cached_state.get::<SurfaceAttributes>().current().buffer {
+                    Some(BufferAssignment::NewBuffer(ref b)) => Some(b.clone()),
+                    _ => None,
+                }
+            });
+            if let Some(buf) = icon_buf {
+                if let Some(tb) = state.texture_cache.get(&buf.id()) {
+                    let icon_x = state.pointer_x as i32;
+                    let icon_y = state.pointer_y as i32;
+                    let te = TextureRenderElement::from_texture_buffer(
+                        Point::from((icon_x as f64, icon_y as f64)),
+                        tb,
+                        None,
+                        None,
+                        None,
+                        Kind::Unspecified,
+                    );
+                    let tg = te.geometry(smithay::utils::Scale::from(1.0));
+                    <TextureRenderElement<GlesTexture> as RenderElement<GlesRenderer>>::draw(
+                        &te, &mut frame, te.src(), tg, &[tg], &[],
                     )?;
                 }
             }

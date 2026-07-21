@@ -1,5 +1,5 @@
 ---
-# Axiom Compositor — Flatpak manifest (Phase 4)
+# Axiom Compositor — Flatpak manifest
 #
 # Build:
 #   flatpak-builder --user --install build-dir packaging/flatpak/org.axiom.Compositor.yml --force-clean
@@ -7,8 +7,7 @@
 # Run:
 #   flatpak run org.axiom.Compositor --windowed
 #
-# For standalone DRM mode, run outside the sandbox or grant full device access:
-#   flatpak run --device=all org.axiom.Compositor
+# The compositor runs nested inside the host Wayland session (winit-only, GLES).
 
 app-id: org.axiom.Compositor
 runtime: org.freedesktop.Platform
@@ -19,24 +18,14 @@ sdk-extensions:
 command: axiom
 
 finish-args:
-  # Wayland compositor protocol
+  # Wayland compositor protocol (nested mode)
   - --socket=wayland
-  # Fallback X11 socket for nested mode
+  # Fallback X11 socket (winit may use X11)
   - --socket=x11
-  # D-Bus session bus (logind/seatd, rtkit)
+  # D-Bus session bus
   - --socket=session-bus
-  # DRM/KMS device nodes for standalone mode
-  - --device=dri
-  # Input device nodes (libinput)
-  - --device=input
-  # XWayland socket path (needed to create /tmp/.X11-unix/X*)
-  - --filesystem=/tmp/.X11-unix:create
   # Shared memory (SHM buffers)
   - --share=ipc
-  # Network access (XWayland clients may need it)
-  - --share=network
-  # System D-Bus for logind seat management
-  - --system-talk-name=org.freedesktop.login1
   # PulseAudio/PipeWire socket for audio
   - --socket=pulseaudio
 
@@ -44,7 +33,7 @@ modules:
   - name: axiom
     buildsystem: simple
     build-commands:
-      # Build in release mode with full Wayland protocol support
+      # Build in release mode
       - cargo build --release
       # Install binary
       - install -Dm755 target/release/axiom /app/bin/axiom
@@ -74,14 +63,13 @@ modules:
         <component type="desktop-application">
           <id>org.axiom.Compositor</id>
           <name>Axiom Compositor</name>
-          <summary>Hybrid Wayland compositor with scrollable workspaces</summary>
+          <summary>Winit-only Wayland compositor with niri-inspired scrollable workspaces</summary>
           <metadata_license>CC0-1.0</metadata_license>
           <project_license>GPL-3.0</project_license>
           <description>
-            <p>Axiom is an alpha-stage hybrid Wayland compositor combining
-            scrollable workspaces (inspired by niri) with GPU-accelerated
-            visual effects (blur, shadows, animations). Supports nested
-            (windowed) and standalone DRM/KMS display server modes.</p>
+            <p>Axiom is an alpha-stage Wayland compositor featuring
+            niri-inspired scrollable workspaces with GLES rendering.
+            Runs nested inside an existing Wayland or X11 session via winit.</p>
           </description>
           <launchable type="desktop-id">org.axiom.Compositor.desktop</launchable>
           <url type="homepage">https://github.com/GeneticxCln/axiom</url>
@@ -96,8 +84,8 @@ modules:
           <releases>
             <release version="0.1.0" date="2026-07-19">
               <description>
-                <p>Alpha release with SSD rendering, DRM GBM path,
-                incremental multi-monitor hotplug, and process sandboxing.</p>
+                <p>Alpha release with SSD rendering, scrollable workspaces,
+                and GLES rendering via winit.</p>
               </description>
             </release>
           </releases>

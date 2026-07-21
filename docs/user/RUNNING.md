@@ -51,7 +51,8 @@ RUST_LOG=debug cargo run -- --windowed
 ## IPC socket
 
 Preferred socket path:
-- `$XDG_RUNTIME_DIR/wayland-axiom-<pid>`
+- `$XDG_RUNTIME_DIR/axiom/axiom.sock`
+- Fallback: `/tmp/axiom-<pid>/axiom-lazy-ui.sock`
 
 ## Notes
 

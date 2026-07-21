@@ -29,7 +29,7 @@ use std::sync::Arc;
 #[derive(Parser)]
 #[command(name = "axiom")]
 #[command(
-    about = "A hybrid Wayland compositor combining scrollable workspaces with visual effects"
+    about = "Winit-only Wayland compositor with niri-inspired scrollable workspaces (GLES rendering)"
 )]
 #[command(version)]
 #[allow(clippy::struct_excessive_bools)]

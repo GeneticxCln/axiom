@@ -120,8 +120,10 @@ impl AxiomSmithayBackendReal {
                 self.state.pointer_y = y;
 
                 // Interactive move/resize consumes the motion event.
-                if self.handle_interaction(x, y) {
-                    return;
+                if let Some(ref interaction) = self.interaction.clone() {
+                    if self.handle_interaction(interaction, x, y) {
+                        return;
+                    }
                 }
 
                 let serial = SERIAL_COUNTER.next_serial();
@@ -316,6 +318,142 @@ impl AxiomSmithayBackendReal {
                 let (x, y) = (event.x_transformed(width), event.y_transformed(height));
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = event.time_msec();
+
+                // Check for decoration button hits before forwarding to client.
+                let floating = self.floating_rects();
+                let under = self
+                    .state
+                    .workspace_manager
+                    .read()
+                    .element_under(x, y, &floating);
+                if let Some((window_id, _)) = under {
+                    // Compute window-relative coordinates for decoration hit-testing
+                    let rel = self
+                        .state
+                        .window_manager
+                        .read()
+                        .get_window(window_id)
+                        .map(|w| {
+                            let rx = (x - w.window.position.0 as f64) as i32;
+                            let ry = (y - w.window.position.1 as f64) as i32;
+                            (rx, ry)
+                        });
+                    if let Some((rx, ry)) = rel {
+                        let action = self
+                            .state
+                            .decoration_manager
+                            .write()
+                            .handle_button_press(window_id, rx, ry);
+                        match action {
+                            Some(crate::decoration::DecorationAction::Close) => {
+                                if let Some(&surface_id) = self.state.window_map.get(&window_id) {
+                                    self.state.destroy_window(surface_id);
+                                    self.state.needs_redraw = true;
+                                }
+                                return;
+                            }
+                            Some(crate::decoration::DecorationAction::Minimize) => {
+                                let is_minimized = self.state.window_manager.read().is_minimized(window_id);
+                                if is_minimized {
+                                    self.state.workspace_manager.write().restore_window(window_id);
+                                    self.state.window_manager.write().restore_window(window_id);
+                                } else {
+                                    self.state.workspace_manager.write().minimize_window(window_id);
+                                    self.state.window_manager.write().minimize_window(window_id);
+                                }
+                                self.state.needs_redraw = true;
+                                return;
+                            }
+                            Some(crate::decoration::DecorationAction::ToggleMaximize) => {
+                                self.state.window_manager.write().toggle_fullscreen(window_id);
+                                self.state.needs_redraw = true;
+                                return;
+                            }
+                            Some(crate::decoration::DecorationAction::StartMove) => {
+                                self.state.workspace_manager.write().set_window_floating(window_id, true);
+                                let wm = self.state.window_manager.read();
+                                if let Some(w) = wm.get_window(window_id) {
+                                    let offset_x = x - w.window.position.0 as f64;
+                                    let offset_y = y - w.window.position.1 as f64;
+                                    self.touch_interaction = Some(WindowInteraction::Move {
+                                        window_id,
+                                        offset_x,
+                                        offset_y,
+                                    });
+                                }
+                                self.state.needs_redraw = true;
+                                return;
+                            }
+                            Some(crate::decoration::DecorationAction::StartResize(edge)) => {
+                                self.state.workspace_manager.write().set_window_floating(window_id, true);
+                                let wm = self.state.window_manager.read();
+                                if let Some(w) = wm.get_window(window_id) {
+                                    self.touch_interaction = Some(WindowInteraction::Resize {
+                                        window_id,
+                                        edge,
+                                        initial_rect: (
+                                            w.window.position.0,
+                                            w.window.position.1,
+                                            w.window.size.0,
+                                            w.window.size.1,
+                                        ),
+                                        start_x: x,
+                                        start_y: y,
+                                    });
+                                }
+                                self.state.needs_redraw = true;
+                                return;
+                            }
+                            None => {} // No decoration hit, fall through to client
+                        }
+                    }
+                }
+
+                // Check for popup dismiss: if there's an active popup grab and
+                // the touch is outside the popup rect, dismiss the popup.
+                if let Some(popup_id) = self.state.active_popup_grab {
+                    let dismiss = if let Some(p) = self.state.popups.get(&popup_id) {
+                        let px = x as i32;
+                        let py = y as i32;
+                        // Find the popup's absolute position by locating its parent window
+                        let (abs_x, abs_y) = self
+                            .state
+                            .window_map
+                            .iter()
+                            .find_map(|(&wid, &sid)| {
+                                if sid == p.parent_surface_id {
+                                    self.state
+                                        .window_manager
+                                        .read()
+                                        .get_window(wid)
+                                        .map(|w| (w.window.position.0, w.window.position.1))
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or((0, 0));
+                        let popup_x = abs_x + p.x;
+                        let popup_y = abs_y + p.y;
+                        px < popup_x
+                            || px > popup_x + p.width
+                            || py < popup_y
+                            || py > popup_y + p.height
+                    } else {
+                        true
+                    };
+
+                    if dismiss {
+                        if let Some(p) = self.state.popups.remove(&popup_id) {
+                            info!("🗑️ Dismissing popup surface {}", popup_id);
+                            p.surface.send_popup_done();
+                            self.state.needs_redraw = true;
+                        }
+                        self.state.active_popup_grab = None;
+                        return;
+                    }
+                }
+
+                // No decoration consumed — forward to the touch client.
                 let focus = self.touch_focus_under(x, y);
                 let down_event = DownEvent {
                     slot: event.slot(),
@@ -334,6 +472,14 @@ impl AxiomSmithayBackendReal {
                 let width = self.state.window_width as i32;
                 let height = self.state.window_height as i32;
                 let (x, y) = (event.x_transformed(width), event.y_transformed(height));
+
+                // If a touch-based move/resize is active, handle it and skip
+                // forwarding to the client.
+                if let Some(ref interaction) = self.touch_interaction.clone() {
+                    self.handle_interaction(interaction, x, y);
+                    return;
+                }
+
                 let time = event.time_msec();
                 let focus = self.touch_focus_under(x, y);
                 let motion_event = TouchMotionEvent {
@@ -349,6 +495,13 @@ impl AxiomSmithayBackendReal {
             }
 
             InputEvent::TouchUp { event } => {
+                // If a touch-based move/resize was active, end it and skip
+                // forwarding to the client.
+                if self.touch_interaction.take().is_some() {
+                    self.state.needs_redraw = true;
+                    return;
+                }
+
                 let up_event = UpEvent {
                     slot: event.slot(),
                     serial: SERIAL_COUNTER.next_serial(),
@@ -362,6 +515,7 @@ impl AxiomSmithayBackendReal {
             }
 
             InputEvent::TouchCancel { event: _event } => {
+                self.touch_interaction = None;
                 let Some(touch_handle) = self.state.seat.get_touch() else {
                     return;
                 };
@@ -375,11 +529,13 @@ impl AxiomSmithayBackendReal {
     /// If an interactive window manipulation is active (move or resize),
     /// apply the new pointer position and return `true` so the motion
     /// event is NOT forwarded to Smithay for pointer focus updates.
-    fn handle_interaction(&mut self, px: f64, py: f64) -> bool {
-        let interaction = match self.interaction {
-            Some(ref i) => i.clone(),
-            None => return false,
-        };
+    fn handle_interaction(
+        &mut self,
+        interaction: &WindowInteraction,
+        px: f64,
+        py: f64,
+    ) -> bool {
+        let interaction = interaction.clone();
         match interaction {
             WindowInteraction::Move {
                 window_id,
