@@ -1,6 +1,6 @@
 # Axiom 🚀
 
-**A hybrid Wayland compositor prototype combining scrollable workspaces with visual effects.**
+**A Wayland compositor with scrollable workspaces, built on Smithay 0.7.**
 
 <div align="center">
 
@@ -8,59 +8,62 @@
 [![License](https://img.shields.io/badge/license-GPLv3-blue)](#)
 [![Status](https://img.shields.io/badge/status-alpha-yellow)](#)
 
-**Where productivity meets beauty.**
+**Where productivity meets a calm, scrollable desktop.**
 
 </div>
 
 ## Current Status
 
-Axiom is currently an **alpha-stage compositor prototype**.
+Axiom is an **alpha-stage Wayland compositor** with a single, fully working
+backend: **winit** (nested/windowed). It presents real client window content
+plus server-side decoration titlebars through a Smithay 0.7 GLES renderer.
 
 What is true today:
-- The project has a real Smithay-based compositor backend.
-- The **nested / windowed (`--windowed`) path is the most complete development target**.
-- Scrollable workspace logic, configuration parsing, IPC, and renderer/effects infrastructure are implemented.
-- The standalone DRM/KMS path now has an early compositor output path, but is **not yet release-ready**.
+- Real Smithay 0.7 compositor backend (winit-only; no DRM/KMS, no xwayland).
+- GLES rendering through the winit window — real client pixels are shown.
+- Scrollable workspace engine, configuration parsing, and JSON IPC are implemented.
+- `cargo build` and `cargo test` are green (0 warnings).
 
 What is not true yet:
-- Axiom is **not** in “production polish”.
+- Axiom is **not** in "production polish".
 - Packaging and release assets are still incomplete.
-- Multi-monitor, fractional scaling, XWayland compatibility, and the render pipeline still need more work.
-
-For the detailed project status and roadmap, see [MASTER_DEVELOPMENT_PLAN.md](MASTER_DEVELOPMENT_PLAN.md).
+- Multi-monitor, fractional scaling, and touch input still need work.
+- Full drag-and-drop data transfer is not yet implemented; clipboard works in
+  both directions (compositor→client and Wayland-client→compositor capture).
 
 ## Vision
 
 Axiom explores a compositor UX that combines:
 - **Scrollable workspaces** inspired by niri
-- **Visual effects** inspired by Hyprland
 - **Structured IPC** for external tooling / optimization clients
 
 ## What Works Today
 
 ### Core logic
-- Scrollable workspace/tape model
+- Scrollable workspace/tape model (`ScrollableWorkspaces` / `WorkspaceTape`)
 - Window registry and basic lifecycle management
 - TOML configuration loading/validation
 - JSON IPC over Unix sockets
-- Animation/effects state management
+- Eased scroll/momentum with per-column tiling and gaps
 
-### Development compositor path
+### Compositor path (winit)
 - Smithay-based Wayland socket
 - XDG toplevel/popup handling
-- Nested development mode via `--windowed`
 - Input routing and compositor shortcuts
-- WGPU renderer plus transitional GL presentation path
-- Explicit **client-side decoration negotiation** in the live runtime path until visible SSD rendering is integrated
+- GLES rendering via the winit backend: each client's committed `wl_buffer`
+  is imported into a `GlesTexture` and drawn (plus a solid backdrop and
+  server-side decoration titlebars/buttons) via `SolidColorRenderElement` /
+  `TextureRenderElement`, then submitted
+- Live resize via `WinitEvent::Resized` updates the workspace viewport + output mode
 
 ## What Is Still Incomplete
 
-- Fully finished standalone DRM/KMS compositor path
-- Unified render/present architecture
+- Standalone DRM/KMS compositor path (removed — winit is the only backend)
 - Robust multi-monitor behavior
 - Fractional scaling / HiDPI polish
-- Visible server-side decoration rendering in the live compositor output path (current live policy remains CSD-first)
-- Complete XWayland clipboard and compatibility flow
+- Touch input
+- Full drag-and-drop data transfer
+- All 8 resize edges are wired (Left/Right/Top/Bottom + 4 corners)
 - Release-ready packaging and session assets
 
 ## Repository Layout
@@ -73,12 +76,9 @@ axiom/
 │   ├── backend/
 │   ├── config/
 │   ├── workspace/
-│   ├── effects/
-│   ├── renderer/
 │   ├── window/
 │   ├── input/
-│   ├── ipc/
-│   └── xwayland/
+│   └── ipc/
 ├── docs/
 ├── config/axiom.toml
 ├── test_ipc.py
@@ -94,10 +94,10 @@ cargo build
 
 ### Run the recommended alpha target
 ```bash
-cargo run -- --windowed --debug
+cargo run -- --debug
 ```
 
-The nested/windowed path is the recommended way to evaluate Axiom right now.
+The winit/nested path is the recommended way to evaluate Axiom right now.
 
 Automated nested smoke test (uses a real Wayland client such as `weston-terminal`):
 
@@ -132,19 +132,17 @@ Axiom exposes a Unix socket for external clients.
 
 Because the fallback path is process-specific, helper clients in this repo support manual override via `AXIOM_SOCKET_PATH` and also scan the fallback pattern automatically.
 
-### Currently supported optimization surface
+### Workspace commands
 
-Persistent config mutations via `OptimizeConfig` / `SetConfig` are currently limited to:
-- `effects.blur.radius`
-- `effects.animations.duration`
-- `workspace.scroll_speed`
+All 10 `WorkspaceCommand` actions are wired end-to-end and enforced against a
+whitelist (`KNOWN_WORKSPACE_ACTIONS`) in production. Unknown actions are
+rejected with an `unknown_action` ACK.
 
-Runtime effects tuning via `EffectsControl` currently supports:
-- `enabled`
-- `blur_radius`
-- `animation_speed`
+### Effects control
 
-Helper clients in this repository now restrict themselves to those supported keys/fields.
+`LazyUIMessage::EffectsControl` is accepted by the IPC layer, but effects are
+no-ops — the effects module was removed. The config `effects` section is
+retained as data only.
 
 ### Try the test client
 ```bash
@@ -164,7 +162,6 @@ python3 test_ipc.py
 - [Render Architecture](docs/dev/RENDER_ARCHITECTURE.md)
 - [Config Support Matrix](docs/dev/CONFIG_SUPPORT.md)
 - [Build Notes](docs/dev/BUILD.md)
-- [DRM Hardware Validation](docs/dev/DRM_HARDWARE_VALIDATION.md)
 - [Release Checklist](docs/dev/RELEASE_CHECKLIST.md)
 - [Release Process](docs/dev/RELEASE_PROCESS.md)
 - [Release Notes Template](docs/dev/RELEASE_NOTES_TEMPLATE.md)
@@ -180,7 +177,6 @@ See [docs/dev/CONTRIBUTING.md](docs/dev/CONTRIBUTING.md).
 ## Inspiration
 
 - [niri](https://github.com/YaLTeR/niri)
-- [Hyprland](https://github.com/hyprwm/Hyprland)
 - [Smithay](https://github.com/Smithay/smithay)
 
 ## License

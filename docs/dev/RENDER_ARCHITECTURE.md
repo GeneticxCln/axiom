@@ -1,157 +1,59 @@
 # Render Architecture
 
-## Current state (post-refactor)
-
-**WGPU is the compositor.** The GL bridge has been removed.
-
-### Winit path
-
-buffer_cache → WGPU texture upload → WGPU render (windows + effects) → WGPU surface → winit window
-
-Zero-copy GPU-only. Each frame:
-1. stage_wgpu_scene_from_state() uploads new window pixel data and updates rects
-2. render_output("primary") calls render_to_surface_auto() with effects
-3. frame.present() submits to the window system
-
-No CPU readback, no GL upload, no EGL swap.
-
-### DRM/KMS path
-
-buffer_cache → CPU software composite (RGBA→BGRA) → dumb-buffer → KMS page-flip
-
-GPU-free. No WGPU, no GPU stall. Effects not available in DRM mode.
-
-### Headless/test path
-
-compose_full_frame() still exists for integration test use only.
-
-## Scope boundaries
-
-WGPU: frame composition, effects, resource lifecycle.
-Backend: input/events, Wayland protocol, output setup, WGPU surface creation.
-DRM: device discovery, modesetting, software composite.
-
-## Non-goals
-
-DRM path is alpha (no effects, software composite). dma-buf zero-copy pending wgpu upstream.
-
-## Decision
-
-**Axiom's primary compositor architecture is WGPU-first.**
-
-That means:
-- **WGPU owns frame composition** for windows and effects.
-- **GL is a transitional presentation shim**, not the long-term source of compositor behavior.
-- New rendering features should be implemented against the **WGPU compositor path**, not added only to the legacy/raw GL path.
-
-## Why this decision
-
-The repository currently contains multiple rendering layers:
-- Smithay/GLES integration
-- raw GL blit helpers in `src/backend/mod.rs`
-- WGPU off-screen compositor in `src/renderer/mod.rs`
-- DRM/GBM plumbing in `src/backend/drm.rs`
-
-Keeping all of them as equal long-term rendering paths would make the project harder to finish and maintain. The code already has the most structured composition/effects logic in the WGPU renderer, so that is the best place to converge.
-
 ## Current state
 
-### What WGPU already does
-- maintains renderer-owned window rectangles and textures
-- composes textured windows into an off-screen target
-- queues and dispatches shadow/blur passes
-- supports headless composition/testing helpers
+Axiom renders through the **Smithay 0.7 GLES backend bound to the winit
+window**. There is no WGPU renderer, no effects pipeline, and no DRM/KMS
+scanout path — those were removed. The compositor presents **real client
+window content** plus server-side decoration titlebars.
 
-### What GL currently does
-- provides the current nested presentation bridge in the winit path
-- receives the composed frame after WGPU composition
-- uploads/blits the final image to the active framebuffer
-- reuses persistent upload-side state (for example the fullscreen blit texture) while the renderer reuses the GPU readback staging buffer on same-size frames to reduce bridge churn
-- is now intentionally isolated behind backend bridge helpers rather than spread through multiple rendering paths
-
-### Why this is transitional
-The current nested path still relies on a costly flow:
+### Winit GLES path
 
 ```text
-WGPU compose -> CPU readback -> GL texture upload -> GL fullscreen blit
+client commits wl_buffer
+  → bind winit GLES backend
+  → import each client wl_buffer into a GlesTexture
+  → build render elements:
+      SolidColorRenderElement  (backdrop + SSD titlebars/buttons)
+      TextureRenderElement     (client window content)
+  → submit frame to the winit window
 ```
 
-This is acceptable as an alpha-stage bridge, but it is **not** the intended end state.
+Each frame, `AxiomSmithayBackendReal::render()`:
 
-Recent bridge hardening has reduced some avoidable churn (for example, same-size
-frames now reuse the GPU readback staging buffer instead of allocating a fresh
-readback buffer every compose), but the architectural CPU roundtrip still exists.
+1. Binds the winit GLES backend for the current output.
+2. Imports every visible client's committed `wl_buffer` into a `GlesTexture`.
+3. Composes a solid backdrop and the server-side decoration titlebars/buttons
+   as `SolidColorRenderElement`s, and the client content as
+   `TextureRenderElement`s.
+4. Submits the frame, presenting real client pixels to the winit window.
 
-## Target architecture
-
-## 1. Composition owner: WGPU
-
-The compositor should have one authoritative frame builder:
-- window geometry
-- texture composition
-- effects application
-- final frame assembly
-
-That owner is WGPU.
-
-## 2. Presentation should become thinner
-
-Presentation should eventually be a thin backend-specific step:
-- nested/windowed path: present the already-composed frame without full CPU roundtrip
-- DRM/KMS path: feed compositor output into the standalone output path without building a separate second-class render architecture
-
-## 3. Avoid feature duplication
-
-Do **not** add the same effect logic independently to both:
-- a WGPU composition path, and
-- a separate GL-only feature path
-
-If temporary GL work is needed, it should be treated as compatibility plumbing, not as the main rendering feature surface.
+`WinitEvent::Resized` updates the workspace viewport and the output mode, so
+live resize works.
 
 ## Scope boundaries
 
-### WGPU path owns
-- full-frame composition
-- placeholder/textured window composition semantics
-- effect queue consumption
-- renderer-side resource lifecycle
+- **Backend layer** (`src/backend/`): input/events, Wayland protocol, output
+  setup, winit GLES surface binding, and the render submission step.
+- **Workspace engine** (`src/workspace/`): window geometry, scroll/momentum,
+  per-column tiling, and gaps that feed the render elements.
+- **Config / IPC**: drive state; they do not own rendering.
 
-### Backend layer owns
-- input/event processing
-- Wayland/Smithay protocol handling
-- output setup
-- presentation scheduling
-- temporary interop with the presentation target
-- temporary policy decisions that avoid claiming rendering features not yet visible in the live output path (for example: current xdg-decoration negotiation remains CSD-first until visible SSD rendering lands)
+## Non-goals (current)
 
-### DRM layer owns
-- device/output discovery
-- modesetting / output lifecycle
-- hotplug monitoring
-- current standalone alpha presentation bridge (WGPU-composed frame -> CPU dumb-buffer scanout)
-- eventual standalone present path integration
+- No GPU post-processing (blur, shadows, rounded corners) — the effects module
+  was removed. `LazyUIMessage::EffectsControl` is accepted by IPC but is a
+  no-op.
+- No standalone DRM/KMS scanout.
+- No CPU readback / software composite path.
 
-## Near-term rules for contributors
+## Notes for contributors
 
-1. Prefer implementing new visual behavior in `src/renderer/` or `src/effects/`.
-2. Treat raw GL code in `src/backend/mod.rs` as a compatibility bridge.
-3. Do not add new long-term rendering features that exist only in the GL shim.
-4. Keep backend and renderer responsibilities separate: backend orchestrates, renderer composes.
-
-## Near-term migration goals
-
-1. Keep nested `--windowed` mode usable while retaining the current bridge.
-2. Reduce or eliminate the full-frame CPU readback in the common path.
-3. Reuse the same compositor frame architecture for standalone DRM output.
-4. Remove duplicated rendering responsibilities once the target present path is stable.
-
-## Non-goals right now
-
-This decision does **not** mean:
-- the GL bridge disappears immediately
-- the DRM path is already complete
-- the compositor can already present directly from WGPU on every backend
-
-It only means the project now has a documented architectural direction:
-
-> **WGPU is the compositor; backend-specific presentation code is an implementation detail.**
+1. New visual behavior belongs in the winit GLES render path
+   (`src/backend/mod.rs` `render()`), using Smithay render elements
+   (`SolidColorRenderElement` / `TextureRenderElement`).
+2. Keep backend orchestration and workspace geometry separate: the workspace
+   engine produces rectangles; the backend turns them into render elements.
+3. Do not reintroduce a second rendering architecture (WGPU, DRM) without a
+   documented decision — the project converged on the single winit GLES path
+   to stay maintainable.

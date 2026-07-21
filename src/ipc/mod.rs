@@ -34,10 +34,10 @@ const CLIENT_IDLE_TIMEOUT_SECS: u64 = 60;
 
 /// Whitelisted `LazyUIMessage::WorkspaceCommand.action` strings. Unknown actions
 /// are rejected with status `unknown_action` so callers can distinguish
-/// future-supported actions from outright typos. The compositor-side
-/// executor wires these to `WorkspaceTape::scroll_left/right` etc. when the
-/// `process_messages` dispatch table is extended.
-#[cfg(test)]
+/// future-supported actions from outright typos. All 10 actions are wired
+/// end-to-end: the IPC layer validates against this list and forwards known
+/// actions to the compositor via `cmd_tx`, and `AxiomCompositor::process_messages`
+/// dispatches them to the workspace engine (`WorkspaceTape` / `ScrollableWorkspaces`).
 const KNOWN_WORKSPACE_ACTIONS: &[&str] = &[
     "scroll_left",
     "scroll_right",
@@ -110,13 +110,11 @@ pub struct LiveMetrics {
 /// [`KNOWN_WORKSPACE_ACTIONS`] set. Whitelist is enforced to avoid
 /// silently executing untyped JSON parameters against `workspace_manager`.
 ///
-/// **Status after Issue #2 single-dispatch fix:** no production path
-/// calls this function — the compositor's `dispatch_workspace_command`
-/// arm in `src/compositor.rs` owns the canonical whitelist re-check.
-/// Kept as `pub(super)` for tests (`test_known_workspace_actions`) and
-/// future code paths that need to validate workspace actions
-/// outside the IPC handler's gate.
-#[cfg(test)]
+/// Enforced in production: the live `WorkspaceCommand` branch of
+/// `handle_client` rejects unknown actions with an `unknown_action` ACK
+/// before forwarding to the compositor. Kept as `pub(super)` so the
+/// `test_known_workspace_actions` regression test exercises the same
+/// production code path.
 fn is_known_workspace_action(action: &str) -> bool {
     KNOWN_WORKSPACE_ACTIONS.contains(&action)
 }
@@ -264,14 +262,11 @@ pub enum LazyUIMessage {
     },
 
     /// Workspace management commands. The handler validates the `action`
-    /// against `KNOWN_WORKSPACE_ACTIONS` and forwards the message via the
-    /// mpsc command channel to the compositor's `process_messages`. The
-    /// compositor-side dispatch arm for `WorkspaceCommand` is currently
-    /// missing — accepted actions are queued (`dispatched_via_mpsc: true`
-    /// in the ACK) but not executed. Tracked as a follow-up to wire
-    /// `scroll_left`, `scroll_right`, `add_window`, `remove_window`,
-    /// `move_focus_left`, and `move_focus_right` to
-    /// `ScrollableWorkspaces` mutations.
+    /// against `KNOWN_WORKSPACE_ACTIONS` and rejects unknown actions with an
+    /// `unknown_action` ACK. Known actions are forwarded via the mpsc command
+    /// channel to the compositor's `process_messages`, which dispatches them
+    /// end-to-end to the workspace engine (`WorkspaceTape` /
+    /// `ScrollableWorkspaces`). All 10 actions are wired and executed.
     WorkspaceCommand {
         action: String,
         parameters: serde_json::Value,
@@ -387,13 +382,11 @@ impl AxiomIPCServer {
     /// impl) and `AxiomIPCServer::` (from the test mod) without forcing a
     /// `new()` plumbing for each call.
     ///
-    /// **Status after Issue #2 single-dispatch fix:** the per-client
-    /// handler no longer constructs WorkspaceCommand ACKs inline (it
-    /// forwards to `cmd_tx` and the compositor's dispatch arm owns the
-    /// lifecycle). This constructor remains available for tests and
-    /// any future code path that wants to emit a typed ACK without
-    /// without going through the IPC channel.
-    #[cfg(test)]
+    /// **Status:** the per-client `WorkspaceCommand` handler uses this
+    /// constructor to emit the `unknown_action` ACK for whitelist-rejected
+    /// actions before forwarding known actions to `cmd_tx`. It is also the
+    /// single source of truth exercised by
+    /// `test_workspace_command_ack_schema_includes_status`.
     pub(super) fn build_workspace_command_ack(action: &str, accepted: bool) -> AxiomMessage {
         AxiomMessage::UserEvent {
             // Fail loudly on a pre-1970 system clock rather than silently
@@ -791,6 +784,33 @@ impl AxiomIPCServer {
                                     // match arm — no
                                     // `serde_json::Value::Object(ref mut
                                     // map)` mutation after the fact.
+
+                                    // Whitelist gate (WorkspaceCommand only):
+                                    // reject unknown actions with an
+                                    // `unknown_action` ACK and never forward
+                                    // them to the compositor. Known actions
+                                    // fall through to single-dispatch below.
+                                    if let LazyUIMessage::WorkspaceCommand { action, .. } = &message {
+                                        if !is_known_workspace_action(action) {
+                                            debug!(
+                                                "🚫 Rejecting unknown WorkspaceCommand action: {}",
+                                                action
+                                            );
+                                            let ack =
+                                                Self::build_workspace_command_ack(action, false);
+                                            if let Err(e) =
+                                                Self::send_message(&mut writer, &ack).await
+                                            {
+                                                warn!(
+                                                    "⚠️ Failed sending unknown_action ACK: {}",
+                                                    e
+                                                );
+                                            }
+                                            line_buf.clear();
+                                            continue;
+                                        }
+                                    }
+
                                     let cmd_event_type: &'static str;
                                     let cmd_details: serde_json::Value;
                                     match &message {
@@ -1579,8 +1599,8 @@ impl Drop for AxiomIPCServer {
 
 impl AxiomIPCServer {
     /// Walk a dot-separated `section.field` path on the live `AxiomConfig`.
-    /// Supports the `workspace.*`, `effects.*`, `general.*`, and `xwayland.*`
-    /// subtrees. Returns `None` for unknown paths so the IPC layer can answer
+    /// Supports the `workspace.*`, `effects.*`, `general.*` subtrees.
+    /// Returns `None` for unknown paths so the IPC layer can answer
     /// with `Null` rather than a misleading default.
     fn resolve_config_path(config: &AxiomConfig, key: &str) -> Option<serde_json::Value> {
         match key {
@@ -1609,7 +1629,6 @@ impl AxiomIPCServer {
             "effects.shadows.opacity" => Some(serde_json::json!(config.effects.shadows.opacity)),
             "general.max_fps" => Some(serde_json::json!(config.general.max_fps)),
             "general.vsync" => Some(serde_json::json!(config.general.vsync)),
-            "xwayland.enabled" => Some(serde_json::json!(config.xwayland.enabled)),
             _ => None,
         }
     }

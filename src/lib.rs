@@ -1,18 +1,16 @@
 //! Axiom Wayland Compositor Library
 //!
-//! A hybrid Wayland compositor combining scrollable workspaces with beautiful visual effects.
-//! This library exposes the core functionality for building Wayland compositors with:
+//! A winit-only Wayland compositor with scrollable workspaces and server-side
+//! decorations rendered via GLES. This library exposes the core functionality for
+//! building Wayland compositors with:
 //!
-//! - **Scrollable Workspaces**: Smooth infinite scrolling between workspace columns
-//! - **Visual Effects**: Blur, shadows, animations, and custom shaders
-//! - **Window Management**: Intelligent tiling and floating window support
-//! - **Input Handling**: Comprehensive keyboard and mouse input processing
-//! - **IPC Communication**: Integration with Lazy UI and external tools
+//! - **Scrollable Workspaces**: Unlimited horizontal workspace columns
+//! - **Window Management**: Column tiling, floating, focus, minimize, fullscreen
+//! - **Input Handling**: Keyboard + pointer bindings, decoration hit-testing
+//! - **IPC Communication**: JSON Unix-socket IPC for Lazy UI integration
 //! - **Smithay Integration**: Full Wayland compositor protocol support
 //!
 //! ## Architecture
-//!
-//! The compositor is built with a modular architecture:
 //!
 //! ```text
 //! ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
@@ -22,17 +20,10 @@
 //!                                 │
 //!                                 ▼
 //!                        ┌──────────────────┐
-//!                        │ Smithay Backend  │
-//!                        │ (Wayland Server) │
+//!                        │ Smithay 0.7      │
+//!                        │ (GLES + Wayland) │
 //!                        └──────────────────┘
 //! ```
-//!
-//! ## Features
-//!
-//! - **Phase-based Development**: Gradual implementation from basic functionality to full compositor
-//! - **Multiple Backends**: Support for both development (windowed) and production (DRM) modes
-//! - **Effects Pipeline**: GPU-accelerated visual effects with automatic performance scaling
-//! - **Protocol Extensions**: Enhanced Wayland protocols for advanced window management
 //!
 //! ## Usage
 //!
@@ -41,9 +32,9 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     let config = AxiomConfig::load("config/axiom.toml")?;
-//!     // Compositor requires pre-initialized subsystems
-//!     // See main.rs for full initialization example
+//!     let config = AxiomConfig::default();
+//!     // Compositor wires subsystems internally
+//!     // See main.rs for full initialization
 //!     Ok(())
 //! }
 //! ```
@@ -58,7 +49,6 @@ pub use crate::config::AxiomConfig;
 
 // Re-export core modules
 pub use crate::decoration::{DecorationManager, DecorationMode};
-pub use crate::effects::EffectsEngine;
 pub use crate::input::InputManager;
 pub use crate::window::{Rectangle, WindowManager};
 pub use crate::workspace::ScrollableWorkspaces;
@@ -67,20 +57,12 @@ pub use crate::workspace::ScrollableWorkspaces;
 pub mod compositor;
 pub mod config;
 pub mod decoration;
-pub mod effects;
 pub mod input;
 pub mod ipc;
-pub mod renderer;
 pub mod window;
 pub mod workspace;
-pub mod xwayland;
 
 pub mod backend;
-pub mod sandbox;
-#[cfg(feature = "demo")]
-pub mod demo_phase4_effects;
-#[cfg(feature = "demo")]
-pub mod demo_workspace;
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

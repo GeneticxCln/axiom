@@ -12,12 +12,10 @@
 //! - the structures here remain useful for tests, interaction policy, and
 //!   future visible SSD integration
 
-use anyhow::Result;
 use log::{debug, info};
 use std::collections::HashMap;
 
 use crate::config::WindowConfig;
-use crate::effects::WindowEffectState;
 use crate::window::Rectangle;
 
 /// Decoration mode for windows
@@ -639,115 +637,6 @@ impl DecorationManager {
         }
     }
 
-    /// Render window decorations (placeholder for GPU implementation).
-    ///
-    /// **Phase 1.A5 note:** this is a *defunct parallel code path*. The
-    /// live compositor pipeline builds decoration quads inline in
-    /// `compositor::prepare_frame_data` via the `DecorationManager`
-    /// map plus the `DecorationQuad` struct in `crate::renderer`, then
-    /// hands them to `renderer.set_decoration_quads`. This function
-    /// returns a different `DecorationRenderData` enum that no caller
-    /// reads. It exists as a historical placeholder from an earlier
-    /// live-SSD prototype and is preserved (with
-    /// `#[allow(dead_code)]`) so the public API surface stays
-    /// accessible to external tooling without surprise breakage, and
-    /// so a future PR can decide to either resurrect it or delete it
-    /// (tracked in Phase 2).
-    ///
-    /// **Do not call this from the live pipeline.** Use
-    /// `prepare_frame_data` plus `set_decoration_quads` instead.
-    #[allow(dead_code)]
-    #[deprecated(
-        since = "0.1.0",
-        note = "Defunct parallel path. Use `prepare_frame_data` + `renderer.set_decoration_quads` instead."
-    )]
-    pub fn render_decorations(
-        &self,
-        window_id: u64,
-        window_rect: Rectangle,
-        effects: Option<&WindowEffectState>,
-    ) -> Result<DecorationRenderData> {
-        let decoration = self.decorations.get(&window_id).ok_or_else(|| {
-            anyhow::anyhow!("Window {} not found in decoration manager", window_id)
-        })?;
-
-        if decoration.mode != DecorationMode::ServerSide {
-            return Ok(DecorationRenderData::None);
-        }
-
-        // Generate rendering commands for GPU pipeline
-        let border_width = if decoration.focused {
-            self.theme.border_width_focused
-        } else {
-            self.theme.border_width_unfocused
-        };
-
-        let border_color = if decoration.focused {
-            self.theme.border_color_focused
-        } else {
-            self.theme.border_color_unfocused
-        };
-
-        let titlebar_bg = if decoration.focused {
-            self.theme.titlebar_bg_focused
-        } else {
-            self.theme.titlebar_bg_unfocused
-        };
-
-        let text_color = if decoration.focused {
-            self.theme.text_color_focused
-        } else {
-            self.theme.text_color_unfocused
-        };
-
-        // Apply effects if available
-        let mut opacity = 1.0;
-        let mut corner_radius = self.theme.corner_radius;
-
-        if let Some(effects) = effects {
-            opacity *= effects.opacity;
-            corner_radius = effects.corner_radius;
-        }
-
-        let render_data = DecorationRenderData::ServerSide {
-            titlebar_rect: Rectangle {
-                x: window_rect.x,
-                y: window_rect.y,
-                width: window_rect.width,
-                height: decoration.titlebar_height,
-            },
-            titlebar_bg: [
-                titlebar_bg[0],
-                titlebar_bg[1],
-                titlebar_bg[2],
-                titlebar_bg[3] * opacity,
-            ],
-            border_width,
-            border_color: [
-                border_color[0],
-                border_color[1],
-                border_color[2],
-                border_color[3] * opacity,
-            ],
-            corner_radius,
-            title: decoration.title.clone(),
-            text_color: [
-                text_color[0],
-                text_color[1],
-                text_color[2],
-                text_color[3] * opacity,
-            ],
-            font_size: self.theme.font_size,
-            buttons: decoration.buttons.clone(),
-        };
-
-        debug!(
-            "🎨 Generated decoration render data for window {}",
-            window_id
-        );
-
-        Ok(render_data)
-    }
 }
 
 /// Actions that can be triggered by decoration interactions

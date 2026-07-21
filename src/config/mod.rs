@@ -10,7 +10,6 @@
 //! - [`WindowConfig`]: Window management and placement
 //! - [`InputConfig`]: Input device handling
 //! - [`BindingsConfig`]: Key binding mappings
-//! - [`XWaylandConfig`]: X11 compatibility settings
 //! - [`GeneralConfig`]: Global compositor settings
 
 use anyhow::{Context, Result};
@@ -42,31 +41,20 @@ pub struct AxiomConfig {
     #[serde(default)]
     pub bindings: BindingsConfig,
 
-    /// XWayland configuration
-    #[serde(default)]
-    pub xwayland: XWaylandConfig,
-
-    /// Backend selection (winit / drm / noop). Default is `winit` for
-    /// development; production users override via `--backend=drm`.
+    /// Backend selection (winit / noop). Default is `winit` for
+    /// development; tests/CI override via `backend.kind = "noop"`.
     /// Stored as `String` here so the config schema is self-contained
     /// and parses without pulling in the backend module.
     #[serde(default)]
     pub backend: BackendConfig,
 
-    /// Feature kill-switches for features we deliberately *minimize* to
-    /// keep the implementation surface focused. Both are `false` by
-    /// default so out-of-the-box Axiom does NOT:
-    /// 1. Draw / handle a minimize button on the titlebar (there is no
-    ///    Wayland minimize protocol per se — this would require building
-    ///    a compositor-internal iconified-window list + a round-trip
-    ///    with a synthetic Wayland surface to notify clients, which is
-    ///    deeper protocol work than the current milestone aims for).
-    /// 2. Register the `zxdg_decoration_manager_v1` global for clients
-    ///    to negotiate SSD↔CSD preference with us. The live compositor
-    ///    output still does **not** render visible SSD chrome yet, so
-    ///    the current handler negotiates **client-side decorations**
-    ///    even when the protocol global is enabled.
-    ///
+    /// Feature kill-switches for features we keep modest to focus the
+    /// implementation surface. `enable_minimize` defaults `false` so the
+    /// titlebar minimize button is hidden (requires iconified-window protocol
+    /// round-trips). `enable_xdg_decoration_protocol` defaults `false` but
+    /// when enabled, the compositor negotiates `ServerSide` and renders
+    /// visible SSD titlebars/buttons via GLES.
+    /// Users can enable either independently via config.
     /// Users can opt back into either independently by setting the
     /// matching flag to `true` (and then supplying the corresponding
     /// implementation when wiring time comes).
@@ -139,8 +127,8 @@ impl FeaturesConfig {
 
 /// Backend selection section of [`AxiomConfig`].
 ///
-/// The `kind` field accepts `"winit"`, `"drm"`, or `"noop"` (plus
-/// `from_config_str` aliases like `"kms"`, `"tty"`, `"windowed"`, etc.).
+/// The `kind` field accepts `"winit"` or `"noop"` (plus `from_config_str`
+/// aliases like `"windowed"`). Unknown values fall back to `winit`.
 /// Unknown values fall back to `winit` and emit a warning so a typo
 /// never bricks startup. See [`BackendKind`](crate::backend::BackendKind)
 /// for the parsed enum used by the rest of the compositor.
@@ -385,17 +373,6 @@ pub struct BindingsConfig {
     pub mouse_middle: String,
 }
 
-/// XWayland configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct XWaylandConfig {
-    /// Enable XWayland support
-    pub enabled: bool,
-
-    /// XWayland display number
-    pub display: Option<u32>,
-}
-
 /// General compositor settings
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GeneralConfig {
@@ -547,15 +524,6 @@ impl Default for BindingsConfig {
             mouse_back: Self::default_mouse_back(),
             mouse_forward: Self::default_mouse_forward(),
             mouse_middle: Self::default_mouse_middle(),
-        }
-    }
-}
-
-impl Default for XWaylandConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            display: None,
         }
     }
 }
@@ -769,13 +737,6 @@ impl AxiomConfig {
             }
         }
 
-        // --- xwayland ---
-        if let Some(display) = self.xwayland.display {
-            if display > 99 {
-                anyhow::bail!("xwayland.display must be in [0, 99]");
-            }
-        }
-
         Ok(())
     }
 
@@ -837,7 +798,6 @@ impl AxiomConfig {
         let window_changed = partial.window != default_config.window;
         let input_changed = partial.input != default_config.input;
         let bindings_changed = partial.bindings != default_config.bindings;
-        let xwayland_changed = partial.xwayland != default_config.xwayland;
         let output_changed = partial.output != default_config.output;
         let general_changed = partial.general != default_config.general;
 
@@ -855,9 +815,6 @@ impl AxiomConfig {
         }
         if bindings_changed {
             self.bindings = partial.bindings;
-        }
-        if xwayland_changed {
-            self.xwayland = partial.xwayland;
         }
         if output_changed {
             self.output = partial.output;

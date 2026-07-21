@@ -4,8 +4,7 @@
 //! and guide optimization efforts.
 
 use axiom::{
-    config::{EffectsConfig, WorkspaceConfig},
-    effects::EffectsEngine,
+    config::WorkspaceConfig,
     workspace::ScrollableWorkspaces,
 };
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
@@ -77,60 +76,6 @@ fn bench_window_layout(c: &mut Criterion) {
             },
         );
     }
-
-    group.finish();
-}
-
-/// Benchmark effects engine operations
-fn bench_effects_engine(c: &mut Criterion) {
-    let mut group = c.benchmark_group("effects_engine");
-
-    // Benchmark animation updates
-    group.bench_function("animation_updates", |b| {
-        b.iter_batched(
-            || {
-                let config = EffectsConfig::default();
-                let mut effects = EffectsEngine::new(&config).unwrap();
-
-                // Add multiple animations
-                for i in 1..=50 {
-                    effects.animate_window_move(
-                        i,
-                        (i as f32 * 10.0, i as f32 * 10.0),
-                        ((i + 50) as f32 * 10.0, (i + 50) as f32 * 10.0),
-                    );
-                }
-                effects
-            },
-            |mut effects| {
-                // Benchmark one update cycle
-                black_box(effects.update().ok());
-                black_box(());
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    // Benchmark blur effect processing
-    group.bench_function("blur_processing", |b| {
-        b.iter_batched(
-            || {
-                let config = EffectsConfig::default();
-                let mut effects = EffectsEngine::new(&config).unwrap();
-
-                // Enable blur for multiple windows
-                for i in 1..=20 {
-                    effects.set_window_blur(i, 10.0);
-                }
-                effects
-            },
-            |mut effects| {
-                black_box(effects.update().ok());
-                black_box(());
-            },
-            BatchSize::SmallInput,
-        );
-    });
 
     group.finish();
 }
@@ -268,164 +213,14 @@ fn bench_input_processing(c: &mut Criterion) {
     group.finish();
 }
 
-/// Build a 64×64 RGBA benchmark texture with a simple gradient pattern.
-fn make_bench_texture_rgba() -> Vec<u8> {
-    let w = 64usize;
-    let h = 64usize;
-    let mut pixels = Vec::with_capacity(w * h * 4);
-    for y in 0..h {
-        for x in 0..w {
-            pixels.push((x * 4) as u8);
-            pixels.push((y * 4) as u8);
-            pixels.push(128u8);
-            pixels.push(255u8);
-        }
-    }
-    pixels
-}
-
-/// Benchmark `render_to_headless_target` with cached projection buffer.
-///
-/// Two variants:
-/// - `cold_path`: fresh renderer each iteration → always cache miss.
-/// - `hot_path`: same renderer across iterations → first call populates
-///   the projection cache; subsequent calls in the same iteration reuse
-///   it, measuring the per-frame speedup from the caching optimisation.
-fn bench_headless_render(c: &mut Criterion) {
-    use axiom::renderer::AxiomRenderer;
-
-    let mut group = c.benchmark_group("headless_render");
-
-    // ── Cold path: fresh renderer → cache always empty ────────────
-    group.bench_function("composite_128x128_cold", |b| {
-        b.iter_batched(
-            || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let mut renderer = rt.block_on(AxiomRenderer::new_headless()).unwrap();
-                let tex = make_bench_texture_rgba();
-                renderer.add_window(1, (0.0, 0.0), (64.0, 64.0));
-                renderer.update_window_texture(1, 64, 64, &tex);
-                renderer
-            },
-            |mut renderer| {
-                // Cache miss — allocates projection buffer
-                black_box(renderer.render_to_headless_target(128, 128).unwrap());
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    // ── Hot path: call twice — first populates cache, second reuses │
-    group.bench_function("composite_128x128_hot", |b| {
-        b.iter_batched(
-            || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let mut renderer = rt.block_on(AxiomRenderer::new_headless()).unwrap();
-                let tex = make_bench_texture_rgba();
-                renderer.add_window(1, (0.0, 0.0), (64.0, 64.0));
-                renderer.update_window_texture(1, 64, 64, &tex);
-                // Warm: populate the projection cache (untimed)
-                renderer.render_to_headless_target(128, 128).unwrap();
-                renderer
-            },
-            |mut renderer| {
-                // Cache hit — projection buffer reused from warm call
-                black_box(renderer.render_to_headless_target(128, 128).unwrap());
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    group.finish();
-
-    // ── Throughput: N composites with warm cache (separate group) ─
-    let mut tp_group = c.benchmark_group("headless_render_throughput");
-    const BATCH: u32 = 100;
-    tp_group.throughput(criterion::Throughput::Elements(BATCH as u64));
-    tp_group.bench_function("composite_128x128", |b| {
-        b.iter_batched(
-            || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let mut renderer = rt.block_on(AxiomRenderer::new_headless()).unwrap();
-                let tex = make_bench_texture_rgba();
-                renderer.add_window(1, (0.0, 0.0), (64.0, 64.0));
-                renderer.update_window_texture(1, 64, 64, &tex);
-                // Warm: populate the projection cache (untimed)
-                renderer.render_to_headless_target(128, 128).unwrap();
-                renderer
-            },
-            |mut renderer| {
-                // Timed: BATCH cache-hit composites (projection buffer reused,
-                // window resources cached after first call)
-                for _ in 0..BATCH {
-                    black_box(renderer.render_to_headless_target(128, 128).unwrap());
-                }
-            },
-            BatchSize::SmallInput,
-        );
-    });
-    tp_group.finish();
-}
-
-/// Benchmark frame timing simulation
-fn bench_frame_timing(c: &mut Criterion) {
-    let mut group = c.benchmark_group("frame_timing");
-
-    group.bench_function("full_frame_simulation", |b| {
-        use axiom::config::{EffectsConfig, WorkspaceConfig};
-
-        b.iter_batched(
-            || {
-                // Setup simulated compositor state
-                let workspace_config = WorkspaceConfig::default();
-                let effects_config = EffectsConfig::default();
-
-                let mut workspaces = ScrollableWorkspaces::new(&workspace_config);
-                let mut effects = EffectsEngine::new(&effects_config).unwrap();
-
-                // Add some windows and animations to simulate real usage
-                for i in 1..=20 {
-                    workspaces.add_window(i);
-                    if i % 3 == 0 {
-                        effects.animate_window_move(
-                            i,
-                            (i as f32 * 10.0, i as f32 * 10.0),
-                            ((i + 10) as f32 * 10.0, (i + 10) as f32 * 10.0),
-                        );
-                    }
-                }
-
-                (workspaces, effects)
-            },
-            |(mut workspaces, mut effects)| {
-                // Simulate a full frame update
-                workspaces.update_animations();
-                effects.update().unwrap();
-
-                let layouts = workspaces.calculate_workspace_layouts();
-                black_box(layouts);
-
-                let stats = effects.get_performance_stats();
-                black_box(stats);
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    group.finish();
-}
-
 criterion_group!(
     benches,
     bench_workspace_scrolling,
     bench_window_layout,
-    bench_effects_engine,
     bench_configuration,
     bench_memory_operations,
     bench_concurrency,
-    bench_input_processing,
-    bench_frame_timing,
-    bench_headless_render
+    bench_input_processing
 );
 
 criterion_main!(benches);

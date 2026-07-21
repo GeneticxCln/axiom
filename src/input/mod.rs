@@ -91,7 +91,6 @@ pub enum CompositorAction {
     LaunchTerminal,
     LaunchLauncher,
     Quit,
-    Custom(String),
 }
 
 /// Processes input events and maps them to compositor actions
@@ -109,21 +108,8 @@ pub struct InputManager {
     /// Mouse state
     mouse_position: (f64, f64),
 
-    /// Gesture state for momentum scrolling
-    gesture_state: Option<GestureState>,
-
     /// Input configuration (for repeat rate, etc.)
     input_config: InputConfig,
-}
-
-#[derive(Debug, Clone)]
-// scaffolding for future momentum scrolling — fields are populated
-// in process_gesture_event() and will be read when momentum is wired.
-#[allow(dead_code)]
-struct GestureState {
-    start_time: std::time::Instant,
-    start_position: (f64, f64),
-    current_velocity: (f64, f64),
 }
 
 impl InputManager {
@@ -213,7 +199,6 @@ impl InputManager {
             mouse_bindings,
             active_modifiers: Vec::new(),
             mouse_position: (0.0, 0.0),
-            gesture_state: None,
             input_config: input_config.clone(),
         }
     }
@@ -374,14 +359,6 @@ impl InputManager {
             GestureType::Pan => {
                 // Smooth scrolling with pan gestures
                 debug!("🤏 Pan gesture: ({:.1}, {:.1})", delta_x, delta_y);
-
-                // Track gesture state for momentum
-                let now = std::time::Instant::now();
-                self.gesture_state = Some(GestureState {
-                    start_time: now,
-                    start_position: self.mouse_position,
-                    current_velocity: (delta_x, delta_y),
-                });
 
                 // Horizontal pan for workspace navigation
                 if delta_x.abs() > 10.0 {

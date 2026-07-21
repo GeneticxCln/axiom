@@ -23,34 +23,6 @@ momentum_friction = 0.95
 momentum_min_velocity = 1.0
 snap_threshold_px = 100.0
 
-[effects]
-enabled = true
-
-[effects.animations]
-enabled = true
-duration = 300
-curve = "ease-out"
-workspace_transition = 250
-window_animation = 200
-
-[effects.blur]
-enabled = true
-radius = 10
-intensity = 0.8
-window_backgrounds = true
-
-[effects.rounded_corners]
-enabled = true
-radius = 8
-antialiasing = 2
-
-[effects.shadows]
-enabled = true
-size = 20
-blur_radius = 10
-opacity = 0.6
-color = "#000000"
-
 [window]
 placement = "smart"
 focus_follows_mouse = false
@@ -85,10 +57,6 @@ mouse_forward = "scroll_right"
 mouse_middle = "toggle_floating"
 
 [output]
-# Preferred output order (left to right). Empty = use DRM enumeration order.
+# Preferred output order (left to right). Empty = use winit window order.
 # Example: order = ["HDMI-A-1", "DP-1"]
 order = []
-
-[xwayland]
-enabled = true
-display = 2

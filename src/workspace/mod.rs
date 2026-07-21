@@ -1106,7 +1106,7 @@ impl ScrollableWorkspaces {
     /// Only invalidates the layout cache when at least one tape's scroll
     /// position actually changed, so the hot path avoids unnecessary
     /// recomputation when the workspace is idle.
-    pub fn update_animations(&mut self) {
+    pub fn update_animations(&mut self) -> bool {
         let mut changed = false;
         for tape in self.tapes.values_mut() {
             changed |= tape.update_animations();
@@ -1114,6 +1114,7 @@ impl ScrollableWorkspaces {
         if changed {
             *self.cached_layouts.lock() = None;
         }
+        changed
     }
 
     /// Calculate layout rectangles for all visible windows across all tapes.

@@ -11,9 +11,7 @@
 
 use crate::config::AxiomConfig;
 use crate::decoration::DecorationManager;
-use crate::effects::EffectsEngine;
 use crate::input::InputManager;
-use crate::renderer::AxiomRenderer;
 use crate::window::WindowManager;
 use crate::workspace::ScrollableWorkspaces;
 use anyhow::Result;
@@ -26,30 +24,55 @@ use std::collections::{HashMap, HashSet};
 use std::os::unix::io::OwnedFd;
 use std::sync::{mpsc, Arc};
 
-// Re-export BackendKind from the drm module so the rest of the compositor
-// can reference `crate::backend::BackendKind` as documented in the config.
-pub use self::drm::{BackendKind, DrmBackend, DrmEventCollector};
+/// Backend kind selection for the Axiom compositor.
+///
+/// The compositor is winit-only (GLES rendering). `Noop` is a headless
+/// backend used by tests/CI that performs no rendering and creates no winit
+/// event loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    /// Nested-session Winit backend (default, development-friendly).
+    Winit,
+    /// Headless no-op backend (tests / CI).
+    Noop,
+}
+
+impl BackendKind {
+    pub fn from_config_str(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "winit" | "windowed" | "dev" => BackendKind::Winit,
+            "noop" | "test" | "headless" => BackendKind::Noop,
+            unknown => {
+                warn!(
+                    "Unknown backend kind '{}' — falling back to 'winit'. \
+                     Valid values: winit, noop (and aliases)",
+                    unknown
+                );
+                BackendKind::Winit
+            }
+        }
+    }
+}
 
 use smithay::{
     backend::{
         input::{
-            AbsolutePositionEvent, Axis, AxisSource, InputEvent, KeyboardKeyEvent,
-            PointerAxisEvent, PointerButtonEvent,
+            InputEvent,
         },
-        renderer::{gles::GlesRenderer, utils::on_commit_buffer_handler},
+        renderer::{gles::{GlesRenderer, GlesTexture}, element::texture::TextureBuffer, utils::on_commit_buffer_handler},
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
     delegate_compositor, delegate_data_device, delegate_foreign_toplevel_list, delegate_seat,
     delegate_shm, delegate_xdg_shell,
-    input::{
-        keyboard::{FilterResult, XkbConfig},
-        pointer::{AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, MotionEvent},
-        Seat, SeatHandler, SeatState,
-    },
+     input::{
+          keyboard::{XkbConfig},
+          pointer::{CursorIcon, CursorImageStatus},
+          Seat, SeatHandler, SeatState,
+      },
     output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
-    reexports::wayland_server::{protocol::wl_seat, Display, ListeningSocket},
-    utils::{Point, Serial, Transform, SERIAL_COUNTER},
+    reexports::wayland_server::{protocol::wl_seat, Display, DisplayHandle, ListeningSocket},
+    utils::{Serial, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -60,8 +83,9 @@ use smithay::{
         output::OutputHandler,
         selection::{
             data_device::{
-                request_data_device_client_selection, set_data_device_selection,
-                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+                request_data_device_client_selection, set_data_device_focus,
+                ClientDndGrabHandler, DataDeviceHandler,
+                DataDeviceState, ServerDndGrabHandler,
             },
             SelectionHandler, SelectionSource, SelectionTarget,
         },
@@ -75,31 +99,23 @@ use smithay::{
 };
 
 use wayland_server::{
-    backend::{ClientData, ClientId, DisconnectReason},
-    protocol::{wl_buffer, wl_surface::WlSurface},
+    backend::{ClientData, ClientId, DisconnectReason, ObjectId},
+    protocol::{
+        wl_buffer, wl_data_source::WlDataSource, wl_output::WlOutput,
+        wl_surface::WlSurface,
+    },
     Client, Resource,
 };
 
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
-
-mod clipboard_bridge;
-pub mod drm;
-mod render_bridge;
-mod xwayland_dispatch;
-pub mod xwm;
-use self::clipboard_bridge::{
-    create_pipe, spawn_clipboard_read_worker, write_selection_bytes_to_fd,
-};
-use self::render_bridge::popup_render_id;
-use self::xwm::AxiomXwm;
 
 // Type alias to reduce complexity of the Rc<RefCell<Option<...>>> pattern
 // used for passing buffer data out of the SHM commit closure.
 type CachedBufferData = std::rc::Rc<std::cell::RefCell<Option<(Vec<u8>, i32, i32)>>>;
 type ClipboardUpdate = Vec<u8>;
 
-/// Server-side decorations are now rendered via the WGPU solid-color pipeline
-/// and the font atlas text pipeline. Title text rendering falls back gracefully
+/// Server-side decorations are rendered via the GLES solid-color pipeline
+/// (and text when system fonts are available). Title text rendering falls back gracefully
 /// when system fonts are unavailable (titlebars still render with solid colors
 /// and buttons).
 fn backend_prefers_server_side_decorations() -> bool {
@@ -112,6 +128,18 @@ fn backend_prefers_server_side_decorations() -> bool {
 fn negotiated_xdg_decoration_mode() -> Mode {
     Mode::ServerSide
 }
+
+// Submodules split out of this file for maintainability. Each is a child of
+// `backend`, so it can read the private fields of `State` and
+// `AxiomSmithayBackendReal` (descendant modules see ancestor privates).
+mod render;
+mod input;
+mod clipboard;
+
+// The clipboard selection-extraction workers now live in `clipboard`, but the
+// `SelectionHandler` trait impl (incl. `new_selection`) must stay here because
+// it is a trait method of `State`.
+use clipboard::{create_clipboard_pipe, spawn_clipboard_read_worker, write_selection_bytes_to_fd};
 
 // ============================================================================
 // Surface Data
@@ -172,6 +200,9 @@ pub struct State {
     pub shm_state: ShmState,
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
+    /// Handle to the Wayland display, used to keep the data device
+    /// (clipboard + drag-and-drop offers) focused on the right client.
+    pub display_handle: Option<DisplayHandle>,
     pub xdg_decoration_state: Option<XdgDecorationState>,
     pub fractional_scale_manager_state: FractionalScaleManagerState,
 
@@ -182,28 +213,19 @@ pub struct State {
     pub config: AxiomConfig,
     pub window_manager: Arc<parking_lot::RwLock<WindowManager>>,
     pub workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
-    pub effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
     pub input_manager: Arc<parking_lot::RwLock<InputManager>>,
-    pub renderer: Option<Arc<parking_lot::RwLock<AxiomRenderer>>>,
 
     // Tracking
     pub surfaces: HashMap<u32, SurfaceData>,
     pub window_map: HashMap<u64, u32>,
     pub next_window_id: u64,
 
-    /// Maps X11 window IDs to Axiom window IDs for XWayland clients.
-    pub x11_window_map: HashMap<u32, u64>,
-
     // Outputs
     pub outputs: Vec<Output>,
 
     /// Per-output DPI scale factors keyed by output name (e.g. "eDP-1" → 2.0).
-    /// Populated by the DRM backend during `initialize_drm()`; empty in
-    /// winit/noop mode where scale is implicitly 1.0.
+    /// Empty in winit/noop mode where scale is implicitly 1.0.
     pub output_scale_factors: HashMap<String, f64>,
-
-    // XWayland (optional)
-    pub xwm: Option<AxiomXwm>,
 
     /// Server-side decoration manager for titlebar/button rendering.
     /// Shared with [`AxiomCompositor`](crate::compositor::AxiomCompositor).
@@ -226,10 +248,12 @@ pub struct State {
     pub pointer_x: f64,
     pub pointer_y: f64,
 
-    // Raw SHM buffer data cache for pending WGPU texture uploads
-    // (stored in commit handler, consumed in render() via renderer.upload_shm_to_wgpu)
-    pub buffer_cache: HashMap<u32, Vec<u8>>,
-    pub buffer_cache_dimensions: HashMap<u32, (i32, i32)>,
+    // Imported client buffer textures, keyed by the WlBuffer's ObjectId so a
+    // client's pool of buffers (e.g. double-buffering) is uploaded to the GPU
+    // exactly once and reused across frames. Evicted on buffer_destroyed.
+    // ponytail: keying by buffer identity means transient buffers can linger
+    // until destroy; fine for a compositor, add LRU eviction only if it grows.
+    pub texture_cache: HashMap<ObjectId, TextureBuffer<GlesTexture>>,
 
     /// Tracks whether we've sent the initial configure for a surface.
     /// Used to throttle redundant configure events when layout hasn't changed.
@@ -257,6 +281,13 @@ pub struct State {
     /// Receiver drained in the main backend loop to refresh `clipboard_cache`
     /// without blocking the compositor thread on pipe reads.
     clipboard_update_rx: mpsc::Receiver<ClipboardUpdate>,
+
+    /// Set when a client offers a new clipboard selection in `new_selection`.
+    /// The actual data is fetched on the next cycle (see `maybe_fetch_clipboard`)
+    /// because Smithay only registers the selection in `seat_data` *after*
+    /// `new_selection` returns — `request_data_device_client_selection` would
+    /// find nothing if called directly from `new_selection`.
+    clipboard_fetch_pending: bool,
 
     /// Active Wayland selection source (when a client owns the clipboard).
     /// Stored so we can serve data to X11 and re-offer to other Wayland clients.
@@ -306,18 +337,45 @@ impl State {
         .or_else(|| mime_types.first().cloned())
     }
 
-    fn drain_clipboard_updates(&mut self) {
-        while let Ok(data) = self.clipboard_update_rx.try_recv() {
-            debug!(
-                "📋 Clipboard cache refreshed from Wayland selection ({} bytes)",
-                data.len()
-            );
-            self.clipboard_cache = Some(data);
-            if let Some(xwm) = self.xwm.as_mut() {
-                if let Err(e) = xwm.own_selection() {
-                    warn!("⚠️ Failed to claim X11 clipboard ownership: {}", e);
+    /// Fetch the offered selection payload into the clipboard cache. Called
+    /// after a `new_selection` flag (set during `dispatch_clients`, once
+    /// Smithay has registered the selection in `seat_data`). Spawns the pipe
+    /// reader that streams the client's data into `clipboard_cache`.
+    fn maybe_fetch_clipboard(&mut self) {
+        if !self.clipboard_fetch_pending {
+            return;
+        }
+        self.clipboard_fetch_pending = false;
+
+        let mime_types = self
+            .clipboard_source
+            .as_ref()
+            .map(|s| s.mime_types())
+            .unwrap_or_default();
+        let Some(mime) = Self::preferred_text_mime_type(&mime_types) else {
+            return;
+        };
+
+        let seat = self.seat.clone();
+        match create_clipboard_pipe() {
+            Ok((read_fd, write_fd)) => match request_data_device_client_selection(
+                &seat,
+                mime.clone(),
+                write_fd,
+            ) {
+                Ok(()) => {
+                    debug!(
+                        "📋 Requested Wayland clipboard payload via MIME {}",
+                        mime
+                    );
+                    spawn_clipboard_read_worker(read_fd, self.clipboard_update_tx.clone());
                 }
-            }
+                Err(e) => warn!(
+                    "⚠️ Failed requesting Wayland clipboard payload for MIME {}: {:?}",
+                    mime, e
+                ),
+            },
+            Err(e) => warn!("⚠️ Failed creating clipboard pipe: {}", e),
         }
     }
 
@@ -347,7 +405,6 @@ impl State {
             .write()
             .set_focused_window(focused_window_id);
         let mut tracked_ids: Vec<u64> = self.window_map.keys().copied().collect();
-        tracked_ids.extend(self.x11_window_map.values().copied());
         tracked_ids.sort_unstable();
         tracked_ids.dedup();
         let mut decorations = self.decoration_manager.write();
@@ -421,9 +478,6 @@ impl State {
             .add_window(visible_title.clone());
         self.workspace_manager.write().add_window(window_id);
 
-        // Trigger window open animation (spring-physics scale + fade-in)
-        self.effects_engine.write().animate_window_open(window_id);
-
         let surface_data = SurfaceData {
             window_id: Some(window_id),
             title,
@@ -446,43 +500,6 @@ impl State {
         window_id
     }
 
-    /// Create a new Axiom window for an X11 client (via XWayland).
-    pub fn create_window_from_x11(
-        &mut self,
-        x11_window_id: u32,
-        title: String,
-        class: Option<String>,
-    ) -> u64 {
-        info!(
-            "Creating window from X11 window {} (title: \"{}\", class: {:?})",
-            x11_window_id, title, class
-        );
-
-        let visible_title = if title.starts_with("X11 Window #") {
-            class.clone().unwrap_or(title.clone())
-        } else {
-            title.clone()
-        };
-
-        let window_id = self
-            .window_manager
-            .write()
-            .add_window(visible_title.clone());
-        self.workspace_manager.write().add_window(window_id);
-        self.effects_engine.write().animate_window_open(window_id);
-
-        self.decoration_manager.write().add_window(
-            window_id,
-            visible_title,
-            backend_prefers_server_side_decorations(),
-            640,
-        );
-
-        self.x11_window_map.insert(x11_window_id, window_id);
-
-        window_id
-    }
-
     pub fn destroy_window(&mut self, surface_id: u32) {
         // Remove the ForeignToplevelHandle for external taskbars/docks
         if let Some(handle) = self.toplevel_handles.remove(&surface_id) {
@@ -494,8 +511,6 @@ impl State {
         // Clean up configure tracking
         self.configured_sizes.remove(&surface_id);
         self.pending_configure.remove(&surface_id);
-        self.buffer_cache.remove(&surface_id);
-        self.buffer_cache_dimensions.remove(&surface_id);
 
         if let Some(data) = self.surfaces.remove(&surface_id) {
             if let Some(window_id) = data.window_id {
@@ -503,10 +518,6 @@ impl State {
                 self.window_map.remove(&window_id);
                 self.window_manager.write().remove_window(window_id);
                 self.workspace_manager.write().remove_window(window_id);
-                self.effects_engine.write().remove_window(window_id);
-                if let Some(ref renderer) = self.renderer {
-                    renderer.write().remove_window(window_id);
-                }
                 self.decoration_manager.write().remove_window(window_id);
             }
         }
@@ -528,10 +539,15 @@ impl State {
     }
 
     /// Return the DPI scale factor for the currently focused output.
-    /// Reads directly from the focused workspace tape to avoid a
-    /// duplicate source of truth. Falls back to 1.0.
+    /// Returns the scale factor of the focused output. The source of truth is
+    /// the Output's own scale (tracked in `output_scale_factors`), not the
+    /// workspace tape copy. Falls back to 1.0 when no output is registered.
     pub fn focused_output_scale(&self) -> f64 {
-        self.workspace_manager.read().active_tape().scale_factor()
+        self.output_scale_factors
+            .values()
+            .next()
+            .copied()
+            .unwrap_or(1.0)
     }
 
     /// Prune surfaces and toplevels whose WlSurface is no longer alive
@@ -546,9 +562,6 @@ impl State {
 
         let count = dead_surface_ids.len();
         for surface_id in dead_surface_ids {
-            // Drop cached buffer data
-            self.buffer_cache.remove(&surface_id);
-            self.buffer_cache_dimensions.remove(&surface_id);
             self.destroy_window(surface_id);
         }
 
@@ -567,7 +580,12 @@ impl State {
 // ============================================================================
 
 impl BufferHandler for State {
-    fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
+    fn buffer_destroyed(&mut self, buffer: &wl_buffer::WlBuffer) {
+        // Free the GPU texture we cached for this buffer (keyed by ObjectId).
+        // Without this the GlesTexture (Arc<GlesTextureInternal>) keeps the GL
+        // texture alive forever, leaking it when clients cycle through buffers.
+        self.texture_cache.remove(&buffer.id());
+    }
 }
 
 impl CompositorHandler for State {
@@ -576,10 +594,21 @@ impl CompositorHandler for State {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client
-            .get_data::<ClientState>()
-            .expect("client state not initialized")
-            .compositor_state
+        match client.get_data::<ClientState>() {
+            Some(state) => &state.compositor_state,
+            None => {
+                // Smithay initializes ClientState for every connected client, so
+                // this branch is defensive only. Return a shared fallback rather
+                // than panicking inside a protocol handler (which would kill the
+                // whole compositor).
+                log::error!(
+                    "client_compositor_state: client has no ClientState; using fallback"
+                );
+                static FALLBACK: std::sync::OnceLock<CompositorClientState> =
+                    std::sync::OnceLock::new();
+                FALLBACK.get_or_init(CompositorClientState::default)
+            }
+        }
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -596,14 +625,13 @@ impl CompositorHandler for State {
             popup.committed = true;
         }
 
-        // Upload SHM buffer to wgpu renderer and cache raw data for GL upload
+        // Upload SHM buffer to the GLES renderer and cache raw data for GL upload
         let window_id =
             self.window_map
                 .iter()
                 .find_map(|(&wid, &sid)| if sid == surface_id { Some(wid) } else { None });
 
-        if let Some(wid) = window_id {
-            let renderer = self.renderer.clone();
+        if window_id.is_some() {
             let buffer_cache_sid = surface_id;
 
             // Use Rc<RefCell> to share mutable state with the closure without
@@ -618,10 +646,6 @@ impl CompositorHandler for State {
 
                 if let Some(BufferAssignment::NewBuffer(wl_buffer)) = buffer {
                     let _ = with_buffer_contents(wl_buffer, |ptr, len, spec| {
-                        let width = spec.width as u32;
-                        let height = spec.height as u32;
-                        let stride = spec.stride as usize;
-
                         if len > 0 {
                             // SAFETY: Smithay's `with_buffer_contents` callback
                             // guarantees that `ptr` points to `len` bytes of
@@ -629,15 +653,6 @@ impl CompositorHandler for State {
                             // closure. The slice is immediately copied (to_vec)
                             // before the closure returns, so no aliasing occurs.
                             let data = unsafe { std::slice::from_raw_parts(ptr, len) };
-
-                            // Upload to wgpu (if renderer is available)
-                            if stride as u32 >= width * 4 && len >= (height as usize * stride) {
-                                if let Some(ref renderer) = renderer {
-                                    renderer
-                                        .write()
-                                        .update_window_texture(wid, width, height, data);
-                                }
-                            }
 
                             // Cache for GL upload
                             cached_clone.borrow_mut().replace((
@@ -657,13 +672,12 @@ impl CompositorHandler for State {
                 if let Some(sd) = self.surfaces.get_mut(&buffer_cache_sid) {
                     sd.size = (w, h);
                 }
-                self.buffer_cache.insert(buffer_cache_sid, buf_data);
-                self.buffer_cache_dimensions
-                    .insert(buffer_cache_sid, (w, h));
+                // ponytail: raw SHM bytes were previously cached here for a
+                // GL upload that render() never read — dropped as dead.
+                let _ = buf_data;
             }
         } else if self.popups.contains_key(&surface_id) {
-            // Popup buffer upload — cached for WGPU texture upload via stage_wgpu_scene_from_state
-            let buffer_cache_sid = surface_id;
+            // Popup buffer upload — cached for later GL upload
             let cached_data: CachedBufferData =
                 CachedBufferData::new(std::cell::RefCell::new(None));
             let cached_clone = cached_data.clone();
@@ -689,9 +703,9 @@ impl CompositorHandler for State {
 
             let taken = cached_data.borrow_mut().take();
             if let Some((buf_data, w, h)) = taken {
-                self.buffer_cache.insert(buffer_cache_sid, buf_data);
-                self.buffer_cache_dimensions
-                    .insert(buffer_cache_sid, (w, h));
+                // ponytail: previously cached raw SHM bytes for a GL upload
+                // that render() never consumed — dropped as dead.
+                let _ = (buf_data, w, h);
             }
         }
     }
@@ -712,9 +726,16 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {
-        let focused_window_id = _focused.and_then(|surface| self.window_id_for_surface(surface));
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        let focused_window_id = focused.and_then(|surface| self.window_id_for_surface(surface));
         self.update_focus_state(focused_window_id);
+        // Keep the Wayland data device (clipboard + drag-and-drop offers)
+        // focused on the client under the keyboard focus, so a DnD drop target
+        // receives the source's data offer.
+        if let Some(dh) = &self.display_handle {
+            let client = focused.and_then(|s| s.client());
+            set_data_device_focus(dh, seat, client);
+        }
         if let Some(window_id) = focused_window_id {
             debug!("🎯 Wayland focus changed to window {}", window_id);
         }
@@ -906,7 +927,7 @@ impl SelectionHandler for State {
         &mut self,
         ty: SelectionTarget,
         source: Option<SelectionSource>,
-        seat: Seat<Self>,
+        _seat: Seat<Self>,
     ) {
         match ty {
             SelectionTarget::Clipboard => {
@@ -917,46 +938,18 @@ impl SelectionHandler for State {
                         mime_types.len(),
                         mime_types
                     );
-                    if let Some(xwm) = self.xwm.as_mut() {
-                        if let Err(e) = xwm.own_selection() {
-                            warn!("⚠️ Failed to claim X11 clipboard ownership: {}", e);
-                        }
-                    }
                     self.clipboard_source = Some(src.clone());
-
-                    if let Some(mime) = Self::preferred_text_mime_type(&mime_types) {
-                        match create_pipe() {
-                            Ok((read_fd, write_fd)) => {
-                                match request_data_device_client_selection(
-                                    &seat,
-                                    mime.clone(),
-                                    write_fd,
-                                ) {
-                                    Ok(()) => {
-                                        debug!(
-                                            "📋 Requested Wayland clipboard payload for X11 bridge via MIME {}",
-                                            mime
-                                        );
-                                        spawn_clipboard_read_worker(
-                                            read_fd,
-                                            self.clipboard_update_tx.clone(),
-                                        );
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            "⚠️ Failed requesting Wayland clipboard payload for MIME {}: {:?}",
-                                            mime, e
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => warn!("⚠️ Failed creating clipboard bridge pipe: {}", e),
-                        }
-                    }
+                    // Defer the actual data fetch: Smithay registers the
+                    // selection in `seat_data` only *after* `new_selection`
+                    // returns, so `request_data_device_client_selection` would
+                    // find nothing if invoked here. Flag it and fetch on the
+                    // next cycle, once the selection is registered.
+                    self.clipboard_fetch_pending = true;
                 } else {
                     debug!("📋 Wayland clipboard cleared");
                     self.clipboard_source = None;
                     self.clipboard_cache = None;
+                    self.clipboard_fetch_pending = false;
                 }
             }
             SelectionTarget::Primary => {
@@ -998,12 +991,39 @@ impl DataDeviceHandler for State {
     }
 }
 
-impl ClientDndGrabHandler for State {}
-impl ServerDndGrabHandler for State {
-    fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
+impl ClientDndGrabHandler for State {
+    fn started(
+        &mut self,
+        _source: Option<WlDataSource>,
+        _icon: Option<WlSurface>,
+        _seat: Seat<Self>,
+    ) {
+        debug!("🖐️ Client-initiated drag-and-drop started");
+    }
+
+    fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {
+        debug!("🖐️ Client-initiated drag-and-drop finished");
+    }
 }
 
-impl OutputHandler for State {}
+impl ServerDndGrabHandler for State {
+    fn send(&mut self, mime_type: String, fd: OwnedFd, _seat: Seat<Self>) {
+        // Axiom does not currently initiate server-side drags, so there is no
+        // source payload to stream. Drop the fd so the requesting client does
+        // not block forever waiting on data that will never arrive.
+        debug!(
+            "🖐️ DnD send requested for {} but no server drag source is configured",
+            mime_type
+        );
+        drop(fd);
+    }
+}
+
+impl OutputHandler for State {
+    fn output_bound(&mut self, _output: Output, _wl_output: WlOutput) {
+        debug!("🖥️ Client bound a wl_output instance");
+    }
+}
 
 impl FractionalScaleHandler for State {
     fn new_fractional_scale(&mut self, surface: WlSurface) {
@@ -1089,20 +1109,13 @@ pub struct AxiomSmithayBackendReal {
     pub display: Display<State>,
     pub socket_name: String,
     pub state: State,
-    /// The resolved backend kind (winit / drm / noop).
+    /// The resolved backend kind (winit / noop).
     pub backend_kind: BackendKind,
     pub winit_backend: Option<WinitGraphicsBackend<GlesRenderer>>,
     pub winit_event_loop: Option<WinitEventLoop>,
-    /// DRM backend state (scaffolding; `Some` only when `backend_kind == Drm`).
-    pub drm_backend: Option<DrmBackend>,
-    /// libseat session for privileged device access (DRM, input).
-    /// `None` when libseat/seatd is not available.
-    #[allow(dead_code)]
-    session: Option<libseat::Seat>,
     pub clients: Vec<Client>,
     /// Wayland listening socket — kept alive so clients can connect
-    /// (Smithay's display.dispatch_clients polls it internally)
-    #[allow(dead_code)]
+    /// (accepted each cycle in `run_one_cycle_common`).
     listener: Option<ListeningSocket>,
     /// Set to `true` when a decoration button press was consumed (e.g.
     /// close/minimize). The subsequent release event must be consumed too
@@ -1144,9 +1157,7 @@ impl AxiomSmithayBackendReal {
         config: AxiomConfig,
         window_manager: Arc<parking_lot::RwLock<WindowManager>>,
         workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
-        effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
         input_manager: Arc<parking_lot::RwLock<InputManager>>,
-        renderer: Option<Arc<parking_lot::RwLock<AxiomRenderer>>>,
         decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
     ) -> Result<Self> {
         // Use a dummy display (bound to "null" — never dispatched)
@@ -1170,22 +1181,19 @@ impl AxiomSmithayBackendReal {
             shm_state,
             seat_state,
             data_device_state,
+            display_handle: Some(display.handle()),
             xdg_decoration_state: None,
             fractional_scale_manager_state,
             seat,
             config,
             window_manager,
             workspace_manager,
-            effects_engine,
             input_manager,
-            renderer,
             surfaces: HashMap::new(),
             window_map: HashMap::new(),
             next_window_id: 1,
-            x11_window_map: HashMap::new(),
             outputs: Vec::new(),
             output_scale_factors: HashMap::new(),
-            xwm: None,
             decoration_manager: decoration_manager.clone(),
             toplevels: HashMap::new(),
             toplevel_handles: HashMap::new(),
@@ -1196,8 +1204,7 @@ impl AxiomSmithayBackendReal {
             window_height: 1080,
             pointer_x: 0.0,
             pointer_y: 0.0,
-            buffer_cache: HashMap::new(),
-            buffer_cache_dimensions: HashMap::new(),
+            texture_cache: HashMap::new(),
             configured_sizes: HashMap::new(),
             pending_configure: HashSet::new(),
             popups: HashMap::new(),
@@ -1206,6 +1213,7 @@ impl AxiomSmithayBackendReal {
             clipboard_update_tx,
             clipboard_update_rx,
             clipboard_source: None,
+            clipboard_fetch_pending: false,
             cursor_icon: None,
         };
 
@@ -1216,8 +1224,6 @@ impl AxiomSmithayBackendReal {
             backend_kind: BackendKind::Noop,
             winit_backend: None,
             winit_event_loop: None,
-            drm_backend: None,
-            session: None,
             clients: Vec::new(),
             listener: None,
             decoration_consumed_press: false,
@@ -1230,9 +1236,7 @@ impl AxiomSmithayBackendReal {
         config: AxiomConfig,
         window_manager: Arc<parking_lot::RwLock<WindowManager>>,
         workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
-        effects_engine: Arc<parking_lot::RwLock<EffectsEngine>>,
         input_manager: Arc<parking_lot::RwLock<InputManager>>,
-        renderer: Arc<parking_lot::RwLock<AxiomRenderer>>,
         decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
     ) -> Result<Self> {
         info!("Initializing Smithay 0.7 Backend...");
@@ -1288,22 +1292,19 @@ impl AxiomSmithayBackendReal {
             shm_state,
             seat_state,
             data_device_state,
+            display_handle: Some(display.handle()),
             xdg_decoration_state,
             fractional_scale_manager_state,
             seat,
             config,
             window_manager,
             workspace_manager,
-            effects_engine,
             input_manager,
-            renderer: Some(renderer),
             surfaces: HashMap::new(),
             window_map: HashMap::new(),
             next_window_id: 1,
-            x11_window_map: HashMap::new(),
             outputs: vec![output],
             output_scale_factors: HashMap::new(),
-            xwm: None,
             decoration_manager: decoration_manager.clone(),
             toplevels: HashMap::new(),
             toplevel_handles: HashMap::new(),
@@ -1314,8 +1315,7 @@ impl AxiomSmithayBackendReal {
             window_height: 1080,
             pointer_x: 0.0,
             pointer_y: 0.0,
-            buffer_cache: HashMap::new(),
-            buffer_cache_dimensions: HashMap::new(),
+            texture_cache: HashMap::new(),
             configured_sizes: HashMap::new(),
             pending_configure: HashSet::new(),
             popups: HashMap::new(),
@@ -1324,28 +1324,13 @@ impl AxiomSmithayBackendReal {
             clipboard_update_tx,
             clipboard_update_rx,
             clipboard_source: None,
+            clipboard_fetch_pending: false,
             cursor_icon: None,
         };
 
         let socket_name = format!("wayland-axiom-{}", std::process::id());
         let listener = ListeningSocket::bind(&socket_name)?;
         info!("📡 Wayland socket: {}", socket_name);
-
-        // Initialize DRM backend only when drm kind is selected.
-        let drm_backend = match backend_kind {
-            BackendKind::Drm => {
-                let mut drm = DrmBackend::new();
-                let _ = drm.initialize().unwrap_or_else(|e| {
-                    warn!(
-                        "DRM backend initialization failed: {} — proceeding with DRM stub",
-                        e
-                    );
-                    0
-                });
-                Some(drm)
-            }
-            _ => None,
-        };
 
         Ok(Self {
             display,
@@ -1354,8 +1339,6 @@ impl AxiomSmithayBackendReal {
             backend_kind,
             winit_backend: None,
             winit_event_loop: None,
-            drm_backend,
-            session: None,
             clients: Vec::new(),
             listener: Some(listener),
             decoration_consumed_press: false,
@@ -1363,11 +1346,10 @@ impl AxiomSmithayBackendReal {
         })
     }
 
-    /// Initialize the selected backend (winit / drm / noop).
+    /// Initialize the selected backend (winit / noop).
     pub fn initialize(&mut self) -> Result<()> {
         match self.backend_kind {
             BackendKind::Winit => self.initialize_winit(),
-            BackendKind::Drm => self.initialize_drm(),
             BackendKind::Noop => {
                 info!("Noop backend selected — compositor will run headless");
                 Ok(())
@@ -1405,29 +1387,15 @@ impl AxiomSmithayBackendReal {
                 Some(smithay_output_scale(host_scale)),
                 None,
             );
+            // Track the output's scale as the source of truth for
+            // `focused_output_scale` (see that method).
+            self.state
+                .output_scale_factors
+                .insert("Axiom-Output-0".into(), host_scale);
         }
 
         self.winit_backend = Some(backend);
         self.winit_event_loop = Some(event_loop);
-
-        // Create a WGPU surface from the winit window for direct GPU compositing
-        if let Some(ref renderer) = self.state.renderer {
-            let instance = renderer.read().instance();
-            let window = self.winit_backend.as_ref().unwrap().window();
-            let surface = unsafe {
-                // SAFETY: window outlives surface — see drop order:
-                // state (contains renderer → surface) is dropped before
-                // winit_backend (contains window). Transmute from `'_` to `'static`.
-                let s = instance.create_surface(window)?;
-                std::mem::transmute::<wgpu::Surface<'_>, wgpu::Surface<'static>>(s)
-            };
-            let w = window_size.w as u32;
-            let h = window_size.h as u32;
-            renderer
-                .write()
-                .add_output("primary".to_string(), surface, w, h);
-            info!("🎨 WGPU surface created from winit window ({}x{})", w, h);
-        }
 
         let (repeat_delay, repeat_rate) = State::keyboard_repeat_settings(&self.state.config);
         let _keyboard =
@@ -1436,6 +1404,7 @@ impl AxiomSmithayBackendReal {
                 .add_keyboard(XkbConfig::default(), repeat_delay, repeat_rate)?;
 
         self.state.seat.add_pointer();
+        self.state.seat.add_touch();
 
         info!("✅ Input devices registered with seat");
 
@@ -1446,266 +1415,13 @@ impl AxiomSmithayBackendReal {
         Ok(())
     }
 
-    /// Initialize the DRM/KMS backend.
-    ///
-    /// Opens the DRM device, finds ALL connected displays, sets up GBM-backed
-    /// modesetting for each, creates a Smithay `Output` per display with actual
-    /// EDID physical dimensions and DPI scale factor, creates a workspace tape
-    /// per output, and initialises the libinput + udev hotplug contexts.
-    fn initialize_drm(&mut self) -> Result<()> {
-        info!("🖥️ Initializing DRM/KMS backend...");
 
-        // Try to open a libseat session for DRM master + device access.
-        // If seatd/logind is not available, session stays None and the
-        // backend falls back to direct device opening (requires root).
-        self.session = match libseat::Seat::open(|_seat, event| match event {
-            libseat::SeatEvent::Enable => info!("Session activated"),
-            libseat::SeatEvent::Disable => info!("Session deactivated"),
-        }) {
-            Ok(mut seat) => {
-                info!("✅ libseat session opened: {}", seat.name());
-                // Open the DRM card through the session so we get proper
-                // DRM master access without requiring root.
-                Some(seat)
-            }
-            Err(e) => {
-                warn!(
-                    "⚠️ libseat not available ({}): DRM will use direct device access",
-                    e
-                );
-                None
-            }
-        };
 
-        if let Some(ref mut drm) = self.drm_backend {
-            drm.session = self.session.take();
-            drm.initialize()?;
-        } else {
-            warn!("DRM backend selected but DrmBackend state is missing — re-probing");
-            let mut drm = DrmBackend::new();
-            drm.session = self.session.take();
-            drm.initialize()?;
-            self.drm_backend = Some(drm);
-        }
-
-        // Replace the hardcoded Output from new() with actual KMS outputs.
-        self.state.outputs.clear();
-
-        // Create Smithay Output objects + workspace tapes per KMS output.
-        // Outputs are currently arranged as a simple horizontal virtual desktop.
-        if let Some(ref drm) = self.drm_backend {
-            let dh = self.display.handle();
-            let outputs = drm.kms_outputs();
-            let output_names: Vec<String> = outputs
-                .iter()
-                .enumerate()
-                .map(|(i, kms_out)| normalized_output_name(&kms_out.name, i))
-                .collect();
-            for (i, kms_out) in outputs.iter().enumerate() {
-                let output_name = output_names[i].clone();
-
-                let physical_mm_width = kms_out.physical_width_mm as i32;
-                let physical_mm_height = kms_out.physical_height_mm as i32;
-                let phys_size = if physical_mm_width > 0 && physical_mm_height > 0 {
-                    (physical_mm_width, physical_mm_height).into()
-                } else {
-                    // Fallback for missing EDID: estimate from 96 DPI.
-                    (
-                        (kms_out.width as i32 * 254 / 960).max(1),
-                        (kms_out.height as i32 * 254 / 960).max(1),
-                    )
-                        .into()
-                };
-
-                let output = Output::new(
-                    output_name.clone(),
-                    PhysicalProperties {
-                        size: phys_size,
-                        subpixel: Subpixel::Unknown,
-                        make: "Axiom".into(),
-                        model: format!("Display-{}", i),
-                    },
-                );
-                let mode = OutputMode {
-                    size: (kms_out.width as i32, kms_out.height as i32).into(),
-                    refresh: kms_out.mode.vrefresh() as i32,
-                };
-                output.change_current_state(
-                    Some(mode),
-                    Some(Transform::Normal),
-                    Some(smithay_output_scale(kms_out.scale_factor)),
-                    None,
-                );
-                output.create_global::<State>(&dh);
-
-                self.state.outputs.push(output);
-                self.state
-                    .output_scale_factors
-                    .insert(output_name.clone(), kms_out.scale_factor);
-
-                // Create/update a workspace tape for this output with the
-                // correct DPI scale factor and per-output viewport size.
-                {
-                    let mut wm = self.state.workspace_manager.write();
-                    let tape = wm.ensure_tape(&output_name);
-                    tape.set_scale_factor(kms_out.scale_factor);
-                    tape.set_viewport_size(kms_out.width as f64, kms_out.height as f64);
-                }
-
-                info!(
-                    "Output '{}': {}x{} @ {:.1}x scale, {}x{}mm physical",
-                    output_name,
-                    kms_out.width,
-                    kms_out.height,
-                    kms_out.scale_factor,
-                    physical_mm_width,
-                    physical_mm_height,
-                );
-            }
-
-            {
-                let mut wm = self.state.workspace_manager.write();
-                wm.sync_tapes_with_outputs(&output_names, &self.state.config.output.order);
-            }
-
-            let focused_name = self.state.workspace_manager.read().focused_output.clone();
-            let (virtual_width, virtual_height) =
-                self.state.workspace_manager.read().virtual_desktop_size();
-            self.state.window_width = virtual_width;
-            self.state.window_height = virtual_height;
-            info!(
-                "Virtual desktop dimensions: {}x{} (focused output: {})",
-                virtual_width, virtual_height, focused_name,
-            );
-        }
-
-        info!("DRM backend initialized with libinput udev seat discovery");
-
-        // Register a keyboard seat for compatibility even in DRM mode.
-        let (repeat_delay, repeat_rate) = State::keyboard_repeat_settings(&self.state.config);
-        let _keyboard = self
-            .state
-            .seat
-            .add_keyboard(XkbConfig::default(), repeat_delay, repeat_rate)
-            .map_err(|e| anyhow::anyhow!("Failed to add DRM keyboard: {:?}", e))?;
-
-        self.state.seat.add_pointer();
-
-        // Initialize udev DRM hotplug monitor.
-        self.init_drm_hotplug_monitor();
-
-        Ok(())
-    }
-
-    /// Set up a udev monitor for the "drm" subsystem to detect connector
-    /// hotplug events (monitor plugged/unplugged). The monitor FD is
-    /// registered with calloop for async notification. When a hotplug
-    /// event fires, [`run_one_cycle_drm`] triggers re-enumeration of
-    /// outputs without restarting the compositor.
-    fn init_drm_hotplug_monitor(&mut self) {
-        if let Some(ref mut drm) = self.drm_backend {
-            drm.init_udev_monitor();
-        }
-    }
-
-    /// Synchronize Smithay Output objects and workspace tapes with the
-    /// DRM KMS state after a hotplug event.
-    ///
-    /// Rebuilds the Smithay output list from the current KMS state and then
-    /// synchronizes workspace tapes against the set of live output IDs. Stale
-    /// tapes are removed, and any windows they contained are migrated into the
-    /// fallback live tape so hotplug does not silently orphan them.
-    fn call_drm_reenumerate_and_sync(&mut self) {
-        let Some(ref drm_backend) = self.drm_backend else {
-            return;
-        };
-
-        // Re-create compositor outputs from current KMS state.
-        self.state.outputs.clear();
-        self.state.output_scale_factors.clear();
-
-        let dh = self.display.handle();
-        let kms_outputs = drm_backend.kms_outputs();
-        let output_names: Vec<String> = kms_outputs
-            .iter()
-            .enumerate()
-            .map(|(i, kms_out)| normalized_output_name(&kms_out.name, i))
-            .collect();
-        for (i, kms_out) in kms_outputs.iter().enumerate() {
-            let output_name = output_names[i].clone();
-
-            let phys_size = if kms_out.physical_width_mm > 0 && kms_out.physical_height_mm > 0 {
-                (
-                    kms_out.physical_width_mm as i32,
-                    kms_out.physical_height_mm as i32,
-                )
-                    .into()
-            } else {
-                (
-                    (kms_out.width as i32 * 254 / 960).max(1),
-                    (kms_out.height as i32 * 254 / 960).max(1),
-                )
-                    .into()
-            };
-
-            let output = Output::new(
-                output_name.clone(),
-                PhysicalProperties {
-                    size: phys_size,
-                    subpixel: Subpixel::Unknown,
-                    make: "Axiom".into(),
-                    model: format!("Display-{}", i),
-                },
-            );
-            let mode = OutputMode {
-                size: (kms_out.width as i32, kms_out.height as i32).into(),
-                refresh: kms_out.mode.vrefresh() as i32,
-            };
-            output.change_current_state(
-                Some(mode),
-                Some(Transform::Normal),
-                Some(smithay_output_scale(kms_out.scale_factor)),
-                None,
-            );
-            output.create_global::<State>(&dh);
-
-            self.state.outputs.push(output);
-            self.state
-                .output_scale_factors
-                .insert(output_name.clone(), kms_out.scale_factor);
-
-            let mut wm = self.state.workspace_manager.write();
-            let tape = wm.ensure_tape(&output_name);
-            tape.set_scale_factor(kms_out.scale_factor);
-            tape.set_viewport_size(kms_out.width as f64, kms_out.height as f64);
-        }
-
-        {
-            let mut wm = self.state.workspace_manager.write();
-            wm.sync_tapes_with_outputs(&output_names, &self.state.config.output.order);
-        }
-
-        let focused_name = self.state.workspace_manager.read().focused_output.clone();
-        let (virtual_width, virtual_height) =
-            self.state.workspace_manager.read().virtual_desktop_size();
-        self.state.window_width = virtual_width;
-        self.state.window_height = virtual_height;
-
-        self.state.needs_redraw = true;
-        info!(
-            "Output sync complete: {} display(s), focused output '{}', virtual desktop {}x{}",
-            kms_outputs.len(),
-            focused_name,
-            virtual_width,
-            virtual_height,
-        );
-    }
 
     /// Run one cycle of the event loop
     pub fn run_one_cycle(&mut self) -> Result<()> {
         match self.backend_kind {
             BackendKind::Winit => self.run_one_cycle_winit()?,
-            BackendKind::Drm => self.run_one_cycle_drm()?,
             BackendKind::Noop => {
                 // Noop mode: tick without any backend events.
                 // Wayland client dispatch and rendering still happen.
@@ -1747,6 +1463,28 @@ impl AxiomSmithayBackendReal {
             info!("📐 Window resized to {}x{}", w, h);
             self.state.window_width = w;
             self.state.window_height = h;
+            let host_scale = self
+                .winit_backend
+                .as_ref()
+                .map(|b| b.window().scale_factor().clamp(1.0, 4.0))
+                .unwrap_or(1.0);
+            {
+                let mut wm = self.state.workspace_manager.write();
+                let tape = wm.ensure_tape("default");
+                tape.set_scale_factor(host_scale);
+                tape.set_viewport_size(w as f64, h as f64);
+            }
+            if let Some(output) = self.state.outputs.first().cloned() {
+                output.change_current_state(
+                    Some(OutputMode {
+                        size: (w as i32, h as i32).into(),
+                        refresh: 60_000,
+                    }),
+                    Some(Transform::Normal),
+                    Some(smithay_output_scale(host_scale)),
+                    None,
+                );
+            }
             self.state.needs_redraw = true;
         }
 
@@ -1764,507 +1502,43 @@ impl AxiomSmithayBackendReal {
         Ok(())
     }
 
-    /// DRM-specific event loop cycle.
-    ///
-    /// Dispatches the calloop event loop (which polls the DRM FD for
-    /// page-flip completion events and the libinput FD for input device
-    /// events), then processes any pending events.
-    fn run_one_cycle_drm(&mut self) -> Result<()> {
-        let drm_available = self
-            .drm_backend
-            .as_ref()
-            .map(|d| d.kms.is_some())
-            .unwrap_or(false);
-
-        if !drm_available {
-            return Ok(());
-        }
-
-        // Dispatch calloop — non-blocking, returns readiness flags.
-        // A dispatch error is non-fatal; we log and continue so the
-        // compositor can still process Wayland events and render.
-        let collector = self
-            .drm_backend
-            .as_mut()
-            .unwrap()
-            .dispatch_calloop()
-            .unwrap_or_else(|e| {
-                warn!("calloop dispatch error: {}", e);
-                DrmEventCollector::default()
-            });
-
-        // Process DRM page-flip / vblank events
-        if collector.drm_ready {
-            if let Some(drm) = self.drm_backend.as_mut() {
-                match drm.receive_events() {
-                    Ok(events) => {
-                        let count = events.len();
-                        if count > 0 {
-                            debug!("DRM: {} event(s) received", count);
-                        }
-                    }
-                    Err(e) => warn!("Error receiving DRM events: {}", e),
-                }
-            }
-        }
-
-        // Process libinput events
-        if collector.libinput_ready {
-            if let Some(drm) = self.drm_backend.as_mut() {
-                let events = drm.dispatch_libinput();
-                for ev in events {
-                    self.handle_libinput_event(ev);
-                }
-            }
-        }
-
-        // Process udev hotplug events — monitor plugged/unplugged.
-        if collector.udev_ready {
-            if let Some(drm) = self.drm_backend.as_mut() {
-                let hotplug = drm.drain_udev_events();
-                if hotplug {
-                    info!("🔌 DRM hotplug event — triggering output re-enumeration");
-                    match drm.apply_hotplug_diff() {
-                        Ok((added, removed)) => {
-                            if !added.is_empty() || !removed.is_empty() {
-                                self.call_drm_reenumerate_and_sync();
-                            }
-                        }
-                        Err(e) => {
-                            warn!("DRM output re-enumeration failed: {}", e);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Process a single libinput event and translate it into Smithay seat
-    /// events and Axiom InputManager actions.
-    fn handle_libinput_event(&mut self, event: input::Event) {
-        use input::event::{
-            keyboard::KeyboardEventTrait as _, pointer::PointerEventTrait as _, DeviceEvent,
-            EventTrait as _, KeyboardEvent, PointerEvent,
-        };
-
-        match event {
-            input::Event::Device(dev_ev) => match dev_ev {
-                DeviceEvent::Added(dev) => {
-                    let name = dev.device().name().to_owned();
-                    info!("libinput device added: {}", name);
-
-                    // Apply configured pointer acceleration if the device
-                    // supports it (libinput expects speed in [-1.0, 1.0]).
-                    let mut device = dev.device().clone();
-                    if device.has_capability(input::DeviceCapability::Pointer)
-                        && device.config_accel_is_available()
-                    {
-                        let speed = self.state.config.input.mouse_accel.clamp(-1.0, 1.0);
-                        if (speed - self.state.config.input.mouse_accel).abs() > f64::EPSILON {
-                            debug!(
-                                "mouse_accel {:.2} clamped to libinput range [-1.0, 1.0] → {:.2}",
-                                self.state.config.input.mouse_accel, speed
-                            );
-                        }
-                        if let Err(e) = device.config_accel_set_speed(speed) {
-                            warn!(
-                                "⚠️ Failed to set pointer accel speed {:.2} on '{}': {:?}",
-                                speed, name, e
-                            );
-                        } else {
-                            info!("🐁 Pointer '{}' accel speed set to {:.2}", name, speed);
-                        }
-                    }
-                }
-                DeviceEvent::Removed(dev) => {
-                    let name = dev.device().name().to_owned();
-                    info!("libinput device removed: {}", name);
-                }
-                _ => {
-                    debug!("Unhandled libinput device event");
-                }
-            },
-
-            input::Event::Keyboard(KeyboardEvent::Key(key_ev)) => {
-                if let Some(keyboard) = self.state.seat.get_keyboard() {
-                    let serial = SERIAL_COUNTER.next_serial();
-                    let time = key_ev.time();
-                    let key_code: smithay::input::keyboard::Keycode = key_ev.key().into();
-                    let pressed = key_ev.key_state() == input::event::keyboard::KeyState::Pressed;
-
-                    let input_manager = self.state.input_manager.clone();
-                    let pending_actions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-                    let pending_clone = pending_actions.clone();
-
-                    let smithay_state = if pressed {
-                        smithay::backend::input::KeyState::Pressed
-                    } else {
-                        smithay::backend::input::KeyState::Released
-                    };
-
-                    keyboard.input::<(), _>(
-                        &mut self.state,
-                        key_code,
-                        smithay_state,
-                        serial,
-                        time,
-                        |_, modifiers, handle| {
-                            if pressed {
-                                let syms = handle.modified_syms();
-                                if let Some(keysym) = syms.first() {
-                                    let key_name = xkbcommon::xkb::keysym_get_name(*keysym);
-
-                                    let mut mod_names: Vec<String> = Vec::new();
-                                    if modifiers.ctrl {
-                                        mod_names.push("Ctrl".to_string());
-                                    }
-                                    if modifiers.alt {
-                                        mod_names.push("Alt".to_string());
-                                    }
-                                    if modifiers.logo {
-                                        mod_names.push("Super".to_string());
-                                    }
-                                    if modifiers.shift {
-                                        mod_names.push("Shift".to_string());
-                                    }
-
-                                    let key_combo = if mod_names.is_empty() {
-                                        key_name.to_lowercase()
-                                    } else {
-                                        format!("{}+{}", mod_names.join("+"), key_name)
-                                    };
-
-                                    let axiom_event = crate::input::InputEvent::Keyboard {
-                                        key: key_combo.clone(),
-                                        modifiers: mod_names,
-                                        pressed: true,
-                                    };
-
-                                    let actions =
-                                        input_manager.write().process_input_event(axiom_event);
-
-                                    if !actions.is_empty() {
-                                        debug!("⌨️ DRM global shortcut: {}", key_combo);
-                                        *pending_clone.borrow_mut() = actions;
-                                        return smithay::input::keyboard::FilterResult::Intercept(
-                                            (),
-                                        );
-                                    }
-                                }
-                            }
-                            smithay::input::keyboard::FilterResult::Forward
-                        },
-                    );
-
-                    let actions: Vec<_> = pending_actions.borrow_mut().drain(..).collect();
-                    if !actions.is_empty() {
-                        self.process_actions(actions);
-                    }
-                }
-            }
-
-            input::Event::Pointer(pointer_ev) => match pointer_ev {
-                PointerEvent::Motion(motion) => {
-                    let dx = motion.dx();
-                    let dy = motion.dy();
-                    self.state.pointer_x =
-                        (self.state.pointer_x + dx).clamp(0.0, f64::from(self.state.window_width));
-                    self.state.pointer_y =
-                        (self.state.pointer_y + dy).clamp(0.0, f64::from(self.state.window_height));
-
-                    // Interactive move/resize consumes the motion event.
-                    if self.handle_interaction(self.state.pointer_x, self.state.pointer_y) {
-                        return;
-                    }
-
-                    let serial = SERIAL_COUNTER.next_serial();
-                    let time = motion.time();
-
-                    let floating = self.floating_rects();
-                    let under = self.state.workspace_manager.read().element_under(
-                        self.state.pointer_x,
-                        self.state.pointer_y,
-                        &floating,
-                    );
-                    self.maybe_focus_window_under_pointer(under, serial);
-
-                    if let Some(pointer) = self.state.seat.get_pointer() {
-                        let focus = under.and_then(|(window_id, (sx, sy))| {
-                            self.state
-                                .window_map
-                                .get(&window_id)
-                                .and_then(|surface_id| {
-                                    self.state.surfaces.get(surface_id).and_then(|sd| {
-                                        sd.surface.as_ref().and_then(|s| {
-                                            if s.is_alive() {
-                                                Some(s.clone())
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                    })
-                                })
-                                .map(|surface| (surface, smithay::utils::Point::from((sx, sy))))
-                        });
-
-                        let motion_event = smithay::input::pointer::MotionEvent {
-                            serial,
-                            time,
-                            location: smithay::utils::Point::from((
-                                self.state.pointer_x,
-                                self.state.pointer_y,
-                            )),
-                        };
-                        pointer.motion(&mut self.state, focus, &motion_event);
-                    }
-                }
-
-                PointerEvent::MotionAbsolute(abs) => {
-                    let x = abs.absolute_x_transformed(self.state.window_width);
-                    let y = abs.absolute_y_transformed(self.state.window_height);
-                    self.state.pointer_x = x;
-                    self.state.pointer_y = y;
-
-                    // Interactive move/resize consumes the motion event.
-                    if self.handle_interaction(x, y) {
-                        return;
-                    }
-
-                    let serial = SERIAL_COUNTER.next_serial();
-                    let time = abs.time();
-
-                    let floating = self.floating_rects();
-                    let under = self
-                        .state
-                        .workspace_manager
-                        .read()
-                        .element_under(x, y, &floating);
-                    self.maybe_focus_window_under_pointer(under, serial);
-
-                    if let Some(pointer) = self.state.seat.get_pointer() {
-                        let focus = under.and_then(|(window_id, (sx, sy))| {
-                            self.state
-                                .window_map
-                                .get(&window_id)
-                                .and_then(|surface_id| {
-                                    self.state.surfaces.get(surface_id).and_then(|sd| {
-                                        sd.surface.as_ref().and_then(|s| {
-                                            if s.is_alive() {
-                                                Some(s.clone())
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                    })
-                                })
-                                .map(|surface| (surface, smithay::utils::Point::from((sx, sy))))
-                        });
-
-                        let motion_event = smithay::input::pointer::MotionEvent {
-                            serial,
-                            time,
-                            location: smithay::utils::Point::from((x, y)),
-                        };
-                        pointer.motion(&mut self.state, focus, &motion_event);
-                    }
-                }
-
-                PointerEvent::Button(btn) => {
-                    let serial = SERIAL_COUNTER.next_serial();
-                    let time = btn.time();
-                    let button = btn.button();
-                    let pressed = btn.button_state() == input::event::pointer::ButtonState::Pressed;
-                    let smithay_state = if pressed {
-                        smithay::backend::input::ButtonState::Pressed
-                    } else {
-                        smithay::backend::input::ButtonState::Released
-                    };
-
-                    // Dismiss active popup grab on any button press outside the popup
-                    if pressed {
-                        if let Some(popup_id) = self.state.active_popup_grab {
-                            let dismiss = if let Some(p) = self.state.popups.get(&popup_id) {
-                                let px = self.state.pointer_x as i32;
-                                let py = self.state.pointer_y as i32;
-                                let (abs_x, abs_y) = self
-                                    .state
-                                    .window_map
-                                    .iter()
-                                    .find_map(|(&wid, &sid)| {
-                                        if sid == p.parent_surface_id {
-                                            self.state
-                                                .window_manager
-                                                .read()
-                                                .get_window(wid)
-                                                .map(|w| (w.window.position.0, w.window.position.1))
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .unwrap_or((0, 0));
-                                let popup_x = abs_x + p.x;
-                                let popup_y = abs_y + p.y;
-                                px < popup_x
-                                    || px > popup_x + p.width
-                                    || py < popup_y
-                                    || py > popup_y + p.height
-                            } else {
-                                true
-                            };
-                            if dismiss {
-                                if let Some(p) = self.state.popups.remove(&popup_id) {
-                                    info!("🗑️ Dismissing popup surface {}", popup_id);
-                                    p.surface.send_popup_done();
-                                    self.state.needs_redraw = true;
-                                }
-                                self.state.active_popup_grab = None;
-                            }
-                        }
-                    }
-
-                    // Decoration hit-testing: close/minimize/maximize buttons
-                    // on server-side decorations. When consumed the event must
-                    // NOT be forwarded to Smithay (no unmatched button-release
-                    // delivered to Wayland clients).
-                    if pressed {
-                        if self.handle_decoration_button(
-                            self.state.pointer_x,
-                            self.state.pointer_y,
-                            true,
-                        ) {
-                            // Release the consumed state so the next
-                            // unrelated button press starts clean.
-                            self.decoration_consumed_press = false;
-                            return;
-                        }
-                    } else if self.decoration_consumed_press {
-                        self.handle_decoration_button(
-                            self.state.pointer_x,
-                            self.state.pointer_y,
-                            false,
-                        );
-                        self.decoration_consumed_press = false;
-                        return;
-                    }
-
-                    if let Some(pointer) = self.state.seat.get_pointer() {
-                        let button_event = smithay::input::pointer::ButtonEvent {
-                            serial,
-                            time,
-                            button,
-                            state: smithay_state,
-                        };
-                        pointer.button(&mut self.state, &button_event);
-                    }
-                }
-
-                PointerEvent::ScrollWheel(scroll) => {
-                    use input::event::pointer::PointerScrollEvent as _;
-                    let time = scroll.time();
-
-                    if let Some(pointer) = self.state.seat.get_pointer() {
-                        let mut axis_frame = smithay::input::pointer::AxisFrame::new(time);
-
-                        if scroll.has_axis(input::event::pointer::Axis::Horizontal) {
-                            let amount =
-                                scroll.scroll_value(input::event::pointer::Axis::Horizontal);
-                            if amount.abs() > 0.0 {
-                                axis_frame = axis_frame
-                                    .value(smithay::backend::input::Axis::Horizontal, amount);
-                            }
-                        }
-                        if scroll.has_axis(input::event::pointer::Axis::Vertical) {
-                            let amount = scroll.scroll_value(input::event::pointer::Axis::Vertical);
-                            if amount.abs() > 0.0 {
-                                axis_frame = axis_frame
-                                    .value(smithay::backend::input::Axis::Vertical, amount);
-                            }
-                        }
-
-                        pointer.axis(&mut self.state, axis_frame);
-                        pointer.frame(&mut self.state);
-                    }
-                }
-
-                PointerEvent::ScrollFinger(scroll) => {
-                    use input::event::pointer::PointerScrollEvent as _;
-                    let time = scroll.time();
-
-                    if let Some(pointer) = self.state.seat.get_pointer() {
-                        let mut axis_frame = smithay::input::pointer::AxisFrame::new(time);
-
-                        if scroll.has_axis(input::event::pointer::Axis::Horizontal) {
-                            let amount =
-                                scroll.scroll_value(input::event::pointer::Axis::Horizontal);
-                            if amount.abs() > 0.0 {
-                                axis_frame = axis_frame
-                                    .value(smithay::backend::input::Axis::Horizontal, amount);
-                            }
-                        }
-                        if scroll.has_axis(input::event::pointer::Axis::Vertical) {
-                            let amount = scroll.scroll_value(input::event::pointer::Axis::Vertical);
-                            if amount.abs() > 0.0 {
-                                axis_frame = axis_frame
-                                    .value(smithay::backend::input::Axis::Vertical, amount);
-                            }
-                        }
-
-                        pointer.axis(&mut self.state, axis_frame);
-                        pointer.frame(&mut self.state);
-                    }
-                }
-
-                PointerEvent::ScrollContinuous(scroll) => {
-                    use input::event::pointer::PointerScrollEvent as _;
-                    let time = scroll.time();
-
-                    if let Some(pointer) = self.state.seat.get_pointer() {
-                        let mut axis_frame = smithay::input::pointer::AxisFrame::new(time);
-
-                        if scroll.has_axis(input::event::pointer::Axis::Horizontal) {
-                            let amount =
-                                scroll.scroll_value(input::event::pointer::Axis::Horizontal);
-                            if amount.abs() > 0.0 {
-                                axis_frame = axis_frame
-                                    .value(smithay::backend::input::Axis::Horizontal, amount);
-                            }
-                        }
-                        if scroll.has_axis(input::event::pointer::Axis::Vertical) {
-                            let amount = scroll.scroll_value(input::event::pointer::Axis::Vertical);
-                            if amount.abs() > 0.0 {
-                                axis_frame = axis_frame
-                                    .value(smithay::backend::input::Axis::Vertical, amount);
-                            }
-                        }
-
-                        pointer.axis(&mut self.state, axis_frame);
-                        pointer.frame(&mut self.state);
-                    }
-                }
-
-                _ => {
-                    debug!("Unhandled libinput pointer event");
-                }
-            },
-
-            other => {
-                debug!("Unhandled libinput event: {:?}", other);
-            }
-        }
-    }
 
     /// Common post-event dispatch for all backends.
     fn run_one_cycle_common(&mut self) -> Result<()> {
-        // Poll X11 events from XWayland (if XWM is wired).
-        // The X11 selection/clipboard dispatch lives in xwayland_dispatch.rs.
-        let display_handle = self.display.handle();
-        self::xwayland_dispatch::poll_and_dispatch_events(&display_handle, &mut self.state)?;
+        // Accept new Wayland clients on the bound listening socket. Without
+        // this, connect() succeeds at the kernel level but the server never
+        // reads the connection, so no client can ever bind to Axiom.
+        if let Some(listener) = &self.listener {
+            loop {
+                match listener.accept() {
+                    Ok(Some(stream)) => {
+                        if let Err(e) = self.display.handle().insert_client(
+                            stream,
+                            Arc::new(ClientState {
+                                compositor_state: CompositorClientState::default(),
+                            }),
+                        ) {
+                            warn!("Failed to insert Wayland client: {e}");
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) => {
+                        warn!("Wayland listener accept error: {e}");
+                        break;
+                    }
+                }
+            }
+        }
 
         // Dispatch Wayland client events
         self.display.dispatch_clients(&mut self.state)?;
         self.display.flush_clients()?;
+
+        // Fetch any client selection offered during this dispatch (the
+        // selection is only registered in `seat_data` after `new_selection`
+        // returns, so it must be requested here, post-dispatch).
+        self.state.maybe_fetch_clipboard();
 
         // Fold in any asynchronously-read clipboard payloads requested from the
         // active Wayland selection source so X11 requests can be served from the
@@ -2274,1096 +1548,20 @@ impl AxiomSmithayBackendReal {
         // Update animations after dispatch so newly-created windows (which
         // trigger animate_window_open() during dispatch) get their first
         // integration step before the render pass reads effect states.
-        self.state.workspace_manager.write().update_animations();
-        let _ = self.state.effects_engine.write().update();
+        if self.state.workspace_manager.write().update_animations() {
+            self.state.needs_redraw = true;
+        }
 
         // Prune dead surfaces from disconnected clients
         self.state.prune_dead_surfaces();
 
-        // Render if needed — dispatch based on backend kind.
-        // Winit uses the nested GL bridge; DRM uses the standalone dumb-buffer
-        // scanout path backed by the same WGPU compositor frame.
+        // Render if needed.
         if self.state.needs_redraw {
-            match self.backend_kind {
-                BackendKind::Drm => {
-                    self.render_drm_frame()?;
-                }
-                _ => {
-                    self.render()?;
-                }
-            }
+            self.render()?;
             self.state.needs_redraw = false;
         }
 
         Ok(())
-    }
-
-    /// Process a single winit input event
-    fn handle_input_event(&mut self, event: InputEvent<winit::WinitInput>) {
-        use smithay::backend::input::Event;
-
-        match event {
-            InputEvent::Keyboard { event } => {
-                if let Some(keyboard) = self.state.seat.get_keyboard() {
-                    let serial = SERIAL_COUNTER.next_serial();
-                    let time = Event::time_msec(&event);
-                    let pressed = event.state() == smithay::backend::input::KeyState::Pressed;
-
-                    let input_manager = self.state.input_manager.clone();
-                    let pending_actions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-                    let pending_clone = pending_actions.clone();
-
-                    keyboard.input::<(), _>(
-                        &mut self.state,
-                        event.key_code(),
-                        event.state(),
-                        serial,
-                        time,
-                        |_, modifiers, handle| {
-                            if pressed {
-                                let syms = handle.modified_syms();
-                                if let Some(keysym) = syms.first() {
-                                    let key_name = xkbcommon::xkb::keysym_get_name(*keysym);
-
-                                    let mut mod_names: Vec<String> = Vec::new();
-                                    if modifiers.ctrl {
-                                        mod_names.push("Ctrl".to_string());
-                                    }
-                                    if modifiers.alt {
-                                        mod_names.push("Alt".to_string());
-                                    }
-                                    if modifiers.logo {
-                                        mod_names.push("Super".to_string());
-                                    }
-                                    if modifiers.shift {
-                                        mod_names.push("Shift".to_string());
-                                    }
-
-                                    let key_combo = if mod_names.is_empty() {
-                                        key_name.to_lowercase()
-                                    } else {
-                                        format!("{}+{}", mod_names.join("+"), key_name)
-                                    };
-
-                                    let axiom_event = crate::input::InputEvent::Keyboard {
-                                        key: key_combo.clone(),
-                                        modifiers: mod_names,
-                                        pressed: true,
-                                    };
-
-                                    let actions =
-                                        input_manager.write().process_input_event(axiom_event);
-
-                                    if !actions.is_empty() {
-                                        debug!("⌨️ Global shortcut: {}", key_combo);
-                                        *pending_clone.borrow_mut() = actions;
-                                        return FilterResult::Intercept(());
-                                    }
-                                }
-                            }
-                            FilterResult::Forward
-                        },
-                    );
-
-                    // Process any actions that were intercepted
-                    let actions: Vec<_> = pending_actions.borrow_mut().drain(..).collect();
-                    if !actions.is_empty() {
-                        self.process_actions(actions);
-                    }
-                }
-            }
-
-            InputEvent::PointerMotionAbsolute { event } => {
-                let (x, y) = (event.x(), event.y());
-                self.state.pointer_x = x;
-                self.state.pointer_y = y;
-
-                // Interactive move/resize consumes the motion event.
-                if self.handle_interaction(x, y) {
-                    return;
-                }
-
-                let serial = SERIAL_COUNTER.next_serial();
-                let time = Event::time_msec(&event);
-
-                // Find the surface under the pointer and forward motion
-                // Skip dead surfaces (from disconnected clients)
-                let floating = self.floating_rects();
-                let under = self
-                    .state
-                    .workspace_manager
-                    .read()
-                    .element_under(x, y, &floating);
-                self.maybe_focus_window_under_pointer(under, serial);
-
-                if let Some(pointer) = self.state.seat.get_pointer() {
-                    let focus = under.and_then(|(window_id, (sx, sy))| {
-                        self.state
-                            .window_map
-                            .get(&window_id)
-                            .and_then(|surface_id| {
-                                self.state.surfaces.get(surface_id).and_then(|sd| {
-                                    sd.surface.as_ref().and_then(|s| {
-                                        if s.is_alive() {
-                                            Some(s.clone())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                })
-                            })
-                            .map(|surface| (surface, Point::from((sx, sy))))
-                    });
-
-                    let motion_event = MotionEvent {
-                        serial,
-                        time,
-                        location: Point::from((x, y)),
-                    };
-                    pointer.motion(&mut self.state, focus, &motion_event);
-                }
-            }
-
-            InputEvent::PointerButton { event } => {
-                let serial = SERIAL_COUNTER.next_serial();
-                let time = Event::time_msec(&event);
-
-                // Dismiss active popup grab on any button press outside the popup
-                if let Some(popup_id) = self.state.active_popup_grab {
-                    let dismiss = if let Some(p) = self.state.popups.get(&popup_id) {
-                        let px = self.state.pointer_x as i32;
-                        let py = self.state.pointer_y as i32;
-                        // Find the popup's absolute position by locating its parent window
-                        let (abs_x, abs_y) = self
-                            .state
-                            .window_map
-                            .iter()
-                            .find_map(|(&wid, &sid)| {
-                                if sid == p.parent_surface_id {
-                                    self.state
-                                        .window_manager
-                                        .read()
-                                        .get_window(wid)
-                                        .map(|w| (w.window.position.0, w.window.position.1))
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or((0, 0));
-                        let popup_x = abs_x + p.x;
-                        let popup_y = abs_y + p.y;
-                        px < popup_x
-                            || px > popup_x + p.width
-                            || py < popup_y
-                            || py > popup_y + p.height
-                    } else {
-                        true
-                    };
-
-                    if dismiss {
-                        if let Some(p) = self.state.popups.remove(&popup_id) {
-                            info!("🗑️ Dismissing popup surface {}", popup_id);
-                            p.surface.send_popup_done();
-                            self.state.needs_redraw = true;
-                        }
-                        self.state.active_popup_grab = None;
-                    }
-                }
-
-                let pressed = event.state() == smithay::backend::input::ButtonState::Pressed;
-
-                // Decoration hit-testing: close/minimize/maximize buttons
-                // on server-side decorations.
-                if pressed {
-                    if self.handle_decoration_button(
-                        self.state.pointer_x,
-                        self.state.pointer_y,
-                        true,
-                    ) {
-                        self.decoration_consumed_press = false;
-                        return;
-                    }
-                } else if self.decoration_consumed_press {
-                    self.handle_decoration_button(
-                        self.state.pointer_x,
-                        self.state.pointer_y,
-                        false,
-                    );
-                    self.decoration_consumed_press = false;
-                    return;
-                }
-
-                if let Some(pointer) = self.state.seat.get_pointer() {
-                    // Convert MouseButton to u32 button code
-                    let button_code = match event.button() {
-                        Some(smithay::backend::input::MouseButton::Left) => 0x110,
-                        Some(smithay::backend::input::MouseButton::Right) => 0x111,
-                        Some(smithay::backend::input::MouseButton::Middle) => 0x112,
-                        None => 0,
-                        _ => 0,
-                    };
-                    let button_event = ButtonEvent {
-                        serial,
-                        time,
-                        button: button_code,
-                        state: event.state(),
-                    };
-                    pointer.button(&mut self.state, &button_event);
-                }
-            }
-
-            InputEvent::PointerAxis { event } => {
-                // Forward axis/scroll events via seat with actual axis values
-                let time = Event::time_msec(&event);
-
-                if let Some(pointer) = self.state.seat.get_pointer() {
-                    let mut axis_frame = AxisFrame::new(time);
-
-                    // Extract and forward horizontal/vertical scroll amounts
-                    // Using the `input` crate's Axis enum (Horizontal/Vertical)
-                    if let Some(amount) = event.amount(Axis::Horizontal) {
-                        if amount.abs() > 0.0 {
-                            axis_frame = axis_frame.value(Axis::Horizontal, amount);
-                        }
-                    }
-                    if let Some(amount) = event.amount(Axis::Vertical) {
-                        if amount.abs() > 0.0 {
-                            axis_frame = axis_frame.value(Axis::Vertical, amount);
-                        }
-                    }
-
-                    pointer.axis(&mut self.state, axis_frame);
-                    pointer.frame(&mut self.state);
-
-                    // Workspace navigation via scroll.
-                    // Smooth scroll sources (touchpad) feed velocity into momentum physics;
-                    // discrete sources (mouse wheel) snap to adjacent columns.
-                    let source = event.source();
-                    match source {
-                        AxisSource::Continuous | AxisSource::Finger => {
-                            if let Some(amount) = event.amount(Axis::Horizontal) {
-                                let speed = self.state.config.workspace.scroll_speed;
-                                let velocity = amount * speed * 8.0;
-                                if velocity.abs() > 0.0 {
-                                    self.state
-                                        .workspace_manager
-                                        .write()
-                                        .start_momentum_scroll(velocity);
-                                    self.state.needs_redraw = true;
-                                }
-                            }
-                        }
-                        AxisSource::Wheel | AxisSource::WheelTilt => {
-                            if let Some(amount) = event.amount(Axis::Horizontal) {
-                                if amount > 5.0 {
-                                    self.state.workspace_manager.write().scroll_right();
-                                    self.state.needs_redraw = true;
-                                } else if amount < -5.0 {
-                                    self.state.workspace_manager.write().scroll_left();
-                                    self.state.needs_redraw = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            _ => {}
-        }
-    }
-
-    /// If an interactive window manipulation is active (move or resize),
-    /// apply the new pointer position and return `true` so the motion
-    /// event is NOT forwarded to Smithay for pointer focus updates.
-    fn handle_interaction(&mut self, px: f64, py: f64) -> bool {
-        let interaction = match self.interaction {
-            Some(ref i) => i.clone(),
-            None => return false,
-        };
-        match interaction {
-            WindowInteraction::Move {
-                window_id,
-                offset_x,
-                offset_y,
-            } => {
-                let new_x = (px - offset_x).round() as i32;
-                let new_y = (py - offset_y).round() as i32;
-                let mut wm = self.state.window_manager.write();
-                if let Some(w) = wm.get_window_mut(window_id) {
-                    w.window.set_position(new_x, new_y);
-                    self.state.needs_redraw = true;
-                }
-            }
-            WindowInteraction::Resize {
-                window_id,
-                edge,
-                initial_rect: (ix, iy, iw, ih),
-                start_x,
-                start_y,
-            } => {
-                let dx = (px - start_x) as i32;
-                let dy = (py - start_y) as i32;
-                let mut wm = self.state.window_manager.write();
-                if let Some(w) = wm.get_window_mut(window_id) {
-                    use crate::decoration::ResizeEdge;
-                    let (new_x, new_y, new_w, new_h) = match edge {
-                        ResizeEdge::Right => (ix, iy, (iw as i32 + dx).max(100) as u32, ih),
-                        ResizeEdge::Bottom => (ix, iy, iw, (ih as i32 + dy).max(100) as u32),
-                        ResizeEdge::BottomRight => {
-                            let w = (iw as i32 + dx).max(100) as u32;
-                            let h = (ih as i32 + dy).max(100) as u32;
-                            (ix, iy, w, h)
-                        }
-                        // Left, Top, TopLeft, TopRight, BottomLeft are not yet
-                        // covered by decoration hit-testing — placeholder.
-                        _ => (ix, iy, iw, ih),
-                    };
-                    w.window.position = (new_x, new_y);
-                    w.window.size = (new_w, new_h);
-                    self.state.needs_redraw = true;
-                }
-            }
-        }
-        true
-    }
-
-    /// Build a list of floating window rects for pointer hit-testing.
-    /// Each entry is `(window_id, x, y, width, height)`. Called on every
-    /// motion and button event so `element_under` can find floating windows.
-    fn floating_rects(&self) -> Vec<(u64, i32, i32, u32, u32)> {
-        let floating_ids = self.state.workspace_manager.read().floating_window_ids();
-        if floating_ids.is_empty() {
-            return Vec::new();
-        }
-        let wm = self.state.window_manager.read();
-        let mut rects = Vec::with_capacity(floating_ids.len());
-        for &id in &floating_ids {
-            if let Some(w) = wm.get_window(id) {
-                if !w.properties.minimized {
-                    rects.push((
-                        id,
-                        w.window.position.0,
-                        w.window.position.1,
-                        w.window.size.0,
-                        w.window.size.1,
-                    ));
-                }
-            }
-        }
-        rects
-    }
-
-    /// If configured, move keyboard focus to the window under the pointer.
-    /// This keeps live backend focus behavior aligned with `window.focus_follows_mouse`.
-    fn maybe_focus_window_under_pointer(
-        &mut self,
-        under: Option<(u64, (f64, f64))>,
-        serial: Serial,
-    ) {
-        if !self.state.config.window.focus_follows_mouse {
-            return;
-        }
-
-        let target_window_id = under.map(|(window_id, _)| window_id);
-        if self.state.window_manager.read().focused_window_id() == target_window_id {
-            return;
-        }
-
-        let target_surface = target_window_id.and_then(|window_id| {
-            self.state
-                .window_map
-                .get(&window_id)
-                .and_then(|surface_id| self.state.surfaces.get(surface_id))
-                .and_then(|sd| sd.surface.as_ref())
-                .filter(|surface| surface.is_alive())
-                .cloned()
-        });
-
-        if let Some(keyboard) = self.state.seat.get_keyboard() {
-            keyboard.set_focus(&mut self.state, target_surface, serial);
-        }
-    }
-
-    /// Decoration hit-testing for pointer button events. Returns `true` if
-    /// the button press was consumed by a decoration (close/minimize/etc.),
-    /// in which case the caller should **not** forward the event to Smithay's
-    /// `PointerHandle::button`. On release the decoration pressed states are
-    /// cleared regardless, but the `decoration_consumed_press` flag is also
-    /// consulted to decide whether to forward the release to Smithay.
-    fn handle_decoration_button(&mut self, pointer_x: f64, pointer_y: f64, pressed: bool) -> bool {
-        if pressed {
-            // Find the window under the cursor.
-            let floating = self.floating_rects();
-            let under = self
-                .state
-                .workspace_manager
-                .read()
-                .element_under(pointer_x, pointer_y, &floating);
-            let Some((window_id, _)) = under else {
-                return false;
-            };
-            // Compute window-relative coordinates for decoration hit-testing.
-            let rel = self
-                .state
-                .window_manager
-                .read()
-                .get_window(window_id)
-                .map(|w| {
-                    let rx = (pointer_x - w.window.position.0 as f64) as i32;
-                    let ry = (pointer_y - w.window.position.1 as f64) as i32;
-                    (rx, ry)
-                });
-            let Some((rx, ry)) = rel else {
-                return false;
-            };
-            let action = self
-                .state
-                .decoration_manager
-                .write()
-                .handle_button_press(window_id, rx, ry);
-            match action {
-                Some(crate::decoration::DecorationAction::Close) => {
-                    if let Some(&surface_id) = self.state.window_map.get(&window_id) {
-                        self.state.destroy_window(surface_id);
-                        self.state.needs_redraw = true;
-                    }
-                    self.decoration_consumed_press = true;
-                    return true;
-                }
-                Some(crate::decoration::DecorationAction::Minimize) => {
-                    let is_minimized = self.state.window_manager.read().is_minimized(window_id);
-                    if is_minimized {
-                        self.state
-                            .workspace_manager
-                            .write()
-                            .restore_window(window_id);
-                        self.state.window_manager.write().restore_window(window_id);
-                        self.state
-                            .effects_engine
-                            .write()
-                            .animate_window_restore(window_id);
-                    } else {
-                        self.state
-                            .workspace_manager
-                            .write()
-                            .minimize_window(window_id);
-                        self.state.window_manager.write().minimize_window(window_id);
-                        self.state
-                            .effects_engine
-                            .write()
-                            .animate_window_minimize(window_id);
-                    }
-                    self.state.needs_redraw = true;
-                    self.decoration_consumed_press = true;
-                    return true;
-                }
-                Some(crate::decoration::DecorationAction::ToggleMaximize) => {
-                    self.state
-                        .window_manager
-                        .write()
-                        .toggle_fullscreen(window_id);
-                    self.state.needs_redraw = true;
-                    self.decoration_consumed_press = true;
-                    return true;
-                }
-                Some(crate::decoration::DecorationAction::StartMove) => {
-                    // Enter interactive move mode: set the window as floating,
-                    // record the pointer offset and enter grab-like state.
-                    self.state
-                        .workspace_manager
-                        .write()
-                        .set_window_floating(window_id, true);
-                    let wm = self.state.window_manager.read();
-                    if let Some(w) = wm.get_window(window_id) {
-                        let offset_x = pointer_x - w.window.position.0 as f64;
-                        let offset_y = pointer_y - w.window.position.1 as f64;
-                        self.interaction = Some(WindowInteraction::Move {
-                            window_id,
-                            offset_x,
-                            offset_y,
-                        });
-                    }
-                    self.state.needs_redraw = true;
-                    self.decoration_consumed_press = true;
-                    return true;
-                }
-                Some(crate::decoration::DecorationAction::StartResize(edge)) => {
-                    // Enter interactive resize mode. Set the window as
-                    // floating so the layout system doesn't overwrite the
-                    // custom size each frame.
-                    self.state
-                        .workspace_manager
-                        .write()
-                        .set_window_floating(window_id, true);
-                    let wm = self.state.window_manager.read();
-                    if let Some(w) = wm.get_window(window_id) {
-                        let (ix, iy) = w.window.position;
-                        let (iw, ih) = w.window.size;
-                        self.interaction = Some(WindowInteraction::Resize {
-                            window_id,
-                            edge,
-                            initial_rect: (ix, iy, iw, ih),
-                            start_x: pointer_x,
-                            start_y: pointer_y,
-                        });
-                    }
-                    self.state.needs_redraw = true;
-                    self.decoration_consumed_press = true;
-                    return true;
-                }
-                None => {}
-            }
-            // If no decoration button matched, check for edge-resize on tiled
-            // / floating windows. A click within `RESIZE_HANDLE` pixels of the
-            // window's right or bottom edge starts a resize (bottom-right
-            // corner is the most natural resize affordance).
-            {
-                const RESIZE_HANDLE: i32 = 8;
-                let (window_id, _) = match under {
-                    Some(t) => t,
-                    None => return false,
-                };
-                // Compute window-relative coordinates for edge hit-testing.
-                let rel = self
-                    .state
-                    .window_manager
-                    .read()
-                    .get_window(window_id)
-                    .map(|w| {
-                        let rx = (pointer_x - w.window.position.0 as f64) as i32;
-                        let ry = (pointer_y - w.window.position.1 as f64) as i32;
-                        (rx, ry, w.window.size.0 as i32, w.window.size.1 as i32)
-                    });
-                let Some((rx, ry, ww, wh)) = rel else {
-                    return false;
-                };
-                use crate::decoration::ResizeEdge;
-                let edge = if rx >= ww - RESIZE_HANDLE && ry >= wh - RESIZE_HANDLE {
-                    Some(ResizeEdge::BottomRight)
-                } else if rx >= ww - RESIZE_HANDLE {
-                    Some(ResizeEdge::Right)
-                } else if ry >= wh - RESIZE_HANDLE {
-                    Some(ResizeEdge::Bottom)
-                } else {
-                    None
-                };
-                if let Some(edge) = edge {
-                    // Set as floating so the layout doesn't overwrite size.
-                    self.state
-                        .workspace_manager
-                        .write()
-                        .set_window_floating(window_id, true);
-                    let (ix, iy) = (pointer_x - rx as f64, pointer_y - ry as f64);
-                    let (ix, iy) = (ix as i32, iy as i32);
-                    let (iw, ih) = (ww as u32, wh as u32);
-                    self.interaction = Some(WindowInteraction::Resize {
-                        window_id,
-                        edge,
-                        initial_rect: (ix, iy, iw, ih),
-                        start_x: pointer_x,
-                        start_y: pointer_y,
-                    });
-                    self.state.needs_redraw = true;
-                    self.decoration_consumed_press = true;
-                    return true;
-                }
-            }
-            false
-        } else {
-            // Release: clear decoration visual state AND stop any interaction.
-            let floating = self.floating_rects();
-            let under = self
-                .state
-                .workspace_manager
-                .read()
-                .element_under(pointer_x, pointer_y, &floating);
-            if let Some((window_id, _)) = under {
-                let rel = self
-                    .state
-                    .window_manager
-                    .read()
-                    .get_window(window_id)
-                    .map(|w| {
-                        let rx = (pointer_x - w.window.position.0 as f64) as i32;
-                        let ry = (pointer_y - w.window.position.1 as f64) as i32;
-                        (rx, ry)
-                    });
-                if let Some((rx, ry)) = rel {
-                    self.state
-                        .decoration_manager
-                        .write()
-                        .handle_button_release(window_id, rx, ry);
-                }
-            }
-            // If an interactive move/resize was in progress, finalize it.
-            if let Some(interaction) = self.interaction.take() {
-                // For resize, send a configure event so the client resizes
-                // its buffer to match the new dimensions.
-                if let WindowInteraction::Resize { window_id, .. } = interaction {
-                    if let Some(&surface_id) = self.state.window_map.get(&window_id) {
-                        if let Some(toplevel) = self.state.toplevels.get(&surface_id) {
-                            let size = self
-                                .state
-                                .window_manager
-                                .read()
-                                .get_window(window_id)
-                                .map(|w| w.window.size);
-                            if let Some((new_w, new_h)) = size {
-                                // Convert physical-pixel window size to
-                                // logical pixels for the configure event,
-                                // matching the tiling reconfigure path.
-                                let scale = self
-                                    .state
-                                    .workspace_manager
-                                    .read()
-                                    .scale_factor_for_window(window_id);
-                                let logical_w = ((new_w as f64 / scale).round() as i32).max(1);
-                                let logical_h = ((new_h as f64 / scale).round() as i32).max(1);
-                                toplevel.with_pending_state(|state| {
-                                    state.size = Some((logical_w, logical_h).into());
-                                });
-                                toplevel.send_configure();
-                                self.state
-                                    .configured_sizes
-                                    .insert(surface_id, (logical_w, logical_h));
-                            }
-                        }
-                    }
-                }
-                self.decoration_consumed_press = true;
-                return true;
-            }
-            // Consume the release if the press was also consumed, so
-            // Wayland clients never see an unmatched button-release.
-            self.decoration_consumed_press
-        }
-    }
-
-    /// Process actions generated by InputManager
-    fn process_actions(&mut self, actions: Vec<crate::input::CompositorAction>) {
-        use crate::input::CompositorAction;
-        for action in actions {
-            match action {
-                CompositorAction::ScrollWorkspaceLeft => {
-                    info!("⬅️  Input: Scroll workspace left");
-                    self.state.workspace_manager.write().scroll_left();
-                    self.state.needs_redraw = true;
-                }
-                CompositorAction::ScrollWorkspaceRight => {
-                    info!("➡️  Input: Scroll workspace right");
-                    self.state.workspace_manager.write().scroll_right();
-                    self.state.needs_redraw = true;
-                }
-                CompositorAction::Quit => {
-                    info!("💼 Input: Quit compositor");
-                    self.state.running = false;
-                }
-                CompositorAction::CloseWindow => {
-                    let focused_id = self.state.window_manager.read().focused_window_id();
-                    if let Some(window_id) = focused_id {
-                        info!("🗑️  Input: Close window {}", window_id);
-                        if let Some(&surface_id) = self.state.window_map.get(&window_id) {
-                            self.state.destroy_window(surface_id);
-                            self.state.needs_redraw = true;
-                        }
-                    }
-                }
-                CompositorAction::ToggleFullscreen => {
-                    let focused_id = self.state.window_manager.read().focused_window_id();
-                    if let Some(window_id) = focused_id {
-                        self.state
-                            .window_manager
-                            .write()
-                            .toggle_fullscreen(window_id);
-                        self.state.needs_redraw = true;
-                    }
-                }
-                CompositorAction::MoveWindowLeft => {
-                    let focused_id = self.state.window_manager.read().focused_window_id();
-                    if let Some(window_id) = focused_id {
-                        self.state
-                            .workspace_manager
-                            .write()
-                            .move_window_left(window_id);
-                        self.state.needs_redraw = true;
-                    }
-                }
-                CompositorAction::ToggleFloating => {
-                    let focused_id = self.state.window_manager.read().focused_window_id();
-                    if let Some(window_id) = focused_id {
-                        self.state.window_manager.write().toggle_floating(window_id);
-                        self.state
-                            .workspace_manager
-                            .write()
-                            .toggle_window_floating(window_id);
-                        self.state.needs_redraw = true;
-                    }
-                }
-                CompositorAction::ToggleMinimize => {
-                    let focused_id = self.state.window_manager.read().focused_window_id();
-                    if let Some(window_id) = focused_id {
-                        let is_minimized = self.state.window_manager.read().is_minimized(window_id);
-                        if is_minimized {
-                            self.state
-                                .workspace_manager
-                                .write()
-                                .restore_window(window_id);
-                            self.state.window_manager.write().restore_window(window_id);
-                            self.state
-                                .effects_engine
-                                .write()
-                                .animate_window_restore(window_id);
-                            info!("🔲 Input: Restored window {}", window_id);
-                        } else {
-                            self.state
-                                .workspace_manager
-                                .write()
-                                .minimize_window(window_id);
-                            self.state.window_manager.write().minimize_window(window_id);
-                            self.state
-                                .effects_engine
-                                .write()
-                                .animate_window_minimize(window_id);
-                            info!("🔳 Input: Minimized window {}", window_id);
-                        }
-                        self.state.needs_redraw = true;
-                    }
-                }
-                CompositorAction::MoveWindowRight => {
-                    let focused_id = self.state.window_manager.read().focused_window_id();
-                    if let Some(window_id) = focused_id {
-                        self.state
-                            .workspace_manager
-                            .write()
-                            .move_window_right(window_id);
-                        self.state.needs_redraw = true;
-                    }
-                }
-                CompositorAction::ToggleEffects => {
-                    let mut ee = self.state.effects_engine.write();
-                    let new_enabled = !ee.is_enabled();
-                    ee.apply_live_effects_control(Some(new_enabled), None, None);
-                    info!(
-                        "✨ Toggle effects: {}",
-                        if new_enabled { "enabled" } else { "disabled" }
-                    );
-                    self.state.needs_redraw = true;
-                }
-                CompositorAction::LaunchTerminal => {
-                    let cmd = &self.state.config.general.default_terminal;
-                    let _ = std::process::Command::new(cmd)
-                        .spawn()
-                        .map(|_| debug!("🚀 Launched terminal: {}", cmd))
-                        .map_err(|e| warn!("Failed to launch terminal '{}': {}", cmd, e));
-                }
-                CompositorAction::LaunchLauncher => {
-                    let cmd = &self.state.config.general.default_launcher;
-                    let _ = std::process::Command::new(cmd)
-                        .spawn()
-                        .map(|_| debug!("🚀 Launched launcher: {}", cmd))
-                        .map_err(|e| warn!("Failed to launch launcher '{}': {}", cmd, e));
-                }
-                CompositorAction::Custom(ref cmd) => {
-                    // Split the command string on whitespace for the
-                    // program name and arguments.
-                    let parts: Vec<&str> = cmd.split_whitespace().collect();
-                    if parts.is_empty() {
-                        return;
-                    }
-                    let _ = std::process::Command::new(parts[0])
-                        .args(&parts[1..])
-                        .spawn()
-                        .map(|_| debug!("🚀 Launched custom command: {}", cmd))
-                        .map_err(|e| warn!("Failed to launch '{}': {}", cmd, e));
-                }
-            }
-        }
-    }
-
-    /// Calculate workspace layouts, synchronize window geometry, and notify
-    /// Wayland clients of size changes. Shared by nested and DRM render paths.
-    fn prepare_render_scene(&mut self) -> HashMap<u64, crate::window::Rectangle> {
-        let layouts = self
-            .state
-            .workspace_manager
-            .read()
-            .calculate_workspace_layouts();
-
-        {
-            let mut wm = self.state.window_manager.write();
-            for (window_id, layout_rect) in &layouts {
-                if let Some(window) = wm.get_window_mut(*window_id) {
-                    if !window.properties.floating {
-                        window.window.set_position(layout_rect.x, layout_rect.y);
-                        window
-                            .window
-                            .set_size(layout_rect.width, layout_rect.height);
-                    }
-                }
-            }
-        }
-
-        for (window_id, rect) in &layouts {
-            if let Some(&surface_id) = self.state.window_map.get(window_id) {
-                if let Some(toplevel) = self.state.toplevels.get(&surface_id) {
-                    self.state
-                        .update_surface_fractional_scale(toplevel.wl_surface());
-                    let scale = self
-                        .state
-                        .workspace_manager
-                        .read()
-                        .scale_factor_for_window(*window_id);
-                    let new_w = ((rect.width as f64 / scale).round() as i32).max(1);
-                    let new_h = ((rect.height as f64 / scale).round() as i32).max(1);
-
-                    let needs_configure = self
-                        .state
-                        .configured_sizes
-                        .get(&surface_id)
-                        .is_none_or(|&(cw, ch)| cw != new_w || ch != new_h);
-                    let pending = self.state.pending_configure.contains(&surface_id);
-
-                    if needs_configure && !pending {
-                        toplevel.with_pending_state(|state| {
-                            state.size = Some((new_w, new_h).into());
-                        });
-                        toplevel.send_configure();
-                        self.state
-                            .configured_sizes
-                            .insert(surface_id, (new_w, new_h));
-                        self.state.pending_configure.insert(surface_id);
-
-                        debug!(
-                            "📐 Configured surface {} to {}x{}",
-                            surface_id, new_w, new_h
-                        );
-                    }
-                }
-            }
-        }
-
-        layouts
-    }
-
-    /// Render the current frame.
-    ///
-    /// Composition is WGPU-first, with direct surface presentation for the
-    /// winit path. The surface was created from the winit window during init
-    /// — no CPU readback, no GL bridge.
-    fn render(&mut self) -> Result<()> {
-        if self.winit_backend.is_none() {
-            return Ok(());
-        }
-
-        if let Some(icon) = self.state.cursor_icon {
-            if let Some(backend) = self.winit_backend.as_mut() {
-                backend.window().set_cursor(icon);
-            }
-        }
-
-        let layouts = self.prepare_render_scene();
-        let (popup_ids, _committed_popup_count) = self.stage_wgpu_scene_from_state(&layouts);
-
-        // Notify the window system that a frame is about to be presented
-        if let Some(backend) = self.winit_backend.as_mut() {
-            backend.window().pre_present_notify();
-        }
-
-        // Render directly to the WGPU surface — no CPU readback, no GL bridge
-        if let Some(ref renderer) = self.state.renderer {
-            renderer.write().render_output("primary")?;
-        }
-
-        // Clean up popup render IDs after the frame
-        if let Some(ref renderer) = self.state.renderer {
-            let mut r = renderer.write();
-            for popup_id in &popup_ids {
-                r.remove_window(crate::backend::render_bridge::popup_render_id(*popup_id));
-            }
-        }
-
-        debug!(
-            "🎨 Rendered {} tiled windows at {}x{}",
-            layouts.len(),
-            self.state.window_width,
-            self.state.window_height,
-        );
-
-        Ok(())
-    }
-
-    /// Standalone DRM render path. Composites the scene via WGPU GPU
-    /// rendering to a headless texture, reads the RGBA result back to
-    /// CPU, converts to BGRA, and presents to every output through either
-    /// the GBM page-flip path or the CPU dumb-buffer fallback.
-    fn render_drm_frame(&mut self) -> Result<()> {
-        let ww = self.state.window_width;
-        let wh = self.state.window_height;
-        let layouts = self.prepare_render_scene();
-        let (popup_ids, _committed_popup_count) = self.stage_wgpu_scene_from_state(&layouts);
-
-        // GPU composite: render all windows + effects + decorations to a
-        // headless WGPU texture and read back the RGBA8 pixel data to CPU.
-        let frame = if let Some(ref renderer) = self.state.renderer {
-            renderer.write().compose_full_frame(ww, wh)?
-        } else {
-            warn!("WGPU renderer unavailable — skipping DRM frame");
-            return Ok(());
-        };
-
-        // Convert RGBA → BGRA (XRGB8888 / GBM native format in LE memory).
-        let mut bgra = frame;
-        for pixel in bgra.chunks_exact_mut(4) {
-            // pixel is [R, G, B, A] → [B, G, R, A]
-            pixel.swap(0, 2);
-        }
-
-        // Present: GBM page-flip where available, dumb-buffer fallback otherwise.
-        let presented = if let Some(ref mut drm) = self.drm_backend {
-            drm.present_frame(ww, wh, &bgra)?
-        } else {
-            0
-        };
-
-        // Clean up transient popup render IDs after the frame.
-        if let Some(ref renderer) = self.state.renderer {
-            let mut r = renderer.write();
-            for popup_id in &popup_ids {
-                r.remove_window(popup_render_id(*popup_id));
-            }
-        }
-
-        debug!(
-            "🖥️ DRM rendered {} windows at {}x{} -> {} outputs (GPU composite)",
-            layouts.len(),
-            ww,
-            wh,
-            presented,
-        );
-
-        Ok(())
-    }
-
-    /// Upload pending surface buffers and sync compositor geometry into the
-    /// renderer's scene graph. Returns the popup surface IDs staged for this
-    /// frame plus the number of committed popups actually inserted.
-    fn stage_wgpu_scene_from_state(
-        &mut self,
-        layouts: &HashMap<u64, crate::window::Rectangle>,
-    ) -> (Vec<u32>, usize) {
-        let Some(ref renderer) = self.state.renderer else {
-            return (Vec::new(), 0);
-        };
-        let mut r = renderer.write();
-
-        // Build inverse map: surface_id → window_id for texture uploads.
-        let mut surface_to_window: HashMap<u32, u64> = HashMap::new();
-        for (&wid, &sid) in &self.state.window_map {
-            surface_to_window.insert(sid, wid);
-        }
-
-        // Drain buffer_cache and upload to renderer as WGPU textures.
-        let pending: Vec<(u32, Vec<u8>, (i32, i32))> = {
-            let cache = &mut self.state.buffer_cache;
-            let dims = &mut self.state.buffer_cache_dimensions;
-            cache
-                .drain()
-                .filter_map(|(sid, data)| {
-                    let d = dims.remove(&sid).unwrap_or((0, 0));
-                    if d.0 > 0 && d.1 > 0 {
-                        Some((sid, data, d))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-
-        for (surface_id, data, (w, h)) in &pending {
-            if let Some(&window_id) = surface_to_window.get(surface_id) {
-                r.update_window_texture(window_id, *w as u32, *h as u32, data);
-            }
-        }
-
-        for (window_id, rect) in layouts {
-            let x = rect.x as f32;
-            let y = rect.y as f32;
-            let w = rect.width as f32;
-            let h = rect.height as f32;
-            let focused = self.state.window_manager.read().focused_window_id() == Some(*window_id);
-            let border_color = if focused {
-                [0.3, 0.6, 1.0, 0.9]
-            } else {
-                [0.0, 0.0, 0.0, 0.0]
-            };
-            r.upsert_window_rect(*window_id, (x, y), (w, h), 1.0, border_color);
-        }
-
-        {
-            let wm = self.state.window_manager.read();
-            for &window_id in self
-                .state
-                .workspace_manager
-                .read()
-                .floating_window_ids()
-                .iter()
-            {
-                if let Some(w) = wm.get_window(window_id) {
-                    let fx = w.window.position.0 as f32;
-                    let fy = w.window.position.1 as f32;
-                    let fw = w.window.size.0 as f32;
-                    let fh = w.window.size.1 as f32;
-                    let focused = wm.focused_window_id() == Some(window_id);
-                    let bc = if focused {
-                        [0.3, 0.6, 1.0, 0.9]
-                    } else {
-                        [0.0, 0.0, 0.0, 0.0]
-                    };
-                    r.upsert_window_rect(window_id, (fx, fy), (fw, fh), 1.0, bc);
-                }
-            }
-        }
-
-        let popup_ids: Vec<u32> = self.state.popups.keys().copied().collect();
-        let mut committed_popup_count = 0usize;
-        for popup_id in &popup_ids {
-            let popup = &self.state.popups[popup_id];
-            if !popup.committed {
-                continue;
-            }
-            let (parent_x, parent_y) = self
-                .state
-                .window_map
-                .iter()
-                .find_map(|(&wid, &sid)| {
-                    if sid == popup.parent_surface_id {
-                        self.state
-                            .window_manager
-                            .read()
-                            .get_window(wid)
-                            .map(|w| (w.window.position.0, w.window.position.1))
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or((0, 0));
-
-            let popup_x = parent_x + popup.x;
-            let popup_y = parent_y + popup.y;
-            let popup_w = popup.width.max(1) as f32;
-            let popup_h = popup.height.max(1) as f32;
-            let popup_render_id = popup_render_id(*popup_id);
-            r.upsert_window_rect(
-                popup_render_id,
-                (popup_x as f32, popup_y as f32),
-                (popup_w, popup_h),
-                1.0,
-                [0.0, 0.0, 0.0, 0.0],
-            );
-            committed_popup_count += 1;
-        }
-
-        (popup_ids, committed_popup_count)
     }
 
     /// Process events (for compositor integration)
@@ -3371,38 +1569,40 @@ impl AxiomSmithayBackendReal {
         self.run_one_cycle()
     }
 
-    /// Wire an `AxiomXwm` instance into the backend for XWayland clipboard
-    /// bridging and X11 window management. Call this once XWayland has spun
-    /// up and the X11 connection stream is available.
-    pub fn set_xwm(&mut self, xwm: AxiomXwm) {
-        info!("🔗 Wiring XWM into backend for X11 clipboard bridging");
-        self.state.xwm = Some(xwm);
+
+    /// Test/debug accessor: clone the cached Wayland→compositor selection
+    /// payload (`clipboard_cache`). Used by headless integration tests to
+    /// assert the compositor received a client's clipboard offer.
+    pub fn debug_clipboard_cache(&self) -> Option<Vec<u8>> {
+        self.state.clipboard_cache.clone()
     }
 
-    /// Populate the clipboard cache with data from an external source
-    /// (e.g., Lazy UI IPC, compositor-managed text). When X11 apps request
-    /// clipboard contents, this data is served back to them.
-    pub fn set_clipboard_data(&mut self, data: Vec<u8>) {
-        debug!("📋 Clipboard cache populated ({} bytes)", data.len());
-        self.state.clipboard_cache = Some(data);
-
-        // Expose the same compositor-owned clipboard payload to Wayland
-        // clients through smithay's server-side data-device selection path.
-        set_data_device_selection::<State>(
-            &self.display.handle(),
-            &self.state.seat,
-            vec![
-                "text/plain;charset=utf-8".to_string(),
-                "text/plain".to_string(),
-            ],
-            (),
-        );
-
-        // If the XWM is active, claim X11 clipboard ownership so X11 apps
-        // come to us for selection data rather than stale X11 owners.
-        if let Some(xwm) = self.state.xwm.as_mut() {
-            if let Err(e) = xwm.own_selection() {
-                warn!("⚠️ Failed to claim X11 clipboard: {}", e);
+    /// Test/debug helper: grant keyboard + data-device focus to the first
+    /// mapped client surface so it may offer a clipboard selection. In a real
+    /// session this focus is driven by input; headless tests grant it directly
+    /// to exercise the selection path without a display.
+    pub fn debug_focus_first_client_for_test(&mut self) {
+        // The headless Noop backend never registers input devices (that happens
+        // in `initialize_winit`), so the seat may lack a keyboard. Selection
+        // focus requires one, so create it on demand for the test.
+        if self.state.seat.get_keyboard().is_none() {
+            let _ = self
+                .state
+                .seat
+                .add_keyboard(XkbConfig::default(), 0, 0);
+        }
+        let surface = self
+            .state
+            .toplevels
+            .values()
+            .next()
+            .map(|t| t.wl_surface().clone());
+        if let Some(surface) = surface {
+            if let Some(keyboard) = self.state.seat.get_keyboard() {
+                keyboard.set_focus(&mut self.state, Some(surface.clone()), Serial::from(0));
+            }
+            if let Some(dh) = &self.state.display_handle {
+                set_data_device_focus(dh, &self.state.seat, surface.client());
             }
         }
     }
@@ -3421,25 +1621,12 @@ impl AxiomSmithayBackendReal {
                     let _ = backend.bind();
                 }
             }
-            BackendKind::Drm => {
-                if let Some(ref mut drm) = self.drm_backend {
-                    let _ = drm.shutdown();
-                }
-            }
             BackendKind::Noop => {
                 // Noop shutdown: nothing to clean up.
             }
         }
 
         Ok(())
-    }
-}
-
-fn normalized_output_name(raw_name: &str, index: usize) -> String {
-    if raw_name.is_empty() {
-        format!("Axiom-Output-{}", index)
-    } else {
-        raw_name.to_string()
     }
 }
 
@@ -3457,12 +1644,9 @@ mod tests {
         backend_prefers_server_side_decorations, negotiated_xdg_decoration_mode,
         smithay_output_scale, State,
     };
-    use super::clipboard_bridge::{create_pipe, write_selection_bytes_to_fd};
-    use super::render_bridge::{popup_render_id, should_render};
     use crate::config::AxiomConfig;
     use smithay::output::Scale;
     use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
-    use std::io::Read;
 
     #[test]
     fn test_keyboard_repeat_settings_follow_config_values() {
@@ -3492,8 +1676,9 @@ mod tests {
 
     #[test]
     fn test_backend_prefers_server_side_decorations() {
-        // SSD rendering is now live via WGPU solid-color + text pipelines.
-        // Title text falls back gracefully when system fonts are unavailable.
+        // SSD rendering is live via the GLES pipeline (SolidColorRenderElement
+        // for backdrop/titlebar/buttons, TextureRenderElement for client content).
+        // Title text rendering falls back gracefully when system fonts unavailable.
         assert!(backend_prefers_server_side_decorations());
         assert_eq!(negotiated_xdg_decoration_mode(), Mode::ServerSide);
     }
@@ -3513,34 +1698,5 @@ mod tests {
             "text/plain;charset=utf-8".to_string(),
         ]);
         assert_eq!(mime.as_deref(), Some("text/plain;charset=utf-8"));
-    }
-
-    #[test]
-    fn test_write_selection_bytes_to_fd_round_trips() {
-        let (read_fd, write_fd) = create_pipe().expect("pipe");
-        write_selection_bytes_to_fd(write_fd, b"hello clipboard");
-        let mut file = std::fs::File::from(read_fd);
-        let mut data = Vec::new();
-        file.read_to_end(&mut data).expect("read pipe");
-        assert_eq!(data, b"hello clipboard");
-    }
-
-    #[test]
-    fn test_should_render_for_non_empty_scene() {
-        assert!(should_render(true, false, 0));
-        assert!(should_render(false, true, 0));
-        assert!(should_render(false, false, 1));
-    }
-
-    #[test]
-    fn test_should_skip_wgpu_gl_bridge_for_empty_scene() {
-        assert!(!should_render(false, false, 0));
-    }
-
-    #[test]
-    fn test_popup_render_id_is_in_reserved_namespace() {
-        let id = popup_render_id(42);
-        assert!(id >= 0x8000_0000);
-        assert_eq!(id, 0x8000_0000 + 42);
     }
 }

@@ -129,9 +129,6 @@ quit = 'Super+Shift+q'
 toggle_floating = 'Super+Shift+Space'
 toggle_minimize = 'Super+grave'
 
-[xwayland]
-enabled = false
-
 [general]
 debug = false
 max_fps = 0
@@ -148,7 +145,6 @@ vsync = true
     assert_eq!(config.effects.shadows.size, 25);
     assert_eq!(config.workspace.workspace_width, 1600);
     assert_eq!(config.input.mouse_accel, 0.5);
-    assert!(!config.xwayland.enabled);
 
     Ok(())
 }
@@ -255,21 +251,6 @@ fn test_bindings_config_validation() {
     // Test that keybindings are valid format
     assert!(is_valid_keybinding(&config.scroll_left));
     assert!(is_valid_keybinding(&config.quit));
-}
-#[test]
-#[allow(clippy::field_reassign_with_default)]
-fn test_xwayland_config() {
-    let mut config = XWaylandConfig::default();
-
-    // Test enabling/disabling XWayland
-    config.enabled = false;
-    assert!(!config.enabled);
-
-    config.enabled = true;
-    assert!(config.enabled);
-
-    // Test display field defaults
-    assert!(config.display.is_none());
 }
 
 // Helper function to validate keybinding format

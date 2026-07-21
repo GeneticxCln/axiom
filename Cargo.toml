@@ -3,7 +3,7 @@ name = "axiom"
 version = "0.1.0"
 edition = "2021"
 authors = ["Axiom Contributors"]
-description = "A hybrid Wayland compositor combining scrollable workspaces with beautiful visual effects"
+description = "A winit-only Wayland compositor with niri-inspired scrollable workspaces (GLES rendering)"
 repository = "https://github.com/GeneticxCln/axiom"
 license = "GPL-3.0"
 keywords = ["wayland", "compositor", "window-manager", "tiling", "effects"]
@@ -40,57 +40,27 @@ env_logger = "0.10"
 wayland-server = "0.31"
 wayland-protocols = { version = "0.32", features = ["server", "staging", "unstable"] }
 
-# Smithay compositor framework with full features
+# Smithay compositor framework — winit-only, GLES rendering.
 smithay = { version = "0.7.0", default-features = false, features = [
     "backend_winit",
-    "backend_drm",
-    "backend_gbm",
-    "backend_libinput",
-    "backend_session",
-    "backend_session_libseat",
-    "backend_udev",
     "renderer_gl",
     "wayland_frontend",
-    "xwayland"
 ] }
-# smithay-client-toolkit (removed v0.7.6 audit: unused — compositor is server-side only; no client-toolkit API is referenced)
 
 # Graphics and input
-# glium   (removed v0.7.5 audit: unused — Smithay 0.7's GlesRenderer covers GL)
-# drm     (removed v0.7.5 audit: unused — Smithay 0.7 backend_drm feature re-exports)
-# gbm     (removed v0.7.5 audit: unused — Smithay 0.7 backend_drm feature re-exports)
-# input   (removed v0.7.5 audit: unused as a first-party dep — smithay::reexports::input::Axis works)
-# winit   (removed v0.7.5 audit: unused as a first-party dep — smithay::backend::winit re-exports)
-# dbus    (removed v0.7.5 audit: unused — IPC is via Unix sockets only)
-# ctrlc   (removed v0.7.5 audit: unused — graceful shutdown handled by tokio::signal)
-# tracing + tracing-subscriber (removed v0.7.5 audit: unused — log/env_logger covers observability)
-cgmath = "0.18"
+# The compositor is winit-only (GLES via Smithay's GlesRenderer). The
+# following first-party deps were removed because Smithay 0.7 re-exports
+# the equivalents and/or the DRM/KMS backend that needed them is gone:
+#   glium, drm, gbm, input, winit, dbus, ctrlc, tracing, cgmath,
+#   libseat, calloop, udev
 xkbcommon = "0.8"  # Smithay 0.7 backend uses xkbcommon for keyboard handling
-libc = "0.2"
-x11rb = "0.13"
-libseat = "0.2"  # Seat management for DRM/KMS device access
+libc = "0.2"      # pipe2 (clipboard extraction) and getuid (IPC ownership check)
 
-# Graphics and rendering
-wgpu = "0.19"  # GPU compute and rendering
-
-# Event loop
-calloop = "0.13"  # Callback-based event loop for FD polling (DRM + libinput + udev)
-
-# DRM/KMS backend for production session-compositor mode
-drm = "0.14"     # Direct Rendering Manager — KMS modesetting, connectors, CRTCs, page-flip
-drm-fourcc = "2.2"  # DRM fourcc pixel format codes (re-exported by drm crate for create_dumb_buffer)
-gbm = "0.18"     # Generic Buffer Management — GPU-accelerated scanout buffers via GBM surface
-input = "0.9"    # libinput bindings — touchpad, keyboard, touch, gesture events
-udev = "0.8"     # udev device monitoring — DRM connector hotplug detection
-
-# IPC for Lazy UI integration
+# Event loop / IPC for Lazy UI integration
 serde_json = "1.0"
-# interprocess (removed v0.7.6 audit: unused — IPC uses tokio::net::UnixListener directly)
 
 # Utilities
 # rand (removed v0.7.6 audit: unused — Phase 3 input simulation was removed)
-bytemuck = { version = "1.14", features = ["derive"] }  # For GPU buffer data
-ab_glyph = "0.2"  # Font atlas / glyph rendering for SSD title text
 parking_lot = "0.12"  # For RwLock synchronization
 # Compile-time invariant presence-check (Phase 1.A4 hardening).
 # Promoted to [dependencies] (was [dev-dependencies]) so the
@@ -115,22 +85,8 @@ name = "axiom"
 path = "src/lib.rs"
 # Features
 [features]
-# Phase 1.A6: `placeholder-pipeline` is default-enabled so `cargo run`
-# (no feature flags) behaves identically to the prior
-# `cfg(debug_assertions)` contract — the placeholder renders for
-# windows that have not yet committed a real SHM/WGPU buffer. Set
-# `--no-default-features` (or pass `cargo build --release
-# --no-default-features`) to compile a release-without-placeholders
-# build, in which the placeholder pipeline + WGSL shader are not
-# compiled at all. With the feature left enabled (default), the release
-# binary embeds the placeholder WGSL (~2 KB) plus an extra wgpu RenderPipeline
-# slot — acceptable for dev/CI parity but worth knowing for packed archive
-# size. Packagers building for size-constrained images can opt out:
-#     cargo build --release --no-default-features
-default = ["placeholder-pipeline"]
+# `examples` gates the metrics_client example so it doesn't break default builds.
 examples = []
-demo = []
-placeholder-pipeline = []
 
 
 
@@ -138,14 +94,17 @@ placeholder-pipeline = []
 # Development dependencies for testing
 [dev-dependencies]
 criterion = "0.5"
-# Unit testing frameworks
-tokio-test = "0.4"
 proptest = "1.4"  # Property-based testing
-quickcheck = "1.0"  # QuickCheck-style testing
 # Integration testing utilities
 tempfile = "3.0"  # Temporary files and directories for tests
 serial_test = "3.0"  # Sequential test execution# Async testing utilities
-futures-test = "0.3"
+# Real-client (headless) Wayland smoke test: connect a wayland-client to the
+# compositor's Noop socket and drive an xdg_toplevel + wl_shm surface end-to-end.
+wayland-client = "0.31"
+# `client` feature adds the client-side xdg-shell bindings used by the test.
+wayland-protocols = { version = "0.32", features = ["client"] }
+# Poll-based non-blocking dispatch in the headless clipboard test client.
+libc = "0.2"
 
 [build-dependencies]
 chrono = { version = "0.4", features = ["serde"] }

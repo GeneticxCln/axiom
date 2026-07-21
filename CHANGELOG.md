@@ -2,18 +2,41 @@
 
 ## Unreleased
 
+### Correction — winit-only, GLES rendering
+
+The entries below that mention a **WGPU pipeline**, **DRM/KMS**, **XWayland**,
+**seccomp sandbox**, or the **clipboard/render bridges** describe a design that
+has since been **removed**. The compositor is now **winit-only** (Smithay 0.7
+`backend_winit`) with **GLES rendering** via `GlesRenderer` — there is no `wgpu`
+dependency and no DRM backend. The following were deleted:
+
+- `effects/`, `renderer/` (WGPU/WGSL pipeline), `xwayland/`, `xwm.rs`,
+  `sandbox.rs`, `src/backend/drm.rs`, `clipboard_bridge.rs`, `render_bridge.rs`
+- `BackendKind::Drm` and all DRM match arms (`initialize_drm`, `run_one_cycle_drm`,
+  hotplug monitor, libseat session)
+- `XWaylandConfig` and the `no_effects` / `backend` CLI flags
+- deps: `libseat`, `calloop`, `drm`, `drm-fourcc`, `gbm`, `input`, `udev`
+
+The config `effects` section is retained as **data only** (IPC `EffectsControl`
+is accepted but is a no-op). The `placeholder-pipeline` Cargo feature and its
+WGSL shader are also gone; windows without a committed buffer simply are not
+drawn.
+
 ### Phase 2: Core feature completion — COMPLETE ✅
 
 #### Phase 2.4: Per-connector incremental modesetting ✅
 
-- **`DrmBackend::apply_hotplug_diff` — per-connector incremental modesetting.** In-place add/remove of [`KmsOutput`]s without disturbing already-displayed monitors. Re-scans the device via `KmsState::scan_new_connectors` (which reserves CRTCs already held by `self.kms.outputs`), diffs names via `compute_output_diff`, and then **destroys** disconnected outputs via `KmsState::destroy_one_output` (which restores the saved CRTC state and tears down framebuffers/GBM surfaces) before **allocating** newly-connected outputs via `KmsState::allocate_one_output` (which modesets one connector at a CRTC that was free at scan time). The unchanged outputs' CRTC / encoder / mode / GBM surface / CPU scanout buffer are preserved byte-for-byte across the hotplug. **No screen flash on already-displayed monitors.** Returns `(Vec<String> added, Vec<String> removed)` matching the projected downstream hotplug-handler contract; early-outs on no-op udev events.
+- **`DrmBackend::apply_hotplug_diff` — per-connector incremental modesetting.** *(Superseded — DRM backend removed; retained here only as historical record of the original design.)*
 - **`compute_output_diff` — pure helper behind the diff math.** Free function in `src/backend/drm.rs` taking `&[String]` existing + `&[String]` new and returning `(Vec<String> added, Vec<String> removed)`. Pure: no hardware, no allocation beyond the two return vectors. Unit-tested in `mod tests` for empty / identical / single-add / single-remove / mixed / replace / idempotent / duplicates / case-sensitive / both-empty cases (10 tests, all clippy-clean).
 - **`find_all_connected_connectors` — CRTC-aware connector scan.** Refactored to take an `in_use_crtcs: &HashSet<crtc::Handle>` argument and skip CRTCs that are already pinned by existing outputs. Picks the first compatible CRTC that is NOT in use, so newly-arrived connectors can never steal a CRTC from an already-displayed monitor. Called from both `KmsState::open` (with an empty set) and `KmsState::scan_new_connectors` (with `allocated_crtc_handles()`).
 - **`KmsState::allocate_one_output` / `destroy_one_output` / `allocated_crtc_handles` / `scan_new_connectors` / `build_kms_output`.** New per-connector modeset primitives. Single source of truth: `build_kms_output` is the helper that knows how to modeset one connector (CPU scanout / GBM / dumb fallback branches), and both `KmsState::open` (initial enumeration) and `allocate_one_output` (incremental hotplug add) call it.
 
 ### Build / Feature gates
 
-- **Placeholder WGSL pipeline is now controlled by a Cargo feature, not `cfg(debug_assertions)`.** The `placeholder-pipeline` feature is **default-on**, preserving the previous dev-mode behaviour where untextured windows draw through the placeholder pipeline. To replicate the prior release behaviour (no placeholder WGSL embedded in the binary), build with `cargo build --release --no-default-features`. The release binary now ships the embedded `placeholder.wgsl` (~2 KB) and an additional `wgpu::RenderPipeline` slot by default; opt out via `--no-default-features` if binary size matters.
+- **`placeholder-pipeline` feature removed.** The WGSL placeholder pipeline and
+  its `placeholder.wgsl` shader no longer exist; untextured windows are simply
+  not drawn. The `default = ["placeholder-pipeline"]` feature set is gone.
+  *(See the Correction note at the top of this release.)*
 
 ### CI
 

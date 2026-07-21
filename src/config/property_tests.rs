@@ -228,19 +228,6 @@ prop_compose! {
     }
 }
 
-// Strategy for generating valid XWayland configurations
-prop_compose! {
-    fn valid_xwayland_config()(
-        enabled in any::<bool>(),
-        display in prop::option::of(0u32..16u32),
-    ) -> XWaylandConfig {
-        XWaylandConfig {
-            enabled,
-            display,
-        }
-    }
-}
-
 // Strategy for generating valid feature-flag configurations. Both
 // fields are independent bools with a default of `false`, so we
 // exercise the enabled branch at half probability; the round-trip
@@ -282,7 +269,6 @@ prop_compose! {
         window in valid_window_config(),
         input in valid_input_config(),
         bindings in valid_bindings_config(),
-        xwayland in valid_xwayland_config(),
         general in valid_general_config(),
     ) -> AxiomConfig {
         AxiomConfig {
@@ -291,7 +277,6 @@ prop_compose! {
             window,
             input,
             bindings,
-            xwayland,
             general,
             // BackendConfig has no validation knobs of its own (it
             // round-trips through `BackendKind::from_config_str`); the
@@ -317,7 +302,6 @@ prop_compose! {
     fn valid_backend_config()(
         kind in prop_oneof![
             Just("winit".to_string()),
-            Just("drm".to_string()),
             Just("noop".to_string()),
         ],
     ) -> BackendConfig {
