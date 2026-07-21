@@ -319,7 +319,7 @@ fn render_scene_into(
     for (window_id, mode, focused) in &decorations {
         if *mode == DecorationMode::ServerSide {
             if let Some(rect) = layouts.get(window_id) {
-                let titlebar_h = 30;
+                let titlebar_h = 32; // ponytail: should ideally be plumbed from DecorationTheme::default().titlebar_height, but kept constant for simplicity
                 let tb_color: [f32; 4] = if *focused {
                     [0.3, 0.3, 0.5, 1.0]
                 } else {

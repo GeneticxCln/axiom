@@ -43,3 +43,5 @@ lcov.info
 flamegraph.*
 perf.data*
 heaptrack.*
+.slim/deepwork/
+.freebuff/

@@ -597,10 +597,10 @@ async fn test_ipc_optimize_config_flow() -> Result<()> {
 
     ipc_server.start()?;
 
-    let original_blur = config.effects.blur.radius;
+    let original_scroll = config.workspace.scroll_speed;
 
     let mut changes = HashMap::new();
-    changes.insert("effects.blur.radius".into(), serde_json::json!(18.0));
+    changes.insert("workspace.scroll_speed".into(), serde_json::json!(2.5));
     let cmd = LazyUIMessage::OptimizeConfig {
         changes,
         reason: "test".into(),
@@ -614,11 +614,11 @@ async fn test_ipc_optimize_config_flow() -> Result<()> {
 
     assert!(changed, "OptimizeConfig should change config");
     assert!(actions.is_empty(), "no pending actions for config changes");
-    assert_eq!(
-        config.effects.blur.radius, 18,
-        "blur radius should be updated"
+    assert!(
+        (config.workspace.scroll_speed - 2.5).abs() < f64::EPSILON,
+        "scroll speed should be updated"
     );
-    assert_ne!(config.effects.blur.radius, original_blur);
+    assert_ne!(config.workspace.scroll_speed, original_scroll);
 
     ipc_server.shutdown().await?;
 
@@ -901,7 +901,7 @@ async fn test_ipc_readonly_messages() -> Result<()> {
     assert!(actions.is_empty(), "HealthCheck produces no actions");
 
     // Config should be unchanged
-    assert_eq!(config.effects.blur.radius, config_clone.effects.blur.radius);
+    assert_eq!(config.workspace.scroll_speed, config_clone.workspace.scroll_speed);
 
     ipc_server.shutdown().await?;
 

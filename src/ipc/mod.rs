@@ -52,10 +52,6 @@ const KNOWN_WORKSPACE_ACTIONS: &[&str] = &[
 ];
 
 
-/// Maximum accepted animation duration in milliseconds.
-const MAX_ANIMATION_DURATION_MS: u32 = 10_000;
-/// Maximum accepted blur radius in pixels (0..=32).
-const MAX_EFFECTS_BLUR_RADIUS_PX: f64 = 32.0;
 /// Maximum accepted scroll speed.
 const MAX_SCROLL_SPEED: f64 = 100.0;
 /// Maximum size of a single line from an IPC client (64 KiB).
@@ -924,35 +920,20 @@ impl AxiomIPCServer {
                     reason
                 );
 
+                // ponytail: effects keys (blur.radius, animations.duration) are silently
+                // accepted as applied but are no-ops — the effects engine was removed.
                 let mut applied: Vec<String> = Vec::new();
                 let mut rejected: Vec<(String, String)> = Vec::new();
                 for (key, value) in changes {
                     debug!("  📝 Setting {}: {:?}", key, value);
                     let val_f64 = value.as_f64();
                     match (key.as_str(), val_f64) {
-                        ("effects.blur.radius", Some(v))
-                            if v.is_finite()
-                                && (0.0..=MAX_EFFECTS_BLUR_RADIUS_PX as f64).contains(&v) =>
-                        {
-                            applied.push(key);
-                        }
-                        ("effects.animations.duration", Some(v))
-                            if v.is_finite()
-                                && (1.0..=MAX_ANIMATION_DURATION_MS as f64).contains(&v) =>
-                        {
-                            applied.push(key);
-                        }
                         ("workspace.scroll_speed", Some(v))
                             if v.is_finite() && (0.0..=MAX_SCROLL_SPEED).contains(&v) =>
                         {
                             applied.push(key);
                         }
-                        (
-                            "effects.blur.radius"
-                            | "effects.animations.duration"
-                            | "workspace.scroll_speed",
-                            _,
-                        ) => {
+                        ("workspace.scroll_speed", _) => {
                             rejected.push((key, "invalid_or_out_of_range_value".into()));
                         }
                         _ => {
@@ -1037,11 +1018,8 @@ impl AxiomIPCServer {
                 );
             }
             LazyUIMessage::SetWindowBlur { .. } => {
-                debug!(
-                    "⚠️ SetWindowBlur reached process_lazy_ui_message \
-                     — upstream gate in handle_client should have dispatched \
-                     it via cmd_tx only"
-                );
+                // ponytail: SetWindowBlur is a no-op — the effects engine was removed.
+                // Accepted and forwarded to cmd_tx by the upstream gate but never applied.
             }
             LazyUIMessage::SetClipboard { .. } => {
                 debug!(
@@ -1174,23 +1152,11 @@ impl AxiomIPCServer {
                 match message {
                     LazyUIMessage::OptimizeConfig { changes, reason } => {
                         info!("🎯 Applying optimization: {} ({})", changes.len(), reason);
+                        // ponytail: effects keys (blur.radius, animations.duration) are accepted
+                        // but are no-ops — the effects engine was removed.
                         for (key, value) in changes {
                             if let Some(val_f64) = value.as_f64() {
                                 match key.as_str() {
-                                    "effects.blur.radius" => {
-                                        config.effects.blur.radius = val_f64
-                                            .clamp(0.0, MAX_EFFECTS_BLUR_RADIUS_PX as f64)
-                                            as u32;
-                                        config_changed = true;
-                                        debug!("  Set blur radius to {}", val_f64);
-                                    }
-                                    "effects.animations.duration" => {
-                                        config.effects.animations.duration = val_f64
-                                            .clamp(1.0, MAX_ANIMATION_DURATION_MS as f64)
-                                            as u32;
-                                        config_changed = true;
-                                        debug!("  Set animation duration to {}", val_f64);
-                                    }
                                     "workspace.scroll_speed" => {
                                         if val_f64.is_finite() && val_f64 >= 0.0 {
                                             config.workspace.scroll_speed =
@@ -1208,23 +1174,9 @@ impl AxiomIPCServer {
                     }
                     LazyUIMessage::SetConfig { key, value } => {
                         info!("⚙️ Setting config: {} = {:?}", key, value);
-                        // Manual mapping with bounds enforcement (defense in depth).
-                        // The per-client IPC handler already validates ranges for the
-                        // ACK, but this compositor-side path re-validates to guard
-                        // against future code-paths that bypass the per-client layer.
+                        // ponytail: effects keys accepted but are no-ops — effects engine removed.
                         if let Some(val_f64) = value.as_f64() {
                             match key.as_str() {
-                                "effects.blur.radius" => {
-                                    config.effects.blur.radius = val_f64
-                                        .clamp(0.0, MAX_EFFECTS_BLUR_RADIUS_PX as f64)
-                                        as u32;
-                                    config_changed = true;
-                                }
-                                "effects.animations.duration" => {
-                                    config.effects.animations.duration =
-                                        val_f64.clamp(1.0, MAX_ANIMATION_DURATION_MS as f64) as u32;
-                                    config_changed = true;
-                                }
                                 "workspace.scroll_speed"
                                     if val_f64.is_finite() && val_f64 >= 0.0 =>
                                 {
@@ -1483,6 +1435,10 @@ impl AxiomIPCServer {
     /// Returns `None` for unknown paths so the IPC layer can answer
     /// with `Null` rather than a misleading default.
     fn resolve_config_path(config: &AxiomConfig, key: &str) -> Option<serde_json::Value> {
+        // ponytail: effects.* paths return None — config values exist but are never applied.
+        if key.starts_with("effects.") {
+            return None;
+        }
         match key {
             "workspace.scroll_speed" => Some(serde_json::json!(config.workspace.scroll_speed)),
             "workspace.infinite_scroll" => {
@@ -1500,13 +1456,6 @@ impl AxiomIPCServer {
                 Some(serde_json::json!(config.window.focus_follows_mouse))
             }
             "window.border_width" => Some(serde_json::json!(config.window.border_width)),
-            "effects.enabled" => Some(serde_json::json!(config.effects.enabled)),
-            "effects.blur.radius" => Some(serde_json::json!(config.effects.blur.radius)),
-            "effects.blur.intensity" => Some(serde_json::json!(config.effects.blur.intensity)),
-            "effects.animations.duration" => {
-                Some(serde_json::json!(config.effects.animations.duration))
-            }
-            "effects.shadows.opacity" => Some(serde_json::json!(config.effects.shadows.opacity)),
             "general.max_fps" => Some(serde_json::json!(config.general.max_fps)),
             "general.vsync" => Some(serde_json::json!(config.general.vsync)),
             _ => None,

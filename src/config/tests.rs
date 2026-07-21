@@ -14,9 +14,6 @@ fn test_default_configuration_is_valid() {
 
     // Test that all default values are reasonable
     assert!(config.effects.enabled);
-    // Avoid clippy::absurd_extreme_comparisons by casting to signed types
-    assert!((config.effects.blur.radius as i32) >= 0);
-    assert!((config.effects.shadows.size as i32) >= 0);
     assert!((config.workspace.gaps as i32) >= 0);
     assert!(config.workspace.scroll_speed > 0.0);
 
@@ -41,10 +38,6 @@ fn test_configuration_serialization_roundtrip() -> Result<()> {
         deserialized_config.effects.enabled
     );
     assert_eq!(
-        original_config.effects.blur.radius,
-        deserialized_config.effects.blur.radius
-    );
-    assert_eq!(
         original_config.workspace.workspace_width,
         deserialized_config.workspace.workspace_width
     );
@@ -65,31 +58,6 @@ fn test_configuration_from_file() -> Result<()> {
     let test_config = r#"
 [effects]
 enabled = true
-
-[effects.animations]
-enabled = true
-duration = 300
-curve = "ease-out"
-workspace_transition = 250
-window_animation = 200
-
-[effects.blur]
-enabled = true
-radius = 15
-intensity = 0.9
-window_backgrounds = true
-
-[effects.rounded_corners]
-enabled = true
-radius = 8
-antialiasing = 2
-
-[effects.shadows]
-enabled = true
-size = 25
-blur_radius = 15
-opacity = 0.7
-color = '#000000'
 
 [workspace]
 scroll_speed = 1.5
@@ -141,8 +109,6 @@ vsync = true
     let config = AxiomConfig::load(&file_path)?;
 
     // Verify loaded values
-    assert_eq!(config.effects.blur.radius, 15);
-    assert_eq!(config.effects.shadows.size, 25);
     assert_eq!(config.workspace.workspace_width, 1600);
     assert_eq!(config.input.mouse_accel, 0.5);
 
@@ -158,31 +124,6 @@ fn test_partial_configuration_merge() -> Result<()> {
     let partial_config = r#"
 [effects]
 enabled = false
-
-[effects.animations]
-enabled = true
-duration = 300
-curve = "ease-out"
-workspace_transition = 250
-window_animation = 200
-
-[effects.blur]
-enabled = true
-radius = 25
-intensity = 0.8
-window_backgrounds = true
-
-[effects.rounded_corners]
-enabled = true
-radius = 8
-antialiasing = 2
-
-[effects.shadows]
-enabled = true
-size = 20
-blur_radius = 15
-opacity = 0.6
-color = '#000000'
 "#;
 
     fs::write(&file_path, partial_config)?;
@@ -191,7 +132,6 @@ color = '#000000'
     let config = AxiomConfig::load(&file_path)?;
 
     // Verify overridden values
-    assert_eq!(config.effects.blur.radius, 25);
     assert!(!config.effects.enabled);
 
     // Verify default values are still present
@@ -298,19 +238,5 @@ mod property_tests {
             }
         }
 
-        #[test]
-        #[allow(clippy::field_reassign_with_default)]
-        fn test_blur_intensity_bounds(intensity in 0.0f64..2.0f64) {
-            let mut config = AxiomConfig::default();
-            config.effects.blur.intensity = intensity;
-
-            // Validation should handle bounds
-            let result = config.validate();
-            if (0.0..=1.0).contains(&intensity) {
-                prop_assert!(result.is_ok());
-            } else {
-                prop_assert!(result.is_err());
-            }
-        }
     }
 }

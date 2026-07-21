@@ -340,8 +340,6 @@ proptest! {
         // All generated configs should be valid
         prop_assert!(config.workspace.workspace_width > 0);
         prop_assert!(config.workspace.scroll_speed > 0.0);
-        prop_assert!(config.effects.blur.intensity >= 0.0 && config.effects.blur.intensity <= 1.0);
-        prop_assert!(config.effects.shadows.opacity >= 0.0 && config.effects.shadows.opacity <= 1.0);
         prop_assert!(config.input.keyboard_repeat_rate > 0);
         prop_assert!(config.input.mouse_accel > 0.0);
         // max_fps is u32, always >= 0
@@ -377,13 +375,11 @@ proptest! {
         tiny_scroll_speed in 0.001f64..0.1f64,
         large_workspace_width in 10000u32..50000u32,
         zero_gaps in Just(0u32),
-        max_opacity in Just(1.0f64),
     ) {
         let mut config = AxiomConfig::default();
         config.workspace.scroll_speed = tiny_scroll_speed;
         config.workspace.workspace_width = large_workspace_width;
         config.workspace.gaps = zero_gaps;
-        config.effects.shadows.opacity = max_opacity;
 
         // Should still serialize successfully
         let toml_result = toml::to_string(&config);
@@ -393,29 +389,6 @@ proptest! {
         prop_assert!(config.workspace.scroll_speed > 0.0);
         prop_assert!(config.workspace.workspace_width >= 10000);
         prop_assert_eq!(config.workspace.gaps, 0);
-        prop_assert_eq!(config.effects.shadows.opacity, 1.0);
-    }
-
-    /// Test that invalid color formats are rejected
-    #[test]
-    fn test_invalid_color_handling(
-        invalid_color in prop_oneof![
-            Just("invalid".to_string()),
-            Just("#GGG".to_string()),
-            Just("#12345".to_string()),
-            Just("123456".to_string()),
-        ]
-    ) {
-        let mut config = AxiomConfig::default();
-        config.effects.shadows.color = invalid_color.clone();
-
-        // Serialization should still work (validation happens elsewhere)
-        let toml_result = toml::to_string(&config);
-        prop_assert!(toml_result.is_ok());
-
-        // But config should be flagged for validation later
-        prop_assert!(!config.effects.shadows.color.starts_with("#") ||
-                     config.effects.shadows.color.len() != 7);
     }
 }
 

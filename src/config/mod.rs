@@ -181,21 +181,30 @@ pub struct WorkspaceConfig {
 }
 
 /// Visual effects configuration (Hyprland-inspired)
+// ponytail: EffectsConfig retained as data-only for config backward compatibility.
+// Effects processing (blur, animation, shadows, rounded_corners) was removed with
+// the effects engine. Values are stored and round-trip through serialization but
+// are never applied at runtime.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EffectsConfig {
     /// Enable/disable all visual effects
+    #[serde(default)]
     pub enabled: bool,
 
     /// Animation settings
+    #[serde(default)]
     pub animations: AnimationConfig,
 
     /// Blur effect settings
+    #[serde(default)]
     pub blur: BlurConfig,
 
     /// Rounded corners settings
+    #[serde(default)]
     pub rounded_corners: RoundedCornersConfig,
 
     /// Drop shadow settings
+    #[serde(default)]
     pub shadows: ShadowConfig,
 }
 
@@ -612,41 +621,7 @@ impl AxiomConfig {
             anyhow::bail!("snap_threshold_px must be in [0, 10000]");
         }
 
-        // --- effects ---
-        if self.effects.blur.radius > 256 {
-            anyhow::bail!("blur.radius must be <= 256");
-        }
-        if !(0.0..=1.0).contains(&self.effects.blur.intensity) {
-            anyhow::bail!("blur.intensity must be in [0, 1]");
-        }
-        if self.effects.animations.duration == 0 || self.effects.animations.duration > 60_000 {
-            anyhow::bail!("animation duration must be in [1, 60000] ms");
-        }
-        if self.effects.animations.workspace_transition > 60_000 {
-            anyhow::bail!("workspace transition duration must be <= 60000 ms");
-        }
-        if self.effects.animations.window_animation > 60_000 {
-            anyhow::bail!("window animation duration must be <= 60000 ms");
-        }
-        let valid_curves = ["linear", "ease", "ease-in", "ease-out", "ease-in-out"];
-        if !valid_curves.contains(&self.effects.animations.curve.as_str()) {
-            anyhow::bail!("Invalid animation curve: {}", self.effects.animations.curve);
-        }
-        if self.effects.rounded_corners.radius > 256 {
-            anyhow::bail!("rounded_corners.radius must be <= 256");
-        }
-        if !(1..=4).contains(&self.effects.rounded_corners.antialiasing) {
-            anyhow::bail!("rounded_corners.antialiasing must be 1-4");
-        }
-        if !(0.0..=1.0).contains(&self.effects.shadows.opacity) {
-            anyhow::bail!("shadows.opacity must be in [0, 1]");
-        }
-        if self.effects.shadows.size > 1024 {
-            anyhow::bail!("shadows.size must be <= 1024");
-        }
-        if self.effects.shadows.blur_radius > 512 {
-            anyhow::bail!("shadows.blur_radius must be <= 512");
-        }
+        // ponytail: effects bounds validation removed — values are stored but never applied.
         // Validate shadow.color is a valid 6-char hex string.
         // The previous check was format-only (`#` prefix + length 7),
         // which accepted strings like `"#GGGGGG"` that contain
