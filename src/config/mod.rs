@@ -1,12 +1,12 @@
 //! Configuration management for Axiom
 //!
 //! This module handles loading, parsing, and validating configuration
-//! from TOML files. It combines settings for workspaces, effects,
+//! from TOML files. It combines settings for workspaces,
 //! input handling, and more.
 //!
 //! The configuration is composed of several sections:
 //! - [`WorkspaceConfig`]: Scrollable workspace behavior
-//! - [`EffectsConfig`]: Visual effects and animations
+//! - // Visual effects config removed with effects engine
 //! - [`WindowConfig`]: Window management and placement
 //! - [`InputConfig`]: Input device handling
 //! - [`BindingsConfig`]: Key binding mappings
@@ -24,10 +24,6 @@ pub struct AxiomConfig {
     /// Workspace configuration (scrollable behavior)
     #[serde(default)]
     pub workspace: WorkspaceConfig,
-
-    /// Visual effects configuration  
-    #[serde(default)]
-    pub effects: EffectsConfig,
 
     /// Window management settings
     #[serde(default)]
@@ -180,97 +176,6 @@ pub struct WorkspaceConfig {
     pub snap_threshold_px: f64,
 }
 
-/// Visual effects configuration (Hyprland-inspired)
-// ponytail: EffectsConfig retained as data-only for config backward compatibility.
-// Effects processing (blur, animation, shadows, rounded_corners) was removed with
-// the effects engine. Values are stored and round-trip through serialization but
-// are never applied at runtime.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct EffectsConfig {
-    /// Enable/disable all visual effects
-    #[serde(default)]
-    pub enabled: bool,
-
-    /// Animation settings
-    #[serde(default)]
-    pub animations: AnimationConfig,
-
-    /// Blur effect settings
-    #[serde(default)]
-    pub blur: BlurConfig,
-
-    /// Rounded corners settings
-    #[serde(default)]
-    pub rounded_corners: RoundedCornersConfig,
-
-    /// Drop shadow settings
-    #[serde(default)]
-    pub shadows: ShadowConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AnimationConfig {
-    /// Enable animations
-    pub enabled: bool,
-
-    /// Default animation duration (milliseconds)
-    pub duration: u32,
-
-    /// Animation curve ("linear", "ease", "ease-in", "ease-out", "ease-in-out")
-    pub curve: String,
-
-    /// Workspace transition animation duration
-    pub workspace_transition: u32,
-
-    /// Window open/close animation duration
-    pub window_animation: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct BlurConfig {
-    /// Enable blur effects
-    pub enabled: bool,
-
-    /// Blur radius (pixels)
-    pub radius: u32,
-
-    /// Blur intensity (0.0-1.0)
-    pub intensity: f64,
-
-    /// Enable blur on window backgrounds
-    pub window_backgrounds: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RoundedCornersConfig {
-    /// Enable rounded corners
-    pub enabled: bool,
-
-    /// Corner radius (pixels)
-    pub radius: u32,
-
-    /// Anti-aliasing quality (1-4)
-    pub antialiasing: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ShadowConfig {
-    /// Enable drop shadows
-    pub enabled: bool,
-
-    /// Shadow size (pixels)
-    pub size: u32,
-
-    /// Shadow blur radius
-    pub blur_radius: u32,
-
-    /// Shadow opacity (0.0-1.0)
-    pub opacity: f64,
-
-    /// Shadow color (hex: #RRGGBB)
-    pub color: String,
-}
-
 /// Window management configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WindowConfig {
@@ -353,9 +258,6 @@ pub struct BindingsConfig {
     /// Launch application launcher
     pub launch_launcher: String,
 
-    /// Toggle effects
-    pub toggle_effects: String,
-
     /// Quit compositor
     pub quit: String,
 
@@ -363,7 +265,7 @@ pub struct BindingsConfig {
     /// Each field holds an action name (see `CompositorAction` variants):
     ///   "scroll_left", "scroll_right", "close_window",
     ///   "toggle_fullscreen", "toggle_floating", "toggle_minimize",
-    ///   "toggle_effects", "quit".
+    ///   "quit".
     /// Button codes follow Linux input event codes:
     ///   0x112 = BTN_MIDDLE,  0x113 = BTN_SIDE (back),
     ///   0x114 = BTN_EXTRA (forward).
@@ -429,63 +331,6 @@ impl Default for WorkspaceConfig {
     }
 }
 
-impl Default for EffectsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            animations: AnimationConfig::default(),
-            blur: BlurConfig::default(),
-            rounded_corners: RoundedCornersConfig::default(),
-            shadows: ShadowConfig::default(),
-        }
-    }
-}
-
-impl Default for AnimationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            duration: 300,
-            curve: "ease-out".to_string(),
-            workspace_transition: 250,
-            window_animation: 200,
-        }
-    }
-}
-
-impl Default for BlurConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            radius: 10,
-            intensity: 0.8,
-            window_backgrounds: true,
-        }
-    }
-}
-
-impl Default for RoundedCornersConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            radius: 8,
-            antialiasing: 2,
-        }
-    }
-}
-
-impl Default for ShadowConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            size: 20,
-            blur_radius: 15,
-            opacity: 0.6,
-            color: "#000000".to_string(),
-        }
-    }
-}
-
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
@@ -526,9 +371,8 @@ impl Default for BindingsConfig {
             // The action is a no-op when `[features].enable_minimize = false`,
             // so a user who sets the flag off won't be confused.
             toggle_minimize: "Super+grave".to_string(),
-            launch_terminal: "Super+Enter".to_string(),
+            launch_terminal: "Super+Return".to_string(),
             launch_launcher: "Super+Space".to_string(),
-            toggle_effects: "Super+e".to_string(),
             quit: "Super+Shift+q".to_string(),
             mouse_back: Self::default_mouse_back(),
             mouse_forward: Self::default_mouse_forward(),
@@ -621,27 +465,6 @@ impl AxiomConfig {
             anyhow::bail!("snap_threshold_px must be in [0, 10000]");
         }
 
-        // ponytail: effects bounds validation removed — values are stored but never applied.
-        // Validate shadow.color is a valid 6-char hex string.
-        // The previous check was format-only (`#` prefix + length 7),
-        // which accepted strings like `"#GGGGGG"` that contain
-        // non-hex characters; downstream code that feeds this into a
-        // GPU fragment shader would silently produce wrong colors
-        // (or NaN-style integer overflow on hardware color conversion).
-        // `is_ascii_hexdigit` covers A-F, a-f, and 0-9 — the same
-        // character set the proptest regex generator in
-        // `property_tests.rs` uses to produce valid inputs.
-        let color = &self.effects.shadows.color;
-        if !color.starts_with('#')
-            || color.len() != 7
-            || !color[1..].chars().all(|c| c.is_ascii_hexdigit())
-        {
-            anyhow::bail!(
-                "shadows.color must be a #RRGGBB hex string (got {:?})",
-                color
-            );
-        }
-
         // --- window ---
         if self.window.border_width > 100 {
             anyhow::bail!("border_width must be <= 100");
@@ -672,6 +495,35 @@ impl AxiomConfig {
             anyhow::bail!("mouse_accel must be in [-1, 10]");
         }
 
+        // --- bindings ---
+        for (field_name, binding) in [
+            ("scroll_left", &self.bindings.scroll_left),
+            ("scroll_right", &self.bindings.scroll_right),
+            ("move_window_left", &self.bindings.move_window_left),
+            ("move_window_right", &self.bindings.move_window_right),
+            ("close_window", &self.bindings.close_window),
+            ("toggle_fullscreen", &self.bindings.toggle_fullscreen),
+            ("toggle_floating", &self.bindings.toggle_floating),
+            ("toggle_minimize", &self.bindings.toggle_minimize),
+            ("launch_terminal", &self.bindings.launch_terminal),
+            ("launch_launcher", &self.bindings.launch_launcher),
+            ("quit", &self.bindings.quit),
+        ] {
+            if binding.is_empty() {
+                anyhow::bail!("bindings.{} must not be empty", field_name);
+            }
+            if !binding.contains("Super")
+                && !binding.contains("Alt")
+                && !binding.contains("Ctrl")
+                && !binding.contains("Shift")
+            {
+                anyhow::bail!(
+                    "bindings.{} = {:?} must contain at least one modifier (Super, Alt, Ctrl, or Shift)",
+                    field_name, binding
+                );
+            }
+        }
+
         // --- general ---
         if self.general.max_fps > 1000 {
             anyhow::bail!(
@@ -690,6 +542,9 @@ impl AxiomConfig {
                     "output.order[{}] is empty — each entry must be a non-empty connector name",
                     i
                 );
+            }
+            if name.len() > 256 {
+                anyhow::bail!("output.order[{}] name too long (max 256 chars)", i);
             }
             // Allow alphanumeric, hyphen, underscore, dash
             if !name
@@ -762,14 +617,22 @@ impl AxiomConfig {
         Ok(())
     }
 
-    /// Merge a partial configuration into this one
-    /// Non-default values from the partial config will override this config
+    /// Merge a partial configuration into this one.
+    ///
+    /// ## Limitation
+    ///
+    /// This method compares each section of `partial` against `AxiomConfig::default()`
+    /// to decide whether the caller intentionally provided a value. This means a
+    /// section whose fields happen to equal the defaults **cannot be distinguished
+    /// from an absent section** — values cannot be "reset to default" through a
+    /// partial merge. For that use case, use [`reset_to_defaults`](Self::reset_to_defaults).
+    ///
+    /// Non-default values from the partial config will override this config.
     pub fn merge_partial(mut self, partial: AxiomConfig) -> Self {
         let default_config = AxiomConfig::default();
 
         // Helper to decide if a section in partial differs from default (meaningfully provided)
         let workspace_changed = partial.workspace != default_config.workspace;
-        let effects_changed = partial.effects != default_config.effects;
         let window_changed = partial.window != default_config.window;
         let input_changed = partial.input != default_config.input;
         let bindings_changed = partial.bindings != default_config.bindings;
@@ -778,9 +641,6 @@ impl AxiomConfig {
 
         if workspace_changed {
             self.workspace = partial.workspace;
-        }
-        if effects_changed {
-            self.effects = partial.effects;
         }
         if window_changed {
             self.window = partial.window;
@@ -799,6 +659,11 @@ impl AxiomConfig {
         }
 
         self
+    }
+
+    /// Reset all fields to their default values.
+    pub fn reset_to_defaults(&mut self) {
+        *self = Self::default();
     }
 }
 

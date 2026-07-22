@@ -87,7 +87,6 @@ pub enum CompositorAction {
     /// Toggle the focused window's minimized state. Treated as idle
     /// when no window is focused or when minimize feature is off.
     ToggleMinimize,
-    ToggleEffects,
     LaunchTerminal,
     LaunchLauncher,
     Quit,
@@ -150,10 +149,6 @@ impl InputManager {
         key_bindings.insert(
             bindings_config.close_window.clone(),
             CompositorAction::CloseWindow,
-        );
-        key_bindings.insert(
-            bindings_config.toggle_effects.clone(),
-            CompositorAction::ToggleEffects,
         );
         key_bindings.insert(
             bindings_config.launch_terminal.clone(),
@@ -411,7 +406,6 @@ impl InputManager {
             "toggle_fullscreen" => CompositorAction::ToggleFullscreen,
             "toggle_floating" => CompositorAction::ToggleFloating,
             "toggle_minimize" => CompositorAction::ToggleMinimize,
-            "toggle_effects" => CompositorAction::ToggleEffects,
             "launch_terminal" => CompositorAction::LaunchTerminal,
             "launch_launcher" => CompositorAction::LaunchLauncher,
             "quit" => CompositorAction::Quit,

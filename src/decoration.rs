@@ -140,9 +140,9 @@ pub struct DecorationManager {
 
     /// Whether the titlebar's minimize button should be drawn + interactive.
     /// Bound at construction time from
-    /// [`crate::config::AxiomConfig::features::enable_minimize`]; chosen
+    /// `crate::config::AxiomConfig::features.enable_minimize`; chosen
     /// to be `false` by default per the scope decision documented on
-    /// [`AxiomConfig::features`] (Wayland has no minimize protocol —
+    /// `AxiomConfig::features` (Wayland has no minimize protocol —
     /// supporting it well would require a compositor-internal
     /// iconified-window list and synthetic-surface round-tripping).
     /// When `false`, the minimize button's bounds are zeroed and the
@@ -532,7 +532,11 @@ impl DecorationManager {
             // width at this level, accept any x >= 0 as long as
             // y is within the titlebar height and x is not on a
             // button (buttons are already checked above).
-            if y >= 0 && y < decoration.titlebar_height as i32 && x >= 0 {
+            if y >= 0
+                && y < decoration.titlebar_height as i32
+                && x >= 0
+                && x < decoration.window_width
+            {
                 return Some(DecorationAction::StartMove);
             }
         }
@@ -636,7 +640,6 @@ impl DecorationManager {
             height: size,
         }
     }
-
 }
 
 /// Actions that can be triggered by decoration interactions
@@ -660,34 +663,6 @@ pub enum ResizeEdge {
     TopRight,
     BottomLeft,
     BottomRight,
-}
-
-/// Decoration rendering data for GPU pipeline.
-///
-/// **Phase 1.A5 note:** see [`DecorationManager::render_decorations`].
-/// This enum is the return type of the *defunct parallel code path*
-/// and is retained (with `#[allow(dead_code)]`) so external tooling
-/// can still reference the type until Phase 2 revisits the live-SSD
-/// contract. New code MUST NOT pattern-match on its variants; the
-/// live pipeline never produces values of this type. Note: we do
-/// *not* mark the type itself `#[deprecated]` because the variants
-/// would then fire `-D deprecated` warnings on the defunct function's
-/// own body — capture the deprecation on the producer only.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub enum DecorationRenderData {
-    None,
-    ServerSide {
-        titlebar_rect: Rectangle,
-        titlebar_bg: [f32; 4],
-        border_width: u32,
-        border_color: [f32; 4],
-        corner_radius: f32,
-        title: String,
-        text_color: [f32; 4],
-        font_size: f32,
-        buttons: TitlebarButtons,
-    },
 }
 
 #[cfg(test)]

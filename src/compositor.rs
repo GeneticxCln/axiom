@@ -6,22 +6,23 @@
 //! Uses Smithay 0.7 for Wayland compositor functionality including
 //! window management, surface handling, and protocol support.
 //!
-//! ## Concurrency invariant
+//! ## Event loop model
 //!
-//! All subsystems are shared via `parking_lot::RwLock` and run on a single
-//! tokio task. The one hard rule: **never hold a `parking_lot` guard across
-//! an `.await`** — doing so blocks the executor thread for the await
-//! duration. `tick()` collects per-tick metrics into an owned tuple inside a
-//! scope so all guards are dropped before `tokio::time::sleep`.
+//! Uses a calloop `EventLoop` with two event sources:
+//! - A `Signals` source for SIGTERM/SIGINT handling
+//! - A `Timer` source for frame pacing (drives `tick()` at the configured FPS)
 //!
-//! Window-correlated locks are conventionally taken in the order
-//! `workspace` → `window_manager` → `decoration_manager` (see
-//! `remove_window`); the reverse is avoided to prevent cross-subsystem
-//! inversions.
+//! All subsystems are shared via `parking_lot::RwLock`. Window-correlated
+//! locks are conventionally taken in the order `workspace` → `window_manager`
+//! → `decoration_manager` (see `remove_window`); the reverse is avoided to
+//! prevent cross-subsystem inversions.
 
 use anyhow::{Context, Result};
+use calloop::signals::{Signal, Signals};
+use calloop::timer::{TimeoutAction, Timer};
+use calloop::EventLoop;
 use log::{debug, info, warn};
-use tokio::signal;
+use std::time::Duration;
 
 use crate::backend::AxiomSmithayBackendReal;
 use crate::config::AxiomConfig;
@@ -59,7 +60,7 @@ pub struct AxiomCompositor {
 
 impl AxiomCompositor {
     /// Create a new Axiom compositor instance
-    pub async fn new(
+    pub fn new(
         config: AxiomConfig,
         windowed: bool,
         workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
@@ -116,31 +117,63 @@ impl AxiomCompositor {
     }
 
     /// Start the compositor main event loop
-    pub async fn run(mut self) -> Result<()> {
-        info!("Starting Axiom compositor event loop");
+    pub fn run(&mut self) -> Result<()> {
+        info!("Starting Axiom compositor event loop with calloop");
         self.running = true;
 
-        // Set up signal handling
-        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
-        let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt())?;
+        let mut event_loop = EventLoop::try_new()?;
+        let handle = event_loop.handle();
 
-        // Main event loop
-        while self.running {
-            tokio::select! {
-                // Handle system signals
-                _ = sigterm.recv() => {
-                    info!("Received SIGTERM, shutting down gracefully");
-                    self.shutdown().await?;
-                }
-                _ = sigint.recv() => {
-                    info!("Received SIGINT (Ctrl+C), shutting down gracefully");
-                    self.shutdown().await?;
-                }
+        // LoopSignal to stop the event loop from callbacks
+        let loop_signal = event_loop.get_signal();
+        let sig_for_signals = loop_signal.clone();
+        let sig_for_timer = loop_signal.clone();
 
-                // Combined event processing and rendering
-                _ = self.tick() => {}
-            }
-        }
+        // Signal handling (SIGTERM, SIGINT)
+        let signals = Signals::new(&[Signal::SIGTERM, Signal::SIGINT])
+            .map_err(|e| anyhow::anyhow!("Failed to create signal source: {}", e))?;
+        handle
+            .insert_source(
+                signals,
+                move |_event, _metadata, compositor: &mut AxiomCompositor| {
+                    info!("Received signal, shutting down gracefully");
+                    let _ = compositor.shutdown();
+                    sig_for_signals.stop();
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to insert signal source: {}", e))?;
+
+        // Frame pacing timer — fires every `interval` and calls tick()
+        let interval = if self.config.general.max_fps == 0 {
+            Duration::from_millis(16) // unbounded → default ~60fps
+        } else {
+            let clamped = self.config.general.max_fps.clamp(1, 1000);
+            Duration::from_secs_f64(1.0 / f64::from(clamped))
+        };
+        let timer = Timer::from_duration(interval);
+        handle
+            .insert_source(
+                timer,
+                move |_event, _metadata, compositor: &mut AxiomCompositor| {
+                    if compositor.running {
+                        if compositor.tick().is_err() {
+                            // tick returned error (threshold exceeded) — stop
+                            compositor.running = false;
+                            sig_for_timer.stop();
+                            return TimeoutAction::Drop;
+                        }
+                        // Re-arm timer for next frame
+                        TimeoutAction::ToDuration(interval)
+                    } else {
+                        sig_for_timer.stop();
+                        TimeoutAction::Drop
+                    }
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to insert timer source: {}", e))?;
+
+        // Run the event loop — dispatches events, calls timer and signal callbacks
+        event_loop.run(None, &mut *self, |_| {})?;
 
         info!("Axiom compositor event loop finished");
         Ok(())
@@ -150,6 +183,9 @@ impl AxiomCompositor {
     fn process_events(&mut self) -> Result<()> {
         // Process backend events (Wayland, input devices)
         self.smithay_backend.process_events()?;
+
+        // Poll IPC server: accept connections, read/write, idle timeout
+        self.ipc_server.poll();
 
         // Process IPC messages from Lazy UI.
         match self.ipc_server.process_messages(&mut self.config) {
@@ -174,7 +210,10 @@ impl AxiomCompositor {
                         LazyUIMessage::SetClipboard { text } => {
                             self.set_clipboard(text);
                         }
-                        // ponytail: SetWindowBlur removed with effects engine
+                        LazyUIMessage::SetWindowBlur { window_id, radius } => {
+                            debug!("Set blur radius {} for window {}", radius, window_id);
+                            self.smithay_backend.state.needs_redraw = true;
+                        }
                         _ => {
                             warn!("Unexpected pending action variant from IPC queue");
                         }
@@ -279,8 +318,6 @@ impl AxiomCompositor {
 
     /// Post-render phase: placeholder for monitoring.
     fn render_frame(&mut self) -> Result<()> {
-        self.apply_global_effects();
-
         debug!(
             "Frame rendered - position: {:.1}, column: {}",
             self.workspace_manager.read().current_position(),
@@ -290,31 +327,15 @@ impl AxiomCompositor {
         Ok(())
     }
 
-    /// Apply global visual effects like workspace transitions
-    fn apply_global_effects(&mut self) {
-        // Apply workspace transition effects
-        let wm = self.workspace_manager.read();
-        if wm.is_scrolling() {
-            let current_pos = wm.current_position();
-            let progress = wm.scroll_progress();
-
-            // In a real implementation, this would apply visual effects to the entire compositor
-            debug!(
-                "Workspace transition: position={:.1}, progress={:.2}",
-                current_pos, progress
-            );
-        }
-    }
-
     /// Gracefully shutdown the compositor (with Smithay backend)
-    async fn shutdown(&mut self) -> Result<()> {
+    fn shutdown(&mut self) -> Result<()> {
         info!("Shutting down Axiom compositor...");
 
         self.running = false;
 
         // Broadcast shutdown state change before backend teardown so
         // IPC clients can react before the broadcast channel closes.
-        let _ = self
+        self
             .ipc_server
             .broadcast_state_change("compositor", "running", "shutdown");
 
@@ -324,7 +345,8 @@ impl AxiomCompositor {
 
         // Clean up other subsystems
         debug!("Cleaning up compositor subsystems...");
-        self.ipc_server.shutdown().await?;
+        // IPC server shutdown is sync for now (Phase 2 will fully migrate IPC)
+        self.ipc_server.shutdown_sync();
         self.input_manager.write().shutdown();
         self.workspace_manager.write().shutdown();
         self.window_manager.write().shutdown();
@@ -343,32 +365,18 @@ impl AxiomCompositor {
         self._windowed
     }
 
+    /// Get the Wayland display socket name.
+    pub fn socket_name(&self) -> &str {
+        &self.smithay_backend.socket_name
+    }
+
     /// Single tick of the compositor (event processing + rendering).
     ///
-    /// This function holds multiple `parking_lot::RwLock` short-lived
-    /// guards to read per-frame state from the subsystems. There is
-    /// exactly **one** `await` point — `tokio::time::sleep(sleep_duration)`
-    /// used for frame pacing. The invariant we enforce here, and which
-    /// [`Self::check_tick_lock_invariants`] verifies in debug builds, is
-    ///: *every* lock guard acquired above must be explicitly dropped
-    /// before this `await`.
-    ///
-    /// This avoids the need for `#[allow(clippy::await_holding_lock)]`
-    /// (clippy is conservative and cannot always prove that `drop`
-    /// between the `let _g = ...` and the `await` is sufficient).
-    async fn tick(&mut self) -> Result<()> {
-        use std::time::{Duration, Instant};
+    /// Frame pacing is handled by the calloop timer in `run()`, so this
+    /// method is purely synchronous: process events, render, update metrics.
+    fn tick(&mut self) -> Result<()> {
+        use std::time::Instant;
         let frame_start = Instant::now();
-        // Honor general.max_fps (0 = unlimited, default 60).
-        // If max_fps is 0, skip pacing entirely. Clamp to [1, 1000] to avoid
-        // sub-microsecond durations that tokio::time::sleep can reject.
-        let target_frame_time = if self.config.general.max_fps == 0 {
-            Duration::ZERO
-        } else {
-            let clamped = self.config.general.max_fps.clamp(1, 1000);
-            Duration::from_secs_f64(1.0 / f64::from(clamped))
-        };
-
         let mut tick_error = false;
 
         // Process events (calls backend.process_events → run_one_cycle → render)
@@ -395,46 +403,23 @@ impl AxiomCompositor {
             self.consecutive_error_count = self.consecutive_error_count.saturating_sub(1);
         }
 
-        // Broadcast IPC performance metrics to Lazy UI (~10Hz rate-limited
-        // internally) AND refresh the per-tick LiveMetrics snapshot so
-        // direct monitoring queries (HealthCheck / GetPerformanceReport)
-        // see real data instead of zeros.
-        //
-        // Lock-hierarchy invariant (Phase 1 A2.2): every `parking_lot`
-        // read guard acquired here must be explicitly dropped *before*
-        // the next await point (`tokio::time::sleep`). We collect the
-        // snapshot into plain owned values inside a single `{}` block
-        // so the guard's lifetime is bounded tightly. If a future
-        // contributor adds another `await` inside this block, the
-        // [`Self::check_tick_lock_invariants`] debug assertion will
-        // flag the regression.
+        // Broadcast IPC performance metrics and refresh snapshot
         let (frame_time_ms, active_windows, workspace_idx) = {
             let frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
             let (workspace_idx, _, _column_count, _) = self.get_workspace_info();
             let active_windows = self.window_manager.read().window_count();
             (frame_time_ms, active_windows, workspace_idx)
         };
-        self.ipc_server
-            .maybe_broadcast_performance_metrics(frame_time_ms, active_windows, workspace_idx);
-        // Per-tick snapshot for direct monitoring queries.
-        // ponytail: effects fields defaulted — re-add when effects are reintegrated.
+        self.ipc_server.maybe_broadcast_performance_metrics(
+            frame_time_ms,
+            active_windows,
+            workspace_idx,
+        );
         self.ipc_server.set_live_metrics_snapshot(LiveMetrics {
             frame_time_ms,
             active_windows,
             current_workspace: workspace_idx,
-            ..Default::default()
         });
-
-        // Frame pacing: sleep for remaining time to target the configured FPS.
-        // Skipped when max_fps == 0 (unbounded).
-        if !target_frame_time.is_zero() {
-            let elapsed = frame_start.elapsed();
-            if elapsed < target_frame_time {
-                if let Some(sleep_duration) = target_frame_time.checked_sub(elapsed) {
-                    tokio::time::sleep(sleep_duration).await;
-                }
-            }
-        }
 
         // Check stability threshold
         if self.consecutive_error_count >= 5 {
@@ -442,7 +427,7 @@ impl AxiomCompositor {
                 "CRITICAL: Too many consecutive errors ({}). Initiating emergency shutdown.",
                 self.consecutive_error_count
             );
-            let _ = self.shutdown().await;
+            let _ = self.shutdown();
             return Err(anyhow::anyhow!(
                 "Critical stability failure: too many consecutive errors"
             ));
@@ -462,7 +447,7 @@ impl AxiomCompositor {
         let new_idx = wm.focused_column_index();
         drop(wm);
         self.smithay_backend.state.needs_redraw = true;
-        let _ = self.ipc_server.broadcast_state_change(
+        self.ipc_server.broadcast_state_change(
             "workspace",
             &old_idx.to_string(),
             &new_idx.to_string(),
@@ -478,7 +463,7 @@ impl AxiomCompositor {
         let new_idx = wm.focused_column_index();
         drop(wm);
         self.smithay_backend.state.needs_redraw = true;
-        let _ = self.ipc_server.broadcast_state_change(
+        self.ipc_server.broadcast_state_change(
             "workspace",
             &old_idx.to_string(),
             &new_idx.to_string(),
@@ -494,7 +479,9 @@ impl AxiomCompositor {
         // ponytail: this is a phantom window — no Wayland surface and no
         // window_map entry, reachable only via IPC for tests/debug. It will
         // never be rendered.
-        log::warn!("add_window: created window with no backing Wayland surface; it will not be rendered");
+        log::warn!(
+            "add_window: created window with no backing Wayland surface; it will not be rendered"
+        );
 
         // Add to current workspace column
         self.workspace_manager.write().add_window(window_id);
@@ -514,7 +501,7 @@ impl AxiomCompositor {
             "Added window '{}' (ID: {}) to current workspace",
             title, window_id
         );
-        let _ = self.ipc_server.broadcast_state_change(
+        self.ipc_server.broadcast_state_change(
             "window",
             "none",
             &format!("added:{}", window_id),
@@ -543,7 +530,7 @@ impl AxiomCompositor {
         if removed {
             self.smithay_backend.state.needs_redraw = true;
             info!("Removed window {}", window_id);
-            let _ = self.ipc_server.broadcast_state_change(
+            self.ipc_server.broadcast_state_change(
                 "window",
                 &format!("active:{}", window_id),
                 "none",
@@ -560,7 +547,7 @@ impl AxiomCompositor {
         if self.workspace_manager.write().move_window_left(window_id) {
             self.smithay_backend.state.needs_redraw = true;
             info!("Moved window {} to left workspace", window_id);
-            let _ = self.ipc_server.broadcast_state_change(
+            self.ipc_server.broadcast_state_change(
                 "window",
                 &format!("workspace:{}", window_id),
                 "left",
@@ -573,7 +560,7 @@ impl AxiomCompositor {
         if self.workspace_manager.write().move_window_right(window_id) {
             self.smithay_backend.state.needs_redraw = true;
             info!("Moved window {} to right workspace", window_id);
-            let _ = self.ipc_server.broadcast_state_change(
+            self.ipc_server.broadcast_state_change(
                 "window",
                 &format!("workspace:{}", window_id),
                 "right",
@@ -591,7 +578,7 @@ impl AxiomCompositor {
         if workspace_ok || wm_ok {
             self.smithay_backend.state.needs_redraw = true;
             info!("Minimized window {}", window_id);
-            let _ = self.ipc_server.broadcast_state_change(
+            self.ipc_server.broadcast_state_change(
                 "window",
                 &format!("active:{}", window_id),
                 "minimized",
@@ -609,7 +596,7 @@ impl AxiomCompositor {
         if workspace_ok || wm_ok {
             self.smithay_backend.state.needs_redraw = true;
             info!("Restored window {}", window_id);
-            let _ = self.ipc_server.broadcast_state_change(
+            self.ipc_server.broadcast_state_change(
                 "window",
                 "minimized",
                 &format!("active:{}", window_id),
@@ -623,7 +610,7 @@ impl AxiomCompositor {
         self.window_manager.write().toggle_fullscreen(window_id);
         self.smithay_backend.state.needs_redraw = true;
         info!("Toggled fullscreen for window {}", window_id);
-        let _ = self.ipc_server.broadcast_state_change(
+        self.ipc_server.broadcast_state_change(
             "window",
             &format!("active:{}", window_id),
             "fullscreen_toggle",
@@ -652,8 +639,8 @@ impl AxiomCompositor {
 
     /// Single tick for integration testing — calls the private `tick()` method.
     /// Returns `Ok(())` on success or `Err(...)` if the error threshold is exceeded.
-    pub async fn tick_for_test(&mut self) -> Result<()> {
-        self.tick().await
+    pub fn tick_for_test(&mut self) -> Result<()> {
+        self.tick()
     }
 
     /// Artificially set the consecutive error count for testing error recovery.
@@ -697,11 +684,8 @@ impl AxiomCompositor {
     }
 
     /// Get a sender for injecting IPC commands in tests.
-    pub fn ipc_command_sender(&self) -> tokio::sync::mpsc::Sender<LazyUIMessage> {
-        self.ipc_server
-            .command_sender_for_test()
-            .expect("IPC command sender should be available in tests")
-            .clone()
+    pub fn ipc_command_sender(&self) -> std::sync::mpsc::Sender<LazyUIMessage> {
+        self.ipc_server.command_sender_for_test()
     }
 
     /// Test/debug accessor — see `AxiomSmithayBackendReal::debug_clipboard_cache`.
@@ -717,7 +701,7 @@ impl AxiomCompositor {
     /// Test-only constructor that skips real backend initialization.
     /// Subsystems are fully initialized. Smithay backend uses a test
     /// constructor that doesn't bind Wayland sockets.
-    pub async fn new_for_test(
+    pub fn new_for_test(
         config: AxiomConfig,
         workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
         window_manager: Arc<parking_lot::RwLock<WindowManager>>,
@@ -785,10 +769,10 @@ mod tests {
     /// non-`Sync` by clippy because `ScrollableWorkspaces` contains a
     /// `RefCell` for its layout cache. This is intentional (single-threaded
     /// interior mutability on the hot path) and the `Arc` here is only
-    /// ever held within this test's `tokio::test` task — it never crosses
-    /// thread boundaries, so the absence of `Sync` is harmless for tests.
+    /// ever held within this test's task — it never crosses thread
+    /// boundaries, so the absence of `Sync` is harmless for tests.
     #[allow(clippy::arc_with_non_send_sync)]
-    async fn make_test_compositor() -> AxiomCompositor {
+    fn make_test_compositor() -> AxiomCompositor {
         let config = AxiomConfig::default();
         let workspace_manager = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)));
         let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)));
@@ -798,23 +782,22 @@ mod tests {
         )));
 
         AxiomCompositor::new_for_test(config, workspace_manager, window_manager, input_manager)
-            .await
             .expect("compositor init")
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_compositor_initialization() {
-        let comp = make_test_compositor().await;
+    fn test_compositor_initialization() {
+        let comp = make_test_compositor();
         assert!(!comp.is_windowed());
         // DecorationManager should be initialized
         assert!(comp.decoration_manager.read().get_decoration(1).is_none());
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_add_and_remove_window() {
-        let mut comp = make_test_compositor().await;
+    fn test_add_and_remove_window() {
+        let mut comp = make_test_compositor();
 
         let id = comp.add_window("Test Window".into());
         assert_eq!(id, 1);
@@ -840,10 +823,10 @@ mod tests {
         assert!(comp.decoration_manager.read().get_decoration(id).is_none());
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_workspace_scrolling() {
-        let mut comp = make_test_compositor().await;
+    fn test_workspace_scrolling() {
+        let mut comp = make_test_compositor();
 
         let _initial = comp.get_workspace_info();
         // Verify scrolling doesn't panic
@@ -853,20 +836,20 @@ mod tests {
         let _after_left = comp.get_workspace_info();
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_viewport_resize() {
-        let mut comp = make_test_compositor().await;
+    fn test_viewport_resize() {
+        let mut comp = make_test_compositor();
 
         comp.set_viewport_size(1920, 1080);
         comp.set_viewport_size(3840, 2160);
         // No panic = success
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_window_movement_between_workspaces() {
-        let mut comp = make_test_compositor().await;
+    fn test_window_movement_between_workspaces() {
+        let mut comp = make_test_compositor();
 
         let id = comp.add_window("movable".into());
         comp.move_window_right(id);
@@ -874,19 +857,19 @@ mod tests {
         comp.remove_window(id);
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_config_access() {
-        let comp = make_test_compositor().await;
+    fn test_config_access() {
+        let comp = make_test_compositor();
         let config = comp.config();
         assert!(config.workspace.scroll_speed > 0.0);
         assert!(!config.window.focus_follows_mouse);
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_multiple_windows() {
-        let mut comp = make_test_compositor().await;
+    fn test_multiple_windows() {
+        let mut comp = make_test_compositor();
 
         let ids: Vec<u64> = (0..10)
             .map(|i| comp.add_window(format!("Window {}", i)))
@@ -900,47 +883,26 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
     #[serial]
-    async fn test_shutdown_cleans_up() {
-        let mut comp = make_test_compositor().await;
+    fn test_shutdown_cleans_up() {
+        let mut comp = make_test_compositor();
         comp.add_window("pre-shutdown".into());
-        comp.shutdown().await.expect("shutdown should succeed");
+        comp.shutdown().expect("shutdown should succeed");
     }
 
-    // ─── Phase 1 regression tests ─────────────────────────────────────
+    // ─── Phase 1 migration regression test ────────────────────────────
 
-    /// Phase 1.A2.2 regression guard: the per-tick metrics snapshot
-    /// block was restructured so that every `parking_lot::RwLock` read
-    /// guard is dropped inside the inner scope before
-    /// `tokio::time::sleep`. If a future contributor refactors
-    /// `tick()`'s await point back above the guard, we want a runtime
-    /// signal that something was changed.
-    ///
-    /// We cannot grep the source from a unit test, so this test
-    /// instead runs an N-tick loop with a forced high max_fps and
-    /// asserts no panic + the compositor stays `running` afterwards.
-    /// If the restructured scope leaked a guard into the await
-    /// window under load, this test would deadlock with at most ~5
-    /// frames of `consecutive_error_count` ahead of the threshold.
-    #[tokio::test]
+    /// Verify that tick() runs without error and the compositor stays
+    /// running after multiple ticks.
+    #[test]
     #[serial]
-    async fn test_phase1_tick_regression_guard() {
-        let mut comp = make_test_compositor().await;
-        // Force a low max_fps target so `tokio::time::sleep`
-        // is exercised in every iteration. Frames at low FPS are
-        // the most likely place to surface a leaked guard.
+    fn test_tick_runs_without_error() {
+        let mut comp = make_test_compositor();
         comp.config.general.max_fps = 30;
-
         for _ in 0..8 {
-            assert!(comp.tick_for_test().await.is_ok());
+            assert!(comp.tick_for_test().is_ok());
         }
-        assert!(
-            comp.is_running(),
-            "Phase 1.A2.2 regression: tick() panicked or shut down the \
-             compositor \u{2014} the parking_lot guard drop-before-await \
-             invariant was likely broken"
-        );
+        assert!(comp.is_running());
     }
-
 }

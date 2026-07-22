@@ -418,10 +418,10 @@ impl WorkspaceTape {
     /// via `get_focused_column()` semantics upstream).
     ///
     /// Public because it serves a different semantic than
-    /// [`Self::focused_column`]: a rendering/framebuffer-positioning
+    /// `focused_column`: a rendering/framebuffer-positioning
     /// caller wants the on-screen column (this method), while a
     /// logical-target / input-routing caller wants the user's last
-    /// commanded destination ([`Self::focused_column`], exposed via
+    /// commanded destination (`focused_column`, exposed via
     /// [`Self::get_focused_column_windows`]). Keep both APIs
     /// available so callers can pick the one that matches their
     /// semantic.
@@ -701,7 +701,7 @@ impl ScrollableWorkspaces {
     ///
     /// Removes the window from whatever column it currently occupies on
     /// every tape (so `calculate_workspace_layouts` no longer emits a
-    /// rectangle for it) and adds the ID to [`minimized_windows`]. The
+    /// rectangle for it) and adds the ID to `minimized_windows`. The
     /// companion `WindowManager::minimize_window` must be called by the
     /// caller to keep both layers in sync — this method does not touch
     /// it. Returns `true` when the window was actually located on a
@@ -747,7 +747,7 @@ impl ScrollableWorkspaces {
     /// Restore a minimized window on the workspace layer.
     ///
     /// Re-adds the window to the focused column of the focused tape,
-    /// removes its ID from [`minimized_windows`], and invalidates the
+    /// removes its ID from `minimized_windows`, and invalidates the
     /// layout cache. Returns `true` when the window was actually
     /// minimized and has now been added back to a column.
     pub fn restore_window(&mut self, window_id: u64) -> bool {
@@ -780,7 +780,7 @@ impl ScrollableWorkspaces {
     }
 
     /// Is the given window currently minimized at the workspace layer?
-    /// Reads the [`minimized_windows`] set synchronously; does not
+    /// Reads the `minimized_windows` set synchronously; does not
     /// consult the column map (a minimized window is, by definition,
     /// absent from any column).
     pub fn is_window_minimized(&self, window_id: u64) -> bool {
@@ -847,7 +847,7 @@ impl ScrollableWorkspaces {
         for output_id in &self.output_order {
             if let Some(tape) = self.tapes.get(output_id) {
                 parts.push(format!(
-                    "{}:{:.3}:{:.0}x{:.0}",
+                    "{}:{:.6}:{:.0}x{:.0}",
                     output_id, tape.current_position, tape.viewport_width, tape.viewport_height
                 ));
             }

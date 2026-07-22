@@ -47,8 +47,7 @@ struct Cli {
     windowed: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging — CLI flag or config can enable debug.
@@ -111,20 +110,32 @@ async fn main() -> Result<()> {
 
     let ipc_server = AxiomIPCServer::new();
 
-    let compositor = AxiomCompositor::new(
+    let mut compositor = AxiomCompositor::new(
         config.clone(),
         cli.windowed,
         workspace_manager.clone(),
         window_manager.clone(),
         input_manager.clone(),
         ipc_server,
-    )
-    .await?;
+    )?;
+
+    let socket_name = compositor.socket_name().to_string();
+    std::env::set_var("WAYLAND_DISPLAY", &socket_name);
+    info!("📡 Exported WAYLAND_DISPLAY={}", socket_name);
 
     info!("✨ Axiom is ready! Where productivity meets beauty.");
 
+    // Notify systemd that the compositor is ready
+    if let Ok(path) = std::env::var("NOTIFY_SOCKET") {
+        use std::os::unix::net::UnixDatagram;
+        if let Ok(sock) = UnixDatagram::unbound() {
+            let _ = sock.send_to(b"READY=1", &path);
+        }
+        info!("✅ Notified systemd that Axiom is ready");
+    }
+
     // Main event loop
-    compositor.run().await?;
+    compositor.run()?;
 
     info!("👋 Axiom compositor shutting down");
     Ok(())

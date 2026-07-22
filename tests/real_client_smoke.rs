@@ -14,12 +14,8 @@
 
 use anyhow::Result;
 use axiom::{
-    compositor::AxiomCompositor,
-    config::AxiomConfig,
-    input::InputManager,
-    ipc::AxiomIPCServer,
-    window::WindowManager,
-    workspace::ScrollableWorkspaces,
+    compositor::AxiomCompositor, config::AxiomConfig, input::InputManager, ipc::AxiomIPCServer,
+    window::WindowManager, workspace::ScrollableWorkspaces,
 };
 use parking_lot::RwLock;
 use std::os::fd::AsFd;
@@ -32,9 +28,7 @@ use std::time::Duration;
 
 use wayland_client::{
     delegate_noop,
-    protocol::{
-        wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
-    },
+    protocol::{wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface},
     Connection, Dispatch, EventQueue, QueueHandle,
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -42,7 +36,7 @@ use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_ba
 /// Build a fully-initialized headless (Noop) compositor and keep a clone of the
 /// `window_manager` Arc so the test can observe surface registration. Mirrors
 /// `make_test_compositor` from `integration_tests.rs` but returns the Arc too.
-async fn make_headless_compositor(
+fn make_headless_compositor(
     config: AxiomConfig,
 ) -> Result<(AxiomCompositor, Arc<RwLock<WindowManager>>)> {
     let workspace_manager = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)));
@@ -63,8 +57,7 @@ async fn make_headless_compositor(
         window_manager.clone(),
         input_manager.clone(),
         ipc_server,
-    )
-    .await?;
+    )?;
 
     Ok((compositor, window_manager))
 }
@@ -106,7 +99,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ClientState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, .. } = event {
+        if let wl_registry::Event::Global {
+            name, interface, ..
+        } = event
+        {
             match interface.as_str() {
                 "wl_compositor" => {
                     state.compositor =
@@ -246,11 +242,11 @@ fn run_client(done: Arc<AtomicBool>, result_tx: mpsc::Sender<String>) {
     done.store(true, Ordering::SeqCst);
 }
 
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_real_client_connects_and_maps_toplevel() -> Result<()> {
+fn test_real_client_connects_and_maps_toplevel() -> Result<()> {
     let config = AxiomConfig::default();
-    let (mut compositor, window_manager) = make_headless_compositor(config).await?;
+    let (mut compositor, window_manager) = make_headless_compositor(config)?;
 
     // Point the client at the compositor's socket. `AxiomSmithayBackendReal::new`
     // binds `wayland-axiom-<pid>` in XDG_RUNTIME_DIR, so we expose it via
@@ -266,7 +262,7 @@ async fn test_real_client_connects_and_maps_toplevel() -> Result<()> {
     // Tick the compositor until the client has finished AND the surface is tracked.
     let mut ticks = 0;
     while !done.load(Ordering::SeqCst) && ticks < 200 {
-        compositor.tick_for_test().await?;
+        compositor.tick_for_test()?;
         ticks += 1;
         thread::sleep(Duration::from_millis(5));
     }

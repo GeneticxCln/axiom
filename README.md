@@ -61,8 +61,9 @@ Axiom explores a compositor UX that combines:
 
 - Single-output only (winit, no multi-monitor support)
 - Fractional scaling / HiDPI polish
-- All 8 resize edges are wired (Left/Right/Top/Bottom + 4 corners)
-- Release-ready packaging and session assets
+- Release-ready packaging and session assets — packaging structure exists, needs final validation
+- Full drag-and-drop data transfer (server-initiated DnD is a stub)
+- Touch gesture support (tap-to-click, multi-finger gestures)
 
 ## Repository Layout
 
@@ -142,9 +143,11 @@ rejected with an `unknown_action` ACK.
 compositor clipboard, making it available for clients to paste. The command is
 wired end-to-end: IPC server → compositor → `set_clipboard_data()`.
 
-### Try the test client
+### Try the IPC client
 ```bash
-python3 test_ipc.py
+# Connect to the Axiom IPC socket and send commands
+# Socket at $XDG_RUNTIME_DIR/axiom/axiom.sock (or /tmp/axiom-<pid>/axiom-lazy-ui.sock)
+echo '{"type":"HealthCheck"}' | nc -U "$XDG_RUNTIME_DIR/axiom/axiom.sock"
 ```
 
 ## Documentation

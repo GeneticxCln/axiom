@@ -30,99 +30,6 @@ prop_compose! {
     }
 }
 
-// Strategy for generating valid blur configurations
-prop_compose! {
-    fn valid_blur_config()(
-        enabled in any::<bool>(),
-        radius in 1u32..50u32,
-        intensity in 0.0f64..1.0f64,
-        window_backgrounds in any::<bool>(),
-    ) -> BlurConfig {
-        BlurConfig {
-            enabled,
-            radius,
-            intensity,
-            window_backgrounds,
-        }
-    }
-}
-
-// Strategy for generating valid animation configurations
-prop_compose! {
-    fn valid_animation_config()(
-        enabled in any::<bool>(),
-        duration in 50u32..2000u32,
-        curve in prop_oneof![
-            Just("linear".to_string()),
-            Just("ease".to_string()),
-            Just("ease-in".to_string()),
-            Just("ease-out".to_string()),
-            Just("ease-in-out".to_string()),
-        ],
-        workspace_transition in 100u32..1000u32,
-        window_animation in 100u32..1000u32,
-    ) -> AnimationConfig {
-        AnimationConfig {
-            enabled,
-            duration,
-            curve,
-            workspace_transition,
-            window_animation,
-        }
-    }
-}
-
-// Strategy for generating valid effects configurations
-prop_compose! {
-    fn valid_effects_config()(
-        enabled in any::<bool>(),
-        animations in valid_animation_config(),
-        blur in valid_blur_config(),
-        rounded_corners in valid_rounded_corners_config(),
-        shadows in valid_shadow_config(),
-    ) -> EffectsConfig {
-        EffectsConfig {
-            enabled,
-            animations,
-            blur,
-            rounded_corners,
-            shadows,
-        }
-    }
-}
-
-prop_compose! {
-    fn valid_rounded_corners_config()(
-        enabled in any::<bool>(),
-        radius in 0u32..50u32,
-        antialiasing in 1u32..5u32,
-    ) -> RoundedCornersConfig {
-        RoundedCornersConfig {
-            enabled,
-            radius,
-            antialiasing,
-        }
-    }
-}
-
-prop_compose! {
-    fn valid_shadow_config()(
-        enabled in any::<bool>(),
-        size in 1u32..100u32,
-        blur_radius in 1u32..50u32,
-        opacity in 0.0f64..1.0f64,
-        color in "#[0-9A-Fa-f]{6}",
-    ) -> ShadowConfig {
-        ShadowConfig {
-            enabled,
-            size,
-            blur_radius,
-            opacity,
-            color,
-        }
-    }
-}
-
 // Strategy for generating valid window configurations
 prop_compose! {
     fn valid_window_config()(
@@ -197,7 +104,6 @@ prop_compose! {
             toggle_minimize: "Super+grave".to_string(),
             launch_terminal: "Super+Enter".to_string(),
             launch_launcher: "Super+Space".to_string(),
-            toggle_effects: "Super+e".to_string(),
             quit,
             mouse_back: BindingsConfig::default_mouse_back(),
             mouse_forward: BindingsConfig::default_mouse_forward(),
@@ -265,7 +171,6 @@ prop_compose! {
 prop_compose! {
     fn valid_axiom_config()(
         workspace in valid_workspace_config(),
-        effects in valid_effects_config(),
         window in valid_window_config(),
         input in valid_input_config(),
         bindings in valid_bindings_config(),
@@ -273,7 +178,6 @@ prop_compose! {
     ) -> AxiomConfig {
         AxiomConfig {
             workspace,
-            effects,
             window,
             input,
             bindings,
@@ -326,7 +230,6 @@ proptest! {
         // Compare key properties (floating-point comparison requires tolerance)
         prop_assert_eq!(config.workspace.infinite_scroll, parsed_config.workspace.infinite_scroll);
         prop_assert_eq!(config.workspace.workspace_width, parsed_config.workspace.workspace_width);
-        prop_assert_eq!(config.effects.enabled, parsed_config.effects.enabled);
         prop_assert_eq!(config.general.vsync, parsed_config.general.vsync);
 
         // Check floating point values with tolerance

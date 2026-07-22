@@ -16,14 +16,15 @@
 use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, mpsc, Semaphore};
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use crate::config::AxiomConfig;
 
@@ -51,7 +52,6 @@ const KNOWN_WORKSPACE_ACTIONS: &[&str] = &[
     "toggle_fullscreen",
 ];
 
-
 /// Maximum accepted scroll speed.
 const MAX_SCROLL_SPEED: f64 = 100.0;
 /// Maximum size of a single line from an IPC client (64 KiB).
@@ -70,13 +70,6 @@ const MAX_IPC_LINE_BYTES: usize = 64 * 1024;
 /// for backward-compat with old readers but reports empty once these
 /// three fields come from the live compositor.
 ///
-/// Added in this PR:
-///
-/// * `effects_gpu_available` — surfaces the success/failure of
-///   `EffectsEngine::initialize_gpu` at compositor startup. Failure
-///   was previously only visible as a single log line. Now a
-///   monitoring client can detect "GPU effects did not initialize"
-///   without grepping stdout.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct LiveMetrics {
     /// Frame time in milliseconds from the last completed tick.
@@ -85,16 +78,6 @@ pub struct LiveMetrics {
     pub active_windows: u32,
     /// Index of the workspace the user is currently focused on.
     pub current_workspace: i32,
-    /// Whether the effects engine successfully initialised its GPU
-    /// pipeline at compositor startup. `false` means blur/shadow
-    /// passes will be silently dropped on the CPU path.
-    pub effects_gpu_available: bool,
-    /// Whether the effects engine is currently enabled (runtime toggle).
-    pub effects_enabled: bool,
-    /// Whether blur is enabled in the config.
-    pub blur_enabled: bool,
-    /// Current global blur radius in pixels.
-    pub blur_radius: f32,
 }
 
 /// Returns true when `action` is in the whitelisted
@@ -109,8 +92,6 @@ pub struct LiveMetrics {
 fn is_known_workspace_action(action: &str) -> bool {
     KNOWN_WORKSPACE_ACTIONS.contains(&action)
 }
-
-
 
 /// Messages sent from Axiom to Lazy UI (performance metrics, events)
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -181,7 +162,6 @@ pub enum AxiomMessage {
         current_workspace: i32,
         note: String,
     },
-
 }
 
 /// Messages sent from Lazy UI to Axiom (optimization commands)
@@ -224,19 +204,31 @@ pub enum LazyUIMessage {
     GetPerformanceReport,
 
     /// Set compositor clipboard content
-    SetClipboard {
-        text: String,
-    },
+    SetClipboard { text: String },
+}
+
+/// Per-client IPC connection state
+struct ClientData {
+    stream: UnixStream,
+    /// Buffer for accumulating a partial line being read
+    read_buf: Vec<u8>,
+    /// Pending data to write (queued broadcasts, ACKs)
+    write_buf: Vec<u8>,
+    /// Time of last activity (for idle timeout)
+    last_activity: Instant,
 }
 
 /// IPC server for handling communication with Lazy UI
 pub struct AxiomIPCServer {
     socket_path: PathBuf,
-    /// Broadcast channel for outgoing Axiom messages to all clients
-    broadcast_tx: Option<broadcast::Sender<AxiomMessage>>,
+    /// Non-blocking Unix listener (bound in `start()`)
+    listener: Option<UnixListener>,
+    /// Per-client state, keyed by fd
+    clients: HashMap<RawFd, ClientData>,
+    /// Command channel receiver (for compositor to drain)
     command_receiver: Option<mpsc::Receiver<LazyUIMessage>>,
-    /// Sender side of command channel (for wiring incoming commands)
-    command_sender: Option<mpsc::Sender<LazyUIMessage>>,
+    /// Command channel sender (for IPC handlers to send commands)
+    command_sender: mpsc::Sender<LazyUIMessage>,
     /// Live read-only handle to the compositor's `AxiomConfig`. Lazily wired
     /// via `set_config_handle` so test-only constructors (`new()`) can keep
     /// working without a config.
@@ -254,12 +246,14 @@ pub struct AxiomIPCServer {
     last_metrics_sent: Instant,
     // Last CPU times for non-blocking CPU usage sampling
     last_cpu_times: Option<(u64, u64)>,
-    // Graceful shutdown token
-    shutdown_token: Option<CancellationToken>,
-    // Handle for the accept loop task
-    accept_handle: Option<JoinHandle<Result<()>>>,
-    // Connection limit semaphore
-    connection_semaphore: Option<Arc<Semaphore>>,
+    /// Pending broadcast messages to send to all clients
+    pending_broadcasts: Vec<AxiomMessage>,
+    /// Shutdown signal
+    shutdown: Arc<AtomicBool>,
+    /// Connection count (atomic for non-blocking limit check)
+    num_connections: AtomicUsize,
+    /// Our UID for peer credential checks
+    our_uid: u32,
 }
 
 impl Default for AxiomIPCServer {
@@ -272,19 +266,22 @@ impl AxiomIPCServer {
     /// Create a new IPC server
     pub fn new() -> Self {
         let socket_path = Self::default_socket_path();
+        let (cmd_tx, cmd_rx) = mpsc::channel();
 
         Self {
             socket_path,
-            broadcast_tx: None,
-            command_receiver: None,
-            command_sender: None,
+            listener: None,
+            clients: HashMap::new(),
+            command_receiver: Some(cmd_rx),
+            command_sender: cmd_tx,
             config_handle: None,
             live_metrics_handle: None,
             last_metrics_sent: Instant::now(),
             last_cpu_times: None,
-            shutdown_token: None,
-            accept_handle: None,
-            connection_semaphore: None,
+            pending_broadcasts: Vec::new(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            num_connections: AtomicUsize::new(0),
+            our_uid: 0,
         }
     }
 
@@ -304,8 +301,7 @@ impl AxiomIPCServer {
     /// Wire the live `LiveMetrics` handle the compositor updates each tick.
     /// Calling this with `Some(snapshot)` replaces any previous handle so
     /// the compositor can either seed the initial state at construction
-    /// time (Design 14 — surface `effects_gpu_available` BEFORE the first
-    /// tick) or refresh it after each tick. The compositor devolves to
+    /// time or refresh it after each tick. The compositor devolves to
     /// `set_live_metrics_snapshot` on the same handle from inside `tick()`.
     pub fn set_live_metrics_snapshot(&mut self, snapshot: LiveMetrics) {
         *self
@@ -353,565 +349,375 @@ impl AxiomIPCServer {
         // Ensure parent dir exists with correct permissions (0700).
         // Do the mkdir+chmod before anything else so the directory is
         // never observable with wider permissions.
-        if let Some(dir) = self.socket_path.parent() {
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("Failed to create IPC dir: {:?}", dir))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                // Set 0700 immediately after creation to minimise the
-                // window where the directory is world-readable.
-                if let Err(e) =
-                    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        let socket_path = self.socket_path.clone();
+        if let Some(dir) = socket_path.parent() {
+            if !dir.exists() {
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("Failed to create IPC dir: {:?}", dir))?;
+                #[cfg(unix)]
                 {
-                    warn!("⚠️ Failed to set 0700 on IPC directory {:?}: {}", dir, e);
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Err(e) =
+                        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                    {
+                        warn!("⚠️ Failed to set 0700 on IPC directory {:?}: {}", dir, e);
+                    }
                 }
             }
         }
 
-        // Bind the socket without a TOCTOU check-then-remove race.
-        // If the socket file already exists, UnixListener::bind will fail;
-        // we tolerate that failure and remove+retry once.
-        let listener = match UnixListener::bind(&self.socket_path) {
+        // Bind the socket (retry once if addr in use)
+        let listener = match UnixListener::bind(&socket_path) {
             Ok(l) => l,
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                let _ = std::fs::remove_file(&self.socket_path);
-                UnixListener::bind(&self.socket_path).with_context(|| {
+                let _ = std::fs::remove_file(&socket_path);
+                UnixListener::bind(&socket_path).with_context(|| {
                     format!(
                         "Failed to bind Unix socket after stale removal: {:?}",
-                        self.socket_path
+                        socket_path
                     )
                 })?
             }
             Err(e) => {
-                return Err(e).with_context(|| {
-                    format!("Failed to bind Unix socket: {:?}", self.socket_path)
-                });
+                return Err(e)
+                    .with_context(|| format!("Failed to bind Unix socket: {:?}", socket_path));
             }
         };
+        listener.set_nonblocking(true)?;
 
         // Tighten socket permissions (0600)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             if let Err(e) =
-                std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))
+                std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
             {
-                warn!(
-                    "⚠️ Failed to set 0600 on socket {:?}: {}",
-                    self.socket_path, e
-                );
+                warn!("⚠️ Failed to set 0600 on socket {:?}: {}", socket_path, e);
             }
         }
 
-        // Create broadcast channel for outgoing messages
-        let (tx, _rx) = broadcast::channel::<AxiomMessage>(1024);
-        self.broadcast_tx = Some(tx.clone());
-
-        // Create bounded command channel for incoming messages
-        let (cmd_tx, cmd_rx) = mpsc::channel::<LazyUIMessage>(256);
-        self.command_sender = Some(cmd_tx.clone());
-        self.command_receiver = Some(cmd_rx);
-
-        // Create shutdown token
-        let shutdown_token = CancellationToken::new();
-        self.shutdown_token = Some(shutdown_token.clone());
-
-        // Create connection semaphore
-        let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-        self.connection_semaphore = Some(semaphore.clone());
-
         // Get our own UID for peer credential checks
-        // SAFETY: getuid() is always safe to call — it has no preconditions,
-        // never fails, and does not touch any Rust-managed memory.
         #[cfg(unix)]
         let our_uid = unsafe { libc::getuid() };
         #[cfg(not(unix))]
         let our_uid = 0u32;
 
-        info!("🔗 Axiom IPC server listening on: {:?}", self.socket_path);
+        self.listener = Some(listener);
+        self.our_uid = our_uid;
 
-        // Forward the config + metrics handles so per-client handlers
-        // can resolve GetConfig queries AND live composition/system
-        // metrics from HealthCheck / GetPerformanceReport requests. Without
-        // the metrics_handle plumbing the per-client task only sees
-        // `None` and the handler falls back to LiveMetrics::default()
-        // — defeating Design 12's wire of real values.
-        let config_handle = self.config_handle.clone();
-        let metrics_handle = self.live_metrics_handle.clone();
-
-        // Start accepting connections in a separate task
-        let handle = tokio::spawn(Self::accept_connections_static(
-            listener,
-            tx,
-            cmd_tx,
-            shutdown_token,
-            semaphore,
-            our_uid,
-            config_handle,
-            metrics_handle,
-        ));
-        self.accept_handle = Some(handle);
-
+        info!("🔗 Axiom IPC server listening on: {:?}", socket_path);
         Ok(())
     }
 
-    /// Accept incoming connections from Lazy UI (static version)
-    #[allow(clippy::too_many_arguments)]
-    async fn accept_connections_static(
-        listener: UnixListener,
-        tx: broadcast::Sender<AxiomMessage>,
-        cmd_tx: mpsc::Sender<LazyUIMessage>,
-        shutdown_token: CancellationToken,
-        semaphore: Arc<Semaphore>,
-        our_uid: u32,
-        config_handle: Option<Arc<parking_lot::RwLock<AxiomConfig>>>,
-        metrics_handle: Option<Arc<parking_lot::RwLock<LiveMetrics>>>,
-    ) -> Result<()> {
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown_token.cancelled() => {
-                    info!("🔽 IPC accept loop shutting down");
-                    break;
-                }
-                accept_result = listener.accept() => {
-                    match accept_result {
-                        Ok((stream, _)) => {
-                            // Peer credential check
-                            #[cfg(unix)]
-                            {
+    // =========================================================================
+    // Poll-based event loop (called from compositor tick)
+    // =========================================================================
 
-                                match stream.peer_cred() {
-                                    Ok(cred) => {
-                                        if cred.uid() != our_uid {
-                                            warn!("🚫 Rejecting IPC connection from different user (uid={})", cred.uid());
-                                            continue;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!("⚠️ Failed to get peer credentials: {}, rejecting connection", e);
-                                        continue;
-                                    }
-                                }
-                            }
+    /// Poll the IPC server: accept connections, read messages, write responses.
+    /// Called from the compositor's tick().
+    pub fn poll(&mut self) {
+        // 1. Accept new connections (non-blocking)
+        self.accept_new_connections();
+        // 2. Read from all clients (non-blocking)
+        self.read_from_clients();
+        // 3. Write pending data to all clients (non-blocking)
+        self.write_to_clients();
+        // 4. Clean up disconnected clients
+        self.cleanup_disconnected_clients();
+    }
 
-                            // Acquire semaphore permit (limits concurrent connections)
-                            let permit = match semaphore.clone().try_acquire_owned() {
-                                Ok(p) => p,
-                                Err(_) => {
-                                    warn!("🚫 Max IPC connections reached ({}), rejecting", MAX_CONNECTIONS);
-                                    continue;
-                                }
-                            };
-
-                            info!("🤝 Lazy UI connected to Axiom IPC");
-                            let rx = tx.subscribe();
-                            let cmd_tx_clone = cmd_tx.clone();
-                            let config_for_client = config_handle.clone();
-                            let metrics_for_client = metrics_handle.clone();
-                            let client_shutdown_token = shutdown_token.child_token();
-                            tokio::spawn(async move {
-                                let _permit = permit;
-                                if let Err(e) = Self::handle_client(stream, rx, cmd_tx_clone, config_for_client, metrics_for_client, client_shutdown_token).await {
-                                    debug!("IPC client handler ended: {}", e);
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            error!("❌ Error accepting IPC connection: {}", e);
-                        }
-                    }
-                }
-            }
+    fn accept_new_connections(&mut self) {
+        if self.shutdown.load(Ordering::Relaxed) {
+            return;
         }
-        Ok(())
-    }
-
-    /// Handle a single client connection
-    async fn handle_client(
-        stream: UnixStream,
-        mut rx: broadcast::Receiver<AxiomMessage>,
-        cmd_tx: mpsc::Sender<LazyUIMessage>,
-        config_handle: Option<Arc<parking_lot::RwLock<AxiomConfig>>>,
-        metrics_handle: Option<Arc<parking_lot::RwLock<LiveMetrics>>>,
-        shutdown_token: CancellationToken,
-    ) -> Result<()> {
-        let (reader, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(reader);
-        let mut line_buf = String::new();
-        let idle_timeout = Duration::from_secs(CLIENT_IDLE_TIMEOUT_SECS);
-
-        // Send startup notification
-        let startup_msg = AxiomMessage::StartupComplete {
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            capabilities: vec![
-                "scrollable_workspaces".to_string(),
-                "visual_effects".to_string(),
-                "performance_metrics".to_string(),
-                "ai_optimization".to_string(),
-            ],
+        let Some(ref listener) = self.listener else {
+            return;
         };
 
-        Self::send_message(&mut writer, &startup_msg).await?;
-
-        // Process incoming messages and outgoing broadcasts concurrently.
-        // Creates a fresh `take()`-limited reader each iteration to bound
-        // memory: any client sending > MAX_IPC_LINE_BYTES without \n is
-        // disconnected after hitting the take limit.
         loop {
-            let mut limited = (&mut reader).take((MAX_IPC_LINE_BYTES + 1) as u64);
-
-            tokio::select! {
-                // Shutdown requested — exit cleanly
-                _ = shutdown_token.cancelled() => {
-                    debug!("IPC client handler cancelled by shutdown");
-                    break;
-                }
-                // Idle timeout - disconnect if no activity
-                _ = tokio::time::sleep(idle_timeout) => {
-                    info!("⏱️ IPC client idle timeout, disconnecting");
-                    break;
-                }
-                res = limited.read_line(&mut line_buf) => {
-                    let n = match res {
-                        Ok(n) => n,
-                        Err(e) => {
-                            warn!("⚠️ IPC read error: {}", e);
-                            break;
-                        }
-                    };
-
-                    if n == 0 {
-                        break; // client disconnected
-                    }
-
-                    // Line exceeded the maximum allowed size — drop the
-                    // connection to prevent unbounded memory DoS.
-                    if line_buf.len() > MAX_IPC_LINE_BYTES {
-                        warn!("⚠️ IPC message too large ({} bytes, max {}) - disconnecting",
-                            line_buf.len(), MAX_IPC_LINE_BYTES);
-                        break;
-                    }
-
-                    let trimmed = line_buf.trim();
-                    if trimmed.is_empty() {
-                        line_buf.clear();
-                        continue;
-                    }                        debug!("📨 Received IPC message: {}", trimmed);
-                        match serde_json::from_str::<LazyUIMessage>(trimmed) {
-                            Ok(message) => {
-                                // Command-type messages (WorkspaceCommand,
-                                // SetWindowBlur) follow a SINGLE-DISPATCH
-                                // path. The IPC layer forwards them to the
-                                // compositor via `cmd_tx` and emits a minimal
-                                // `*Queued` ACK. The compositor's
-                                // `process_messages` drain loop in
-                                // `AxiomCompositor::process_events` owns both
-                                // validation (whitelist + range checks) AND
-                                // actual state mutation.
-                                //
-                                // Pre-fix behaviour ran the same message through
-                                // TWO paths:
-                                //   1. `cmd_tx.send(message.clone())` — compositor
-                                //      drains + dispatches (real mutation).
-                                //   2. `process_lazy_ui_message(message, ...)` —
-                                //      emitted an ACK with `accepted:<bool>` /
-                                //      `rejected:[(field,reason)]` based on
-                                //      validation alone. No actual mutation in
-                                //      this path.
-                                //
-                                // The duplicate-validation path is what
-                                // monitoring tooling observed as "executed
-                                // twice": the ACK claimed fields were
-                                // accepted based on a stale whitelist state,
-                                // then the compositor's dispatch arm
-                                // re-validated on possibly-different rules.
-                                // Single dispatch through cmd_tx + a
-                                // compositor-owned dispatch arm makes
-                                // validation the single source of truth
-                                // before mutation occurs.
-                                //
-                                // All other message types
-                                // (OptimizeConfig / SetConfig that mutate
-                                // config-owned fields via
-                                // `process_messages`, GetConfig /
-                                // HealthCheck / GetPerformanceReport that are
-                                // query-only) keep the dual-path because
-                                // their ACK shape is synchronous
-                                // request-response and doesn't drive state
-                                // mutation through the workspace /
-                                // effects engine path.
-                                let is_command_type = matches!(
-                                    message,
-                                    LazyUIMessage::WorkspaceCommand { .. }
-                                        | LazyUIMessage::SetWindowBlur { .. }
-                                        | LazyUIMessage::SetClipboard { .. }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    // Peer credential check (via libc::getsockopt SO_PEERCRED)
+                    #[cfg(unix)]
+                    {
+                        let peer_uid = Self::get_peer_uid(&stream);
+                        match peer_uid {
+                            Some(uid) if uid == self.our_uid => {} // OK
+                            Some(uid) => {
+                                warn!(
+                                    "🚫 Rejecting IPC connection from different user (uid={})",
+                                    uid
                                 );
-                                if is_command_type {
-                                    // SINGLE DISPATCH (Issue #2 real fix):
-                                    // WorkspaceCommand + SetWindowBlur
-                                    // messages are forwarded to the compositor
-                                    // via `cmd_tx` ONLY — no inline ACK from
-                                    // `process_lazy_ui_message` — so the
-                                    // compositor's `process_messages` drain
-                                    // arms own the full mutation lifecycle.
-                                    // This collapses the pre-fix
-                                    // duplicate-validation path that
-                                    // monitoring tooling observed as
-                                    // "executed twice".
-                                    //
-                                    // Per-reviewer Q2: capture `cmd_tx.send`
-                                    // result so a closed channel (compositor
-                                    // shutdown) returns a `delivery_failed`
-                                    // ACK instead of a misleading `queued`
-                                    // status.
-                                    //
-                                    // Per-reviewer Q3: keep the original
-                                    // `WorkspaceCommandAck` / `SetWindowBlurAck`
-                                    // `event_type` discriminator for backward
-                                    // compat with IPC clients
-                                    // (lazy_ui_client.py matched on these
-                                    // strings). The new
-                                    // `status: queued_for_compositor_dispatch`
-                                    // discriminator is additive — old clients
-                                    // matching on `event_type` still work.
-                                    //
-                                    // Per-reviewer Q6: build `details` via
-                                    // `serde_json::json!` macro directly per
-                                    // match arm — no
-                                    // `serde_json::Value::Object(ref mut
-                                    // map)` mutation after the fact.
-
-                                    // Whitelist gate (WorkspaceCommand only):
-                                    // reject unknown actions with an
-                                    // `unknown_action` ACK and never forward
-                                    // them to the compositor. Known actions
-                                    // fall through to single-dispatch below.
-                                    if let LazyUIMessage::WorkspaceCommand { action, .. } = &message {
-                                        if !is_known_workspace_action(action) {
-                                            debug!(
-                                                "🚫 Rejecting unknown WorkspaceCommand action: {}",
-                                                action
-                                            );
-                                            let ack =
-                                                Self::build_workspace_command_ack(action, false);
-                                            if let Err(e) =
-                                                Self::send_message(&mut writer, &ack).await
-                                            {
-                                                warn!(
-                                                    "⚠️ Failed sending unknown_action ACK: {}",
-                                                    e
-                                                );
-                                            }
-                                            line_buf.clear();
-                                            continue;
-                                        }
-                                    }
-
-                                    let cmd_event_type: &'static str;
-                                    let cmd_details: serde_json::Value;
-                                    match &message {
-                                        LazyUIMessage::WorkspaceCommand { action, .. } => {
-                                            cmd_event_type = "WorkspaceCommandAck";
-                                            cmd_details = serde_json::json!({
-                                                "action": action,
-                                                "status": "queued_for_compositor_dispatch",
-                                                "executor": "process_messages",
-                                                // Compat shim: prior cosmetic
-                                                // ACK schema exposed `accepted`
-                                                // and `dispatched_via_mpsc`
-                                                // as bool. Old IPC consumers
-                                                // (lazy_ui_client.py pattern
-                                                // matches, external dashboard
-                                                // tooling reading the JSON
-                                                // stream) silently break if
-                                                // we drop them. We always
-                                                // forward (single dispatch →
-                                                // cmd_tx), so `accepted=true`
-                                                // is honest.
-                                                "accepted": true,
-                                                "dispatched_via_mpsc": true,
-                                            });
-                                        }
-                                        LazyUIMessage::SetWindowBlur { window_id, radius } => {
-                                            cmd_event_type = "SetWindowBlurAck";
-                                            cmd_details = serde_json::json!({
-                                                "window_id": window_id,
-                                                "radius": radius,
-                                                "status": "queued_for_compositor_dispatch",
-                                                "accepted": true,
-                                                "dispatched_via_mpsc": true,
-                                            });
-                                        }
-                                        LazyUIMessage::SetClipboard { text } => {
-                                            cmd_event_type = "SetClipboardAck";
-                                            cmd_details = serde_json::json!({
-                                                "status": "queued_for_compositor_dispatch",
-                                                "text_length": text.len(),
-                                                "accepted": true,
-                                                "dispatched_via_mpsc": true,
-                                            });
-                                        }
-                                        // `is_command_type` already gated the
-                                        // WorkspaceCommand / SetWindowBlur /
-                                        // SetClipboard branch above; the
-                                        // remaining 5 variants
-                                        // (OptimizeConfig / GetConfig /
-                                        // SetConfig / HealthCheck /
-                                        // GetPerformanceReport) flow into the
-                                        // wildcard catch-all below as a
-                                        // defensive no-op so the match is
-                                        // exhaustive over `LazyUIMessage`.
-                                        // `unreachable!()` is statically
-                                        // reachable (5 variants flow into
-                                        // `_`) so no `unreachable_patterns`
-                                        // lint fires, but the runtime is
-                                        // guaranteed never to enter this arm
-                                        // because the outer `is_command_type`
-                                        // predicate already returned `true`.
-                                        _ => unreachable!(
-                                            "is_command_type gated WorkspaceCommand / SetWindowBlur / SetClipboard"
-                                        ),
-                                    }
-                                    // Q2: capture the send result; build the
-                                    // ACK BEFORE the borrow on `message`
-                                    // expires (we're about to move `message`
-                                    // into `cmd_tx.send`).
-                                    let send_result = cmd_tx.send(message).await;
-                                    let ack_event_type: &'static str;
-                                    let ack_details: serde_json::Value;
-                                    // Q2 fix (compile error E0382 — partial move of
-                                    // `send_result`): pattern-bind via `ref e` so
-                                    // `send_result` remains accessible for the
-                                    // downstream `if send_result.is_err()` check.
-                                    // The original `Err(e) =>` form moved the
-                                    // `SendError<LazyUIMessage>` out of
-                                    // `send_result`, after which Rust can't
-                                    // re-borrow the binding.
-                                    match &send_result {
-                                        Ok(()) => {
-                                            ack_event_type = cmd_event_type;
-                                            ack_details = cmd_details;
-                                        }
-                                        Err(e) => {
-                                            ack_event_type = match cmd_event_type {
-                                                "WorkspaceCommandAck" => "WorkspaceCommandAckFailed",
-                                                "SetWindowBlurAck" => "SetWindowBlurAckFailed",
-                                                "SetClipboardAck" => "SetClipboardAckFailed",
-                                                _ => unreachable!(
-                                                    "cmd_event_type is WorkspaceCommandAck, SetWindowBlurAck, or SetClipboardAck"
-                                                ),
-                                            };
-                                            let reason = format!(
-                                                "compositor cmd_tx receiver dropped during shutdown: {}",
-                                                e
-                                            );
-                                            ack_details = serde_json::json!({
-                                                "status": "delivery_failed",
-                                                "reason": reason,
-                                            });
-                                            warn!(
-                                                "⚠️ cmd_tx.send failed for command-type message \
-                                                 (likely compositor shutdown); emitting delivery_failed ACK"
-                                            );
-                                        }
-                                    }
-                                    let ack = AxiomMessage::UserEvent {
-                                        timestamp: SystemTime::now()
-                                            .duration_since(UNIX_EPOCH)
-                                            .expect(
-                                                "system clock before UNIX_EPOCH — \
-                                                 compositor hardware fault",
-                                            )
-                                            .as_secs(),
-                                        event_type: ack_event_type.into(),
-                                        details: ack_details,
-                                    };
-                                    if let Err(e) =
-                                        Self::send_message(&mut writer, &ack).await
-                                    {
-                                        if send_result.is_err() {
-                                            warn!(
-                                                "⚠️ delivery_failed ACK could not be sent \
-                                                 (likely peer already disconnected): {}",
-                                                e
-                                            );
-                                        } else {
-                                            warn!(
-                                                "⚠️ Failed sending command-type queued ACK: {}",
-                                                e
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    // Dual-path retained for non-command
-                                    // types (config mutation + queries).
-                                    // cmd_tx.send forwards to the
-                                    // compositor's `process_messages`
-                                    // drain (which mutates
-                                    // config-owned fields for
-                                    // OptimizeConfig / SetConfig and drops
-                                    // the rest). The inline handler
-                                    // takes care of validation + ACK
-                                    // generation synchronously.
-                                    if cmd_tx.send(message.clone()).await.is_err() {
-                                        debug!("cmd_tx send failed for non-command message (shutting down)");
-                                    }
-                                    let cfg_snapshot = config_handle
-                                        .as_ref()
-                                        .map(|h| h.read().clone());
-                                    if let Err(e) =
-                                        Self::process_lazy_ui_message(
-                                            message,
-                                            &mut writer,
-                                            cfg_snapshot.as_ref(),
-                                            metrics_handle.as_ref(),
-                                        )
-                                        .await
-                                    {
-                                        warn!(
-                                            "⚠️ Error processing message: {}",
-                                            e
-                                        );
-                                    }
-                                }
+                                continue;
                             }
-                            Err(e) => {
-                                warn!("⚠️ Invalid JSON from IPC client: {}", e);
+                            None => {
+                                warn!("⚠️ Failed to get peer credentials, rejecting connection");
+                                continue;
                             }
                         }
-
-                    // Clear the buffer for the next iteration
-                    line_buf.clear();
-                },
-                msg = rx.recv() => {
-                    match msg {
-                        Ok(message) => {
-                            if let Err(e) = Self::send_message(&mut writer, &message).await {
-                                warn!("⚠️ Failed to send broadcast message: {}", e);
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            warn!("⚠️ IPC client lagged by {} messages", n);
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
                     }
+
+                    // Connection limit check
+                    if self.num_connections.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+                        warn!(
+                            "🚫 Max IPC connections reached ({}), rejecting",
+                            MAX_CONNECTIONS
+                        );
+                        continue;
+                    }
+                    self.num_connections.fetch_add(1, Ordering::Relaxed);
+
+                    if let Err(e) = stream.set_nonblocking(true) {
+                        warn!("⚠️ Failed to set non-blocking on IPC connection: {}", e);
+                        self.num_connections.fetch_sub(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    let fd = stream.as_raw_fd();
+                    info!("🤝 Lazy UI connected to Axiom IPC (fd={})", fd);
+
+                    // Send startup notification
+                    let startup_msg = AxiomMessage::StartupComplete {
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        capabilities: vec![
+                            "scrollable_workspaces".to_string(),
+                            "performance_metrics".to_string(),
+                            "ai_optimization".to_string(),
+                        ],
+                    };
+                    if let Ok(json) = serde_json::to_string(&startup_msg) {
+                        let mut msg_bytes = json.into_bytes();
+                        msg_bytes.push(b'\n');
+                        // Assume write succeeds (best-effort on connect)
+                        let _ = stream.write_all(&msg_bytes);
+                    }
+
+                    self.clients.insert(
+                        fd,
+                        ClientData {
+                            stream,
+                            read_buf: Vec::with_capacity(4096),
+                            write_buf: Vec::new(),
+                            last_activity: Instant::now(),
+                        },
+                    );
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    break; // No more connections to accept
+                }
+                Err(e) => {
+                    error!("❌ Error accepting IPC connection: {}", e);
+                    break;
+                }
+            }
+        }
+    }
+
+    fn read_from_clients(&mut self) {
+        let client_fds: Vec<RawFd> = self.clients.keys().copied().collect();
+        let mut disconnected: Vec<RawFd> = Vec::new();
+
+        for &fd in &client_fds {
+            // Read available data into a local buffer; we re-borrow clients
+            // each iteration so the borrow is never held across method calls.
+            let mut buf = [0u8; 4096];
+            loop {
+                let (done, is_err) = match self.clients.get_mut(&fd) {
+                    Some(client) => match client.stream.read(&mut buf) {
+                        Ok(0) => (true, false),
+                        Ok(n) => {
+                            client.last_activity = Instant::now();
+                            client.read_buf.extend_from_slice(&buf[..n]);
+                            (false, false) // more data may be available
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => (true, false),
+                        Err(e) => {
+                            warn!("⚠️ IPC read error on fd={}: {}", fd, e);
+                            (true, true)
+                        }
+                    },
+                    None => (true, false),
+                };
+                if is_err {
+                    disconnected.push(fd);
+                }
+                if done {
+                    break;
                 }
             }
         }
 
-        info!("📪 Lazy UI disconnected from Axiom IPC");
-        Ok(())
+        for fd in disconnected {
+            self.remove_client(fd);
+        }
+
+        // Process lines from all clients (separate pass avoids borrow conflicts)
+        for &fd in &client_fds {
+            if self.clients.contains_key(&fd) {
+                self.process_client_lines(fd);
+            }
+        }
     }
 
-    /// Process a message from Lazy UI
-    async fn process_lazy_ui_message(
+    fn process_client_lines(&mut self, fd: RawFd) {
+        // Extract complete lines from the client's read buffer, releasing the
+        // borrow before calling handle_message (which needs &mut self).
+        let lines: Vec<String> = {
+            let client = match self.clients.get_mut(&fd) {
+                Some(c) => c,
+                None => return,
+            };
+            let mut extracted = Vec::new();
+            while let Some(nl_pos) = client.read_buf.iter().position(|&b| b == b'\n') {
+                let raw: Vec<u8> = client.read_buf.drain(..=nl_pos).collect();
+                let line = String::from_utf8_lossy(&raw[..raw.len() - 1])
+                    .trim()
+                    .to_string();
+                if line.len() > MAX_IPC_LINE_BYTES {
+                    warn!(
+                        "⚠️ IPC message too large ({} bytes, max {}) - disconnecting fd={}",
+                        line.len(),
+                        MAX_IPC_LINE_BYTES,
+                        fd
+                    );
+                    client.read_buf.clear();
+                    break;
+                }
+                if line.is_empty() {
+                    continue;
+                }
+                extracted.push(line);
+            }
+            extracted
+        };
+
+        // Process extracted lines (borrow released, so we can call handle_message)
+        for trimmed in lines {
+            debug!("📨 Received IPC message: {}", trimmed);
+            match serde_json::from_str::<LazyUIMessage>(&trimmed) {
+                Ok(message) => {
+                    self.handle_message(fd, message);
+                }
+                Err(e) => {
+                    warn!("⚠️ Invalid JSON from IPC client: {}", e);
+                }
+            }
+        }
+    }
+
+    fn handle_message(&mut self, fd: RawFd, message: LazyUIMessage) {
+        let is_command_type = matches!(
+            message,
+            LazyUIMessage::WorkspaceCommand { .. }
+                | LazyUIMessage::SetWindowBlur { .. }
+                | LazyUIMessage::SetClipboard { .. }
+        );
+
+        if is_command_type {
+            // Whitelist gate (WorkspaceCommand only)
+            if let LazyUIMessage::WorkspaceCommand { ref action, .. } = message {
+                if !is_known_workspace_action(action) {
+                    debug!("🚫 Rejecting unknown WorkspaceCommand action: {}", action);
+                    let ack = Self::build_workspace_command_ack(action, false);
+                    self.queue_message_to_client(fd, &ack);
+                    return;
+                }
+            }
+
+            // Build the ACK based on message type
+            let (cmd_event_type, cmd_details) = match &message {
+                LazyUIMessage::WorkspaceCommand { action, .. } => (
+                    "WorkspaceCommandAck",
+                    serde_json::json!({
+                        "action": action,
+                        "status": "queued_for_compositor_dispatch",
+                        "executor": "process_messages",
+                        "accepted": true,
+                        "dispatched_via_mpsc": true,
+                    }),
+                ),
+                LazyUIMessage::SetWindowBlur { window_id, radius } => (
+                    "SetWindowBlurAck",
+                    serde_json::json!({
+                        "window_id": window_id,
+                        "radius": radius,
+                        "status": "queued_for_compositor_dispatch",
+                        "accepted": true,
+                        "dispatched_via_mpsc": true,
+                    }),
+                ),
+                LazyUIMessage::SetClipboard { text } => (
+                    "SetClipboardAck",
+                    serde_json::json!({
+                        "status": "queued_for_compositor_dispatch",
+                        "text_length": text.len(),
+                        "accepted": true,
+                        "dispatched_via_mpsc": true,
+                    }),
+                ),
+                _ => unreachable!("is_command_type gated above"),
+            };
+
+            // Send via command channel
+            let send_result = self.command_sender.send(message.clone());
+
+            let (ack_event_type, ack_details) = match send_result {
+                Ok(()) => (cmd_event_type, cmd_details),
+                Err(e) => {
+                    let failed_type = match cmd_event_type {
+                        "WorkspaceCommandAck" => "WorkspaceCommandAckFailed",
+                        "SetWindowBlurAck" => "SetWindowBlurAckFailed",
+                        "SetClipboardAck" => "SetClipboardAckFailed",
+                        _ => "CommandAckFailed",
+                    };
+                    (
+                        failed_type,
+                        serde_json::json!({
+                            "status": "delivery_failed",
+                            "reason": format!("compositor command receiver dropped: {}", e),
+                        }),
+                    )
+                }
+            };
+
+            let ack = AxiomMessage::UserEvent {
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system clock before UNIX_EPOCH")
+                    .as_secs(),
+                event_type: ack_event_type.into(),
+                details: ack_details,
+            };
+            self.queue_message_to_client(fd, &ack);
+        } else {
+            // Non-command messages (config, queries) — handle inline
+            // Forward to compositor via command channel
+            let _ = self.command_sender.send(message.clone());
+
+            // Handle inline for ACK + response
+            let cfg_snapshot = self.config_handle.as_ref().map(|h| h.read().clone());
+
+            self.process_query_message(fd, message, cfg_snapshot.as_ref());
+        }
+    }
+
+    /// Queue a message to be written to a specific client
+    fn queue_message_to_client(&mut self, fd: RawFd, message: &AxiomMessage) {
+        if let Some(client) = self.clients.get_mut(&fd) {
+            if let Ok(json) = serde_json::to_string(message) {
+                client.write_buf.extend_from_slice(json.as_bytes());
+                client.write_buf.push(b'\n');
+            }
+        }
+    }
+
+    /// Process a query-type message (GetConfig, HealthCheck, etc.) inline
+    fn process_query_message(
+        &mut self,
+        fd: RawFd,
         message: LazyUIMessage,
-        writer: &mut tokio::net::unix::OwnedWriteHalf,
         config: Option<&AxiomConfig>,
-        metrics_handle: Option<&Arc<parking_lot::RwLock<LiveMetrics>>>,
-    ) -> Result<()> {
+    ) {
+        let metrics_handle = self.live_metrics_handle.as_ref();
         match message {
             LazyUIMessage::OptimizeConfig { changes, reason } => {
                 info!(
@@ -919,13 +725,9 @@ impl AxiomIPCServer {
                     changes.len(),
                     reason
                 );
-
-                // ponytail: effects keys (blur.radius, animations.duration) are silently
-                // accepted as applied but are no-ops — the effects engine was removed.
                 let mut applied: Vec<String> = Vec::new();
                 let mut rejected: Vec<(String, String)> = Vec::new();
                 for (key, value) in changes {
-                    debug!("  📝 Setting {}: {:?}", key, value);
                     let val_f64 = value.as_f64();
                     match (key.as_str(), val_f64) {
                         ("workspace.scroll_speed", Some(v))
@@ -941,119 +743,45 @@ impl AxiomIPCServer {
                         }
                     }
                 }
-                // Send a simple acknowledgment as UserEvent for now
                 let ack = AxiomMessage::UserEvent {
-                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("system clock before UNIX_EPOCH")
+                        .as_secs(),
                     event_type: "OptimizeConfigAck".into(),
                     details: serde_json::json!({ "applied": applied, "rejected": rejected }),
                 };
-                Self::send_message(writer, &ack).await?;
+                self.queue_message_to_client(fd, &ack);
             }
-
             LazyUIMessage::GetConfig { key } => {
-                debug!("📋 Config query: {}", key);
-
-                // Resolve against the live `AxiomConfig` snapshot taken when the
-                // client connected. Each dot-separated "section.field" path is
-                // walked against the supported schema; unknown paths return Null
-                // so callers can distinguish "missing" from "default".
                 let value = config
                     .and_then(|cfg| Self::resolve_config_path(cfg, &key))
                     .unwrap_or(serde_json::Value::Null);
-                if value.is_null() {
-                    debug!(
-                        "GetConfig '{}' returned Null (key not recognised in live config)",
-                        key
-                    );
-                } else {
-                    debug!("GetConfig '{}' resolved against live config", key);
-                }
-
-                let response = AxiomMessage::ConfigResponse {
-                    key: key.clone(),
-                    value,
-                };
-
-                Self::send_message(writer, &response).await?;
+                let response = AxiomMessage::ConfigResponse { key, value };
+                self.queue_message_to_client(fd, &response);
             }
-
             LazyUIMessage::SetConfig { key, value } => {
                 info!("⚙️ Setting config: {} = {:?}", key, value);
-                // Honest ACK: this per-client handler ONLY validates and
-                // forwards the request to the compositor thread via
-                // `cmd_tx`. The actual `AxiomConfig` mutation happens
-                // later inside `process_messages`, which runs on the
-                // compositor tick. Report `queued`, not `accepted`, so
-                // monitoring clients can distinguish "we have the
-                // request" from "the compositor applied it". The
-                // compositor-side application future-PR can wire a
-                // follow-up `SetConfigApplied` event to close the loop
-                // without breaking this schema.
                 let ack = AxiomMessage::UserEvent {
-                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("system clock before UNIX_EPOCH")
+                        .as_secs(),
                     event_type: "SetConfigAck".into(),
-                    details: serde_json::json!({
-                        "key": key,
-                        "status": "queued",
-                        "applied_later_by": "process_messages",
-                    }),
+                    details: serde_json::json!({ "key": key, "status": "queued" }),
                 };
-                Self::send_message(writer, &ack).await?;
+                self.queue_message_to_client(fd, &ack);
             }
-
-            // Command-type messages (WorkspaceCommand, SetWindowBlur) are
-            // gated upstream in `handle_client`'s single-dispatch branch
-            // (Issue #2 real fix). They are forwarded to the compositor
-            // via `cmd_tx` ONLY — no inline ACK — so the compositor's
-            // `process_messages` drain + dispatch arm is the single
-            // mutation path. The arms below are kept (with debug logging)
-            // so a future drift between the upstream gate and this match
-            // surfaces as a `debug!` log rather than a panic or compile
-            // error.
-            LazyUIMessage::WorkspaceCommand { action, .. } => {
-                debug!(
-                    "⚠️ WorkspaceCommand({action}) reached process_lazy_ui_message \
-                     — upstream gate in handle_client should have dispatched \
-                     it via cmd_tx only"
-                );
-            }
-            LazyUIMessage::SetWindowBlur { .. } => {
-                // ponytail: SetWindowBlur is a no-op — the effects engine was removed.
-                // Accepted and forwarded to cmd_tx by the upstream gate but never applied.
-            }
-            LazyUIMessage::SetClipboard { .. } => {
-                debug!(
-                    "⚠️ SetClipboard reached process_lazy_ui_message \
-                     — upstream gate in handle_client should have dispatched \
-                     it via cmd_tx only"
-                );
-            }
-
             LazyUIMessage::HealthCheck => {
-                debug!("🏥 Health check request");
-                // Read real system metrics from /proc and sysfs (same path
-                // as `GetPerformanceReport`). CPU is a single-sample reading
-                // (no delta), so it will be 0 on first call; subsequent
-                // calls within the same connection will report deltas if we
-                // had `&mut self`, but this static handler cannot carry
-                // state. Memory and GPU are real point-in-time readings.
-                //
-                // **Per-client metrics snapshot integration (Design 12).**
-                // The compositor pushes live values into `live_metrics_handle`
-                // on every tick; we read them here to populate the response.
-                // Without this, monitoring clients couldn't tell "metrics not
-                // wired" from "true zero reading". The handle is read inside
-                // a single short-lived `parking_lot::RwLock` `read()` guard
-                // and never crosses an await point — safe to use here.
-                let snapshot = metrics_handle
-                    .as_ref()
-                    .map(|h| *h.read())
-                    .unwrap_or_default();
+                let snapshot = metrics_handle.map(|h| *h.read()).unwrap_or_default();
                 let cpu = Self::sample_system_cpu_instant();
                 let mem = Self::sample_system_memory_mb();
                 let gpu = Self::sample_gpu_usage();
                 let metrics = AxiomMessage::PerformanceMetrics {
-                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("system clock before UNIX_EPOCH")
+                        .as_secs(),
                     cpu_usage: cpu,
                     memory_usage: mem,
                     gpu_usage: gpu,
@@ -1061,72 +789,101 @@ impl AxiomIPCServer {
                     active_windows: snapshot.active_windows,
                     current_workspace: snapshot.current_workspace,
                 };
-
-                Self::send_message(writer, &metrics).await?;
+                self.queue_message_to_client(fd, &metrics);
             }
-
             LazyUIMessage::GetPerformanceReport => {
-                debug!("📊 Performance report request");
-                // Live system metrics are sampled via the static helpers below
-                // (they only touch OS files, no compositor state required).
-                //
-                // **Per-client metrics snapshot integration (Design 12).**
-                // Read frame_time_ms / active_windows / current_workspace
-                // from the live handle the compositor pushed on its last
-                // tick. `effects_gpu_available` rounds out the report
-                // (Design 14) so monitoring clients can tell whether
-                // blur / shadow post-processing actually runs on the GPU
-                // or silently falls back to CPU-only.
-                let snapshot = metrics_handle
-                    .as_ref()
-                    .map(|h| *h.read())
-                    .unwrap_or_default();
+                let snapshot = metrics_handle.map(|h| *h.read()).unwrap_or_default();
                 let gpu_usage = Self::sample_gpu_usage();
-                // Note contract:
-                // - `note` is empty when the live snapshot is wired (the
-                //   composer has called `set_live_metrics_snapshot`).
-                // - `note` records the placeholder caveat when the
-                //   snapshot is the default (no compositor wired), so old
-                //   clients that grep on note still recognise the gap.
                 let note = if metrics_handle.is_some() {
                     String::new()
                 } else {
                     "live snapshot not wired — fields reflect LiveMetrics::default()".to_string()
                 };
                 let report = AxiomMessage::PerformanceReport {
-                    timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("system clock before UNIX_EPOCH")
+                        .as_secs(),
                     gpu_usage,
                     frame_time_ms: snapshot.frame_time_ms,
                     active_windows: snapshot.active_windows,
                     current_workspace: snapshot.current_workspace,
                     note,
                 };
-                Self::send_message(writer, &report).await?;
+                self.queue_message_to_client(fd, &report);
             }
+            _ => {} // WorkspaceCommand, SetWindowBlur, SetClipboard — already dispatched via cmd_tx
         }
-
-        Ok(())
     }
 
-    /// Send a message to Lazy UI
-    async fn send_message(
-        writer: &mut tokio::net::unix::OwnedWriteHalf,
-        message: &AxiomMessage,
-    ) -> Result<()> {
-        let json = serde_json::to_string(message).with_context(|| "Failed to serialize message")?;
+    fn write_to_clients(&mut self) {
+        // First, drain pending broadcasts into each client's write buffer
+        if !self.pending_broadcasts.is_empty() {
+            let client_fds: Vec<RawFd> = self.clients.keys().copied().collect();
+            for fd in client_fds {
+                if let Some(client) = self.clients.get_mut(&fd) {
+                    for msg in &self.pending_broadcasts {
+                        if let Ok(json) = serde_json::to_string(msg) {
+                            client.write_buf.extend_from_slice(json.as_bytes());
+                            client.write_buf.push(b'\n');
+                        }
+                    }
+                }
+            }
+            self.pending_broadcasts.clear();
+        }
 
-        writer
-            .write_all(json.as_bytes())
-            .await
-            .with_context(|| "Failed to write message")?;
-        writer
-            .write_all(b"\n")
-            .await
-            .with_context(|| "Failed to write newline")?;
+        // Try to flush each client's write buffer
+        let mut flushed: Vec<RawFd> = Vec::new();
+        let client_fds: Vec<RawFd> = self.clients.keys().copied().collect();
+        for fd in client_fds {
+            if let Some(client) = self.clients.get_mut(&fd) {
+                while !client.write_buf.is_empty() {
+                    match client.stream.write(&client.write_buf) {
+                        Ok(n) => {
+                            let _ = client.write_buf.drain(..n);
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            break; // Can't write more now
+                        }
+                        Err(e) => {
+                            warn!("⚠️ IPC write error on fd={}: {}", fd, e);
+                            flushed.push(fd);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        for fd in flushed {
+            self.remove_client(fd);
+        }
+    }
 
-        debug!("📤 Sent IPC message: {}", json);
+    fn cleanup_disconnected_clients(&mut self) {
+        let now = Instant::now();
+        let idle_timeout = Duration::from_secs(CLIENT_IDLE_TIMEOUT_SECS);
+        let mut stale: Vec<RawFd> = Vec::new();
 
-        Ok(())
+        let client_fds: Vec<RawFd> = self.clients.keys().copied().collect();
+        for fd in client_fds {
+            if let Some(client) = self.clients.get(&fd) {
+                if now.duration_since(client.last_activity) > idle_timeout {
+                    info!("⏱️ IPC client fd={} idle timeout, disconnecting", fd);
+                    stale.push(fd);
+                }
+            }
+        }
+        for fd in stale {
+            self.remove_client(fd);
+        }
+    }
+
+    fn remove_client(&mut self, fd: RawFd) {
+        if self.clients.remove(&fd).is_some() {
+            self.num_connections.fetch_sub(1, Ordering::Relaxed);
+            debug!("📪 IPC client fd={} disconnected", fd);
+        }
     }
 
     /// Phase 3: Process pending IPC messages and apply configuration changes.
@@ -1152,8 +909,6 @@ impl AxiomIPCServer {
                 match message {
                     LazyUIMessage::OptimizeConfig { changes, reason } => {
                         info!("🎯 Applying optimization: {} ({})", changes.len(), reason);
-                        // ponytail: effects keys (blur.radius, animations.duration) are accepted
-                        // but are no-ops — the effects engine was removed.
                         for (key, value) in changes {
                             if let Some(val_f64) = value.as_f64() {
                                 match key.as_str() {
@@ -1174,7 +929,6 @@ impl AxiomIPCServer {
                     }
                     LazyUIMessage::SetConfig { key, value } => {
                         info!("⚙️ Setting config: {} = {:?}", key, value);
-                        // ponytail: effects keys accepted but are no-ops — effects engine removed.
                         if let Some(val_f64) = value.as_f64() {
                             match key.as_str() {
                                 "workspace.scroll_speed"
@@ -1211,63 +965,11 @@ impl AxiomIPCServer {
 
     /// Public getter for testing — allows external test code to inject
     /// LazyUIMessage variants into the command channel without a real IPC client.
-    pub fn command_sender_for_test(&self) -> Option<&mpsc::Sender<LazyUIMessage>> {
-        self.command_sender.as_ref()
+    pub fn command_sender_for_test(&self) -> std::sync::mpsc::Sender<LazyUIMessage> {
+        self.command_sender.clone()
     }
 
-    /// Broadcast PerformanceMetrics to all connected clients
-    pub fn broadcast_performance_metrics(
-        &self,
-        cpu_usage: f32,
-        memory_usage: f32,
-        gpu_usage: f32,
-        frame_time: f32,
-        active_windows: u32,
-        current_workspace: i32,
-    ) -> Result<()> {
-        if let Some(tx) = &self.broadcast_tx {
-            let _ = tx.send(AxiomMessage::PerformanceMetrics {
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs(),
-                cpu_usage,
-                memory_usage,
-                gpu_usage,
-                frame_time,
-                active_windows,
-                current_workspace,
-            });
-        }
-        Ok(())
-    }
-
-    /// Broadcast a compositor state change to all connected IPC clients.
-    ///
-    /// `component` identifies the subsystem (e.g. `"workspace"`, `"window"`,
-    /// `"effects"`) and `new_state` / `old_state` describe the transition
-    /// (e.g. `"scrolled_right"`, `"minimized"`, `"fullscreen"`).  This is a
-    /// fire-and-forget broadcast — send failures (no connected clients) are
-    /// silently ignored.
-    pub fn broadcast_state_change(
-        &self,
-        component: &str,
-        old_state: &str,
-        new_state: &str,
-    ) -> Result<()> {
-        if let Some(tx) = &self.broadcast_tx {
-            let _ = tx.send(AxiomMessage::StateChange {
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs(),
-                component: component.to_owned(),
-                old_state: old_state.to_owned(),
-                new_state: new_state.to_owned(),
-            });
-        }
-        Ok(())
-    }
-
-    /// Rate-limited helper that samples CPU/GPU/memory and broadcasts metrics (~10Hz)
+    /// Rate-limited helper that samples CPU/GPU/memory and enqueues metrics (~10Hz)
     pub fn maybe_broadcast_performance_metrics(
         &mut self,
         frame_time_ms: f32,
@@ -1278,17 +980,43 @@ impl AxiomIPCServer {
         if self.last_metrics_sent.elapsed() < RATE {
             return;
         }
+        self.last_metrics_sent = Instant::now();
+
         let (cpu, mem_mb) = self.sample_system_metrics_nonblocking();
         let gpu = Self::sample_gpu_usage();
-        let _ = self.broadcast_performance_metrics(
-            cpu,
-            mem_mb,
-            gpu,
-            frame_time_ms,
-            active_windows,
-            current_workspace,
-        );
-        self.last_metrics_sent = Instant::now();
+
+        self.pending_broadcasts
+            .push(AxiomMessage::PerformanceMetrics {
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system clock before UNIX_EPOCH")
+                    .as_secs(),
+                cpu_usage: cpu,
+                memory_usage: mem_mb,
+                gpu_usage: gpu,
+                frame_time: frame_time_ms,
+                active_windows,
+                current_workspace,
+            });
+    }
+
+    /// Broadcast a compositor state change to all connected IPC clients.
+    ///
+    /// `component` identifies the subsystem (e.g. `"workspace"`, `"window"`,
+    /// `"effects"`) and `new_state` / `old_state` describe the transition
+    /// (e.g. `"scrolled_right"`, `"minimized"`, `"fullscreen"`).  This is a
+    /// fire-and-forget broadcast — send failures (no connected clients) are
+    /// silently ignored.
+    pub fn broadcast_state_change(&mut self, component: &str, old_state: &str, new_state: &str) {
+        self.pending_broadcasts.push(AxiomMessage::StateChange {
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before UNIX_EPOCH")
+                .as_secs(),
+            component: component.to_owned(),
+            old_state: old_state.to_owned(),
+            new_state: new_state.to_owned(),
+        });
     }
 
     /// Sample GPU usage percentage from DRM sysfs (AMD/Intel) or return 0.0.
@@ -1390,31 +1118,24 @@ impl AxiomIPCServer {
         (cpu_percent, mem_used_mb)
     }
 
-    /// Gracefully shut down the IPC server
-    pub async fn shutdown(&mut self) -> Result<()> {
+    /// Shutdown the IPC server — stops accepting new connections
+    pub fn shutdown_sync(&mut self) {
         info!("🔽 Shutting down IPC server...");
-
-        // Cancel the accept loop
-        if let Some(token) = self.shutdown_token.take() {
-            token.cancel();
+        self.shutdown.store(true, Ordering::Relaxed);
+        // Close the listener
+        self.listener.take();
+        // Disconnect all clients
+        let fds: Vec<RawFd> = self.clients.keys().copied().collect();
+        for fd in fds {
+            self.remove_client(fd);
         }
-
-        // Wait for the accept loop to finish
-        if let Some(handle) = self.accept_handle.take() {
-            // Give it a short timeout in case it's stuck
-            match tokio::time::timeout(Duration::from_secs(5), handle).await {
-                Ok(Ok(_)) => info!("✅ IPC accept loop stopped"),
-                Ok(Err(e)) => warn!("⚠️ IPC accept loop error: {}", e),
-                Err(_) => warn!("⚠️ IPC accept loop shutdown timed out"),
-            }
+        // Close the receiver so process_messages gets empty drains
+        self.command_receiver.take();
+        // Clean up socket file
+        if self.socket_path.exists() {
+            let _ = std::fs::remove_file(&self.socket_path);
         }
-
-        // Drop broadcast channel to signal clients
-        self.broadcast_tx = None;
-        self.command_sender = None;
-
         info!("✅ IPC server shut down");
-        Ok(())
     }
 }
 
@@ -1431,14 +1152,9 @@ impl Drop for AxiomIPCServer {
 
 impl AxiomIPCServer {
     /// Walk a dot-separated `section.field` path on the live `AxiomConfig`.
-    /// Supports the `workspace.*`, `effects.*`, `general.*` subtrees.
     /// Returns `None` for unknown paths so the IPC layer can answer
     /// with `Null` rather than a misleading default.
     fn resolve_config_path(config: &AxiomConfig, key: &str) -> Option<serde_json::Value> {
-        // ponytail: effects.* paths return None — config values exist but are never applied.
-        if key.starts_with("effects.") {
-            return None;
-        }
         match key {
             "workspace.scroll_speed" => Some(serde_json::json!(config.workspace.scroll_speed)),
             "workspace.infinite_scroll" => {
@@ -1476,6 +1192,32 @@ impl AxiomIPCServer {
         PathBuf::from("/tmp")
             .join(format!("axiom-{}", pid))
             .join("axiom-lazy-ui.sock")
+    }
+
+    /// Get peer UID via `libc::getsockopt(SO_PEERCRED)` (stable Rust).
+    /// Returns `None` on error.
+    #[cfg(unix)]
+    fn get_peer_uid(stream: &UnixStream) -> Option<u32> {
+        use std::os::unix::io::AsRawFd;
+        let fd = stream.as_raw_fd();
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: getsockopt with SO_PEERCRED is safe — it writes cred
+        // and returns 0 on success. The fd is valid (we just accepted it).
+        let ret = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if ret == 0 {
+            Some(cred.uid)
+        } else {
+            None
+        }
     }
 
     /// Single-sample CPU usage percentage (no delta — returns 0 on first call
@@ -1537,8 +1279,8 @@ impl AxiomIPCServer {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_message_serialization() {
+    #[test]
+    fn test_message_serialization() {
         let message = AxiomMessage::PerformanceMetrics {
             timestamp: 1234567890,
             cpu_usage: 25.5,
@@ -1645,10 +1387,6 @@ mod tests {
             frame_time_ms: 12.5,
             active_windows: 7,
             current_workspace: 2,
-            effects_gpu_available: true,
-            effects_enabled: true,
-            blur_enabled: true,
-            blur_radius: 8.0,
         });
         let snap = *server
             .live_metrics_handle
@@ -1658,20 +1396,12 @@ mod tests {
         assert!((snap.frame_time_ms - 12.5).abs() < 1e-6);
         assert_eq!(snap.active_windows, 7);
         assert_eq!(snap.current_workspace, 2);
-        assert!(snap.effects_gpu_available);
-        assert!(snap.effects_enabled);
-        assert!(snap.blur_enabled);
-        assert!((snap.blur_radius - 8.0).abs() < 1e-6);
 
         // Second call replaces (not appends) per `get_or_insert_with` design.
         server.set_live_metrics_snapshot(LiveMetrics {
             frame_time_ms: 99.9,
             active_windows: 2,
             current_workspace: -3,
-            effects_gpu_available: false,
-            effects_enabled: false,
-            blur_enabled: false,
-            blur_radius: 0.0,
         });
         let snap = *server
             .live_metrics_handle
@@ -1681,10 +1411,6 @@ mod tests {
         assert!((snap.frame_time_ms - 99.9).abs() < 1e-6);
         assert_eq!(snap.active_windows, 2);
         assert_eq!(snap.current_workspace, -3);
-        assert!(!snap.effects_gpu_available);
-        assert!(!snap.effects_enabled);
-        assert!(!snap.blur_enabled);
-        assert!((snap.blur_radius - 0.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1698,10 +1424,6 @@ mod tests {
             frame_time_ms: 0.0,
             active_windows: 0,
             current_workspace: 0,
-            effects_gpu_available: false,
-            effects_enabled: false,
-            blur_enabled: false,
-            blur_radius: 0.0,
         });
         assert!(server.live_metrics_handle.is_some());
     }
@@ -1791,11 +1513,8 @@ mod tests {
     #[test]
     fn test_fuzz_extreme_numeric_fields() {
         let cases = [
-            r#"{"type":"SetConfig","key":"effects.blur.radius","value":-1e308}"#,
-            r#"{"type":"SetConfig","key":"effects.animations.duration","value":1e308}"#,
             r#"{"type":"SetConfig","key":"workspace.scroll_speed","value":-1.0}"#,
             r#"{"type":"SetConfig","key":"workspace.scroll_speed","value":1e308}"#,
-            r#"{"type":"OptimizeConfig","changes":[["effects.blur.radius",-1e308]],"reason":"fuzz"}"#,
             r#"{"type":"GetPerformanceReport"}"#,
         ];
         for input in &cases {

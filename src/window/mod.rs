@@ -210,7 +210,7 @@ impl WindowManager {
     pub fn remove_window(&mut self, id: u64) -> Option<AxiomWindow> {
         if self.focused_window == Some(id) {
             // Re-focus a sibling before clearing focus.
-            self.focused_window = self.windows.keys().find(|&&k| k != id).copied();
+            self.focused_window = self.windows.keys().filter(|&&k| k != id).max().copied();
         }
         self.windows.remove(&id)
     }
@@ -305,8 +305,9 @@ impl WindowManager {
             self.focused_window = self
                 .windows
                 .iter()
-                .find(|(_, w)| !w.properties.minimized)
-                .map(|(k, _)| *k);
+                .filter(|(_, w)| !w.properties.minimized)
+                .map(|(k, _)| *k)
+                .max();
         }
         true
     }

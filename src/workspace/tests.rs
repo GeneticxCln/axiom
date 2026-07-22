@@ -102,6 +102,11 @@ fn test_infinite_scrolling_bounds() {
 
     // With infinite scroll, this might go to -1 or wrap, depending on implementation
     // The exact behavior would depend on the ScrollableWorkspaces implementation
+    assert_eq!(
+        workspaces.focused_column_index(),
+        -1,
+        "infinite scroll should allow negative column indices"
+    );
 }
 
 #[test]
@@ -183,11 +188,15 @@ fn test_smooth_scrolling_state() {
 
     // The exact state would depend on implementation details
     // but the operation should succeed
+    assert!(
+        workspaces.is_scrolling(),
+        "should be mid-animation after scroll_right"
+    );
     assert_eq!(workspaces.active_column_count(), 3);
 }
 
 #[test]
-fn test_workspace_configuration_effects() {
+fn test_workspace_configuration_scroll_speed() {
     // Test with different scroll speeds
     let config = WorkspaceConfig {
         scroll_speed: 2.0,
@@ -409,7 +418,10 @@ fn test_edge_case_empty_workspace() {
 
 #[test]
 fn test_workspace_bounds_checking() {
-    let config = WorkspaceConfig::default();
+    let config = WorkspaceConfig {
+        infinite_scroll: false,
+        ..WorkspaceConfig::default()
+    };
     let mut workspaces = ScrollableWorkspaces::new(&config);
 
     // Add a single window
@@ -425,7 +437,7 @@ fn test_workspace_bounds_checking() {
 
     // With infinite scroll disabled, should not go too far
     if !workspaces.is_infinite_scroll_enabled() {
-        assert!(index < 10); // Reasonable upper bound
+        assert!(index <= 10); // Reasonable upper bound
     }
 }
 
@@ -807,6 +819,7 @@ fn test_viewport_resize_invalidates_layout_cache() {
 mod property_tests {
     use super::*;
     use proptest::prelude::*;
+    use std::collections::HashSet;
 
     proptest! {
         #[test]

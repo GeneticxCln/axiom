@@ -1,19 +1,15 @@
-//! Headless (Noop) end-to-end test of the Wayland→compositor clipboard path.
+//! End-to-end test of DnD/selection data plumbing through the compositor.
 //!
-//! A real `wayland-client` offers a `text/plain` selection. The compositor's
-//! `SelectionHandler::new_selection` (src/backend/mod.rs) reads the offered
-//! bytes into `State::clipboard_cache` via the pipe worker in
-//! src/backend/clipboard.rs. This test asserts the cache ends up equal to the
-//! offered payload.
+//! A real `wayland-client` connects, creates a surface, and offers data
+//! through the data_device selection path. Confirms the compositor
+//! receives and caches the offered payload.
 //!
-//! Smithay denies `wl_data_device.set_selection` unless the offering client
-//! holds keyboard focus on the seat (see smithay's data_device handler). In a
-//! real session input grants that focus; headlessly we grant it through the
-//! test-only `debug_focus_first_client_for_test` accessor. The data transfer
-//! itself is genuinely exercised over the wire — nothing is faked.
+//! Also tests ServerDndGrabHandler::send directly.
+//!
+//! The compositor runs on the Noop backend (headless, no display needed).
 
-use std::io::Write;
-use std::os::unix::io::AsRawFd;
+use std::io::Read;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc,
@@ -23,50 +19,25 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axiom::{
-    compositor::AxiomCompositor, config::AxiomConfig, input::InputManager, ipc::AxiomIPCServer,
-    window::WindowManager, workspace::ScrollableWorkspaces,
+    backend::AxiomSmithayBackendReal, config::AxiomConfig, decoration::DecorationManager,
+    input::InputManager, window::WindowManager, workspace::ScrollableWorkspaces,
 };
 use parking_lot::RwLock;
+use smithay::wayland::selection::data_device::ServerDndGrabHandler;
 
 use wayland_client::{
     delegate_noop,
     protocol::{
         wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source,
-        wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
+        wl_registry, wl_seat, wl_shm, wl_surface,
     },
     Connection, Dispatch, EventQueue, QueueHandle,
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
-/// Offered clipboard payload — must round-trip to `State::clipboard_cache`.
-const OFFERED: &str = "hello from client";
+const OFFERED: &str = "dnd-data-payload";
 
-fn make_headless_compositor(
-    config: AxiomConfig,
-) -> Result<(AxiomCompositor, std::sync::Arc<RwLock<WindowManager>>)> {
-    let workspace_manager =
-        std::sync::Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)));
-    let window_manager = std::sync::Arc::new(RwLock::new(WindowManager::new(&config.window)));
-    let input_manager = std::sync::Arc::new(RwLock::new(InputManager::new(
-        &config.input,
-        &config.bindings,
-    )));
-    let ipc_server = AxiomIPCServer::new();
-
-    let mut config = config;
-    config.backend.kind = "noop".to_string();
-
-    let compositor = AxiomCompositor::new(
-        config,
-        false,
-        workspace_manager.clone(),
-        window_manager.clone(),
-        input_manager.clone(),
-        ipc_server,
-    )?;
-
-    Ok((compositor, window_manager))
-}
+// ── Client State ───────────────────────────────────────────────────────
 
 struct ClientState {
     compositor: Option<wl_compositor::WlCompositor>,
@@ -158,7 +129,6 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ClientState {
 delegate_noop!(ClientState: ignore wl_compositor::WlCompositor);
 delegate_noop!(ClientState: ignore wl_surface::WlSurface);
 delegate_noop!(ClientState: ignore wl_shm::WlShm);
-delegate_noop!(ClientState: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(ClientState: ignore wl_seat::WlSeat);
 delegate_noop!(ClientState: ignore wl_data_device_manager::WlDataDeviceManager);
 
@@ -233,8 +203,6 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for ClientState {
     }
 }
 
-/// When the compositor requests our offer, write the payload to the fd it
-/// handed us. This is the wire transfer the test actually exercises.
 impl Dispatch<wl_data_source::WlDataSource, ()> for ClientState {
     fn event(
         state: &mut Self,
@@ -245,11 +213,10 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for ClientState {
         _: &QueueHandle<Self>,
     ) {
         if let wl_data_source::Event::Send { fd, .. } = event {
+            use std::io::Write;
             let mut file = std::fs::File::from(fd);
             let _ = file.write_all(OFFERED.as_bytes());
             let _ = file.flush();
-            // Dropping `file` closes the fd, signalling end-of-data to the
-            // compositor's clipboard pipe reader.
             state.payload_written = true;
         }
     }
@@ -260,10 +227,7 @@ struct Flags {
     focus_granted: Arc<AtomicBool>,
 }
 
-/// Drive the real Wayland client to completion. Uses a poll-based (non-blocking)
-/// dispatch loop so it can observe `focus_granted` (set by the test once the
-/// compositor has granted keyboard focus) without blocking forever waiting for
-/// a Wayland event.
+/// Drive a real Wayland client that creates a surface and offers data.
 fn run_client(flags: Flags, result_tx: mpsc::Sender<String>) {
     let res = (|| -> Result<()> {
         let conn = Connection::connect_to_env()?;
@@ -286,21 +250,16 @@ fn run_client(flags: Flags, result_tx: mpsc::Sender<String>) {
             payload_written: false,
         };
 
-        for _ in 0..1024 {
-            // Flush any buffered client→server requests (e.g. the selection
-            // offer) so the compositor can act on them.
+        for _ in 0..256 {
             let _ = event_queue.flush();
-
-            // Read any pending Wayland events without blocking indefinitely:
-            // poll the socket with a short timeout, then drain the queue.
             if let Some(guard) = event_queue.prepare_read() {
+                use std::os::unix::io::AsRawFd;
                 let fd = guard.connection_fd().as_raw_fd();
                 let mut pfd = libc::pollfd {
                     fd,
                     events: libc::POLLIN,
                     revents: 0,
                 };
-                // SAFETY: `pfd` points to a single valid, initialized element.
                 unsafe {
                     libc::poll(&mut pfd as *mut libc::pollfd, 1, 5);
                 }
@@ -310,8 +269,8 @@ fn run_client(flags: Flags, result_tx: mpsc::Sender<String>) {
             }
             event_queue.dispatch_pending(&mut state)?;
 
-            // Once the compositor has granted us keyboard focus (a real input
-            // event would do this), offer the selection.
+            // Once focus granted, offer data via set_selection (exercises the
+            // data_device path shared by DnD and clipboard).
             if flags.focus_granted.load(Ordering::SeqCst) && !state.offered {
                 if let (Some(mgr), Some(dd)) = (
                     state.data_device_manager.as_ref(),
@@ -319,18 +278,21 @@ fn run_client(flags: Flags, result_tx: mpsc::Sender<String>) {
                 ) {
                     let ds = mgr.create_data_source(&qh, ());
                     ds.offer("text/plain".to_string());
+                    dd.set_selection(Some(&ds), 0);
                     state.data_source = Some(ds);
-                    dd.set_selection(state.data_source.as_ref(), 0);
                     state.offered = true;
                 }
             }
 
-            // Keep pumping until our payload has been written to the compositor
-            // (which it only learns about after a round-trip).
-            if state.payload_written && state.offered {
+            // Wait until data has been written (pulled by compositor's pipe worker)
+            if state.payload_written {
                 break;
             }
             thread::sleep(Duration::from_millis(1));
+        }
+
+        if !state.payload_written {
+            anyhow::bail!("client data payload never written");
         }
         Ok(())
     })();
@@ -342,41 +304,121 @@ fn run_client(flags: Flags, result_tx: mpsc::Sender<String>) {
     let _ = result_tx.send(msg);
 }
 
+// ── Helpers ────────────────────────────────────────────────────────────
+
+fn make_headless_backend() -> Result<AxiomSmithayBackendReal> {
+    let config = AxiomConfig::default();
+    let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)));
+    let workspace_manager = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)));
+    let input_manager = Arc::new(RwLock::new(InputManager::new(
+        &config.input,
+        &config.bindings,
+    )));
+    let decoration_manager = Arc::new(RwLock::new(DecorationManager::new(
+        &config.window,
+        config.features.enable_minimize,
+    )));
+    AxiomSmithayBackendReal::new_for_test(
+        config,
+        window_manager,
+        workspace_manager,
+        input_manager,
+        decoration_manager,
+    )
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+/// ServerDndGrabHandler serves clipboard cache data when populated.
 #[test]
 #[serial_test::serial]
-fn test_client_clipboard_offer_reaches_compositor_cache() -> Result<()> {
-    let config = AxiomConfig::default();
-    let (mut compositor, window_manager) = make_headless_compositor(config)?;
+fn test_server_dnd_handler_serves_data() -> Result<()> {
+    let mut backend = make_headless_backend()?;
+    backend.state.clipboard_cache = Some(b"server-dnd-payload".to_vec());
 
-    let socket_name = format!("wayland-axiom-{}", std::process::id());
+    let mut fds = [0i32; 2];
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2");
+    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+    let seat = backend.state.seat.clone();
+    ServerDndGrabHandler::send(&mut backend.state, "text/plain".into(), write_fd, seat);
+
+    let mut buf = Vec::new();
+    let mut file = std::fs::File::from(read_fd);
+    file.read_to_end(&mut buf)?;
+    assert_eq!(buf, b"server-dnd-payload", "serves cached data");
+    Ok(())
+}
+
+/// ServerDndGrabHandler drops fd when cache is empty (no panic).
+#[test]
+#[serial_test::serial]
+fn test_server_dnd_handler_empty_cache() -> Result<()> {
+    let mut backend = make_headless_backend()?;
+    backend.state.clipboard_cache = None;
+
+    let mut fds = [0i32; 2];
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2");
+    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+    let seat = backend.state.seat.clone();
+    ServerDndGrabHandler::send(&mut backend.state, "text/plain".into(), write_fd, seat);
+    // no panic = pass
+    Ok(())
+}
+
+/// End-to-end: real Wayland client offers data that reaches compositor cache.
+#[test]
+#[serial_test::serial]
+fn test_client_data_offer_reaches_compositor() -> Result<()> {
+    let config = AxiomConfig::default();
+    let workspace_manager = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)));
+    let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)));
+    let input_manager = Arc::new(RwLock::new(InputManager::new(
+        &config.input,
+        &config.bindings,
+    )));
+    let ipc_server = axiom::ipc::AxiomIPCServer::new();
+
+    let mut cfg = config.clone();
+    cfg.backend.kind = "noop".to_string();
+
+    let mut compositor = axiom::compositor::AxiomCompositor::new(
+        cfg,
+        false,
+        workspace_manager.clone(),
+        window_manager.clone(),
+        input_manager.clone(),
+        ipc_server,
+    )?;
+
+    let socket_name = compositor.socket_name().to_string();
     std::env::set_var("WAYLAND_DISPLAY", &socket_name);
 
     let flags = Flags {
         focus_granted: Arc::new(AtomicBool::new(false)),
     };
-
     let (tx, rx) = mpsc::channel();
     let client_flags = flags.clone();
     let client_handle = thread::spawn(move || run_client(client_flags, tx));
 
-    // Tick until the client's toplevel is tracked by the compositor.
+    // Tick until client surface is tracked
     let mut ticks = 0;
     while window_manager.read().window_count() < 1 && ticks < 200 {
         compositor.tick_for_test()?;
         ticks += 1;
         thread::sleep(Duration::from_millis(5));
     }
-    assert!(
-        window_manager.read().window_count() >= 1,
-        "compositor did not track the client toplevel"
-    );
+    assert!(window_manager.read().window_count() >= 1);
 
-    // Grant the focused client keyboard/data-device focus so set_selection is
-    // accepted (Smithay requires focus; a real session gets it via input).
+    // Grant focus so client can offer data
     compositor.debug_focus_first_client_for_test();
     flags.focus_granted.store(true, Ordering::SeqCst);
 
-    // Tick until the offer is read into the clipboard cache.
+    // Tick until clipboard cache has the offered data
     let mut cached: Option<Vec<u8>> = None;
     for _ in 0..200 {
         compositor.tick_for_test()?;
@@ -394,8 +436,7 @@ fn test_client_clipboard_offer_reaches_compositor_cache() -> Result<()> {
     assert_eq!(
         cached.as_deref(),
         Some(OFFERED.as_bytes()),
-        "compositor clipboard cache did not receive the client's offered selection"
+        "compositor clipboard cache should match offered data"
     );
-
     Ok(())
 }

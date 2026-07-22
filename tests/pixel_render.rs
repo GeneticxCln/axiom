@@ -27,11 +27,8 @@
 
 use anyhow::Result;
 use axiom::{
-    backend::AxiomSmithayBackendReal,
-    config::AxiomConfig,
-    input::InputManager,
-    window::WindowManager,
-    workspace::ScrollableWorkspaces,
+    backend::AxiomSmithayBackendReal, config::AxiomConfig, input::InputManager,
+    window::WindowManager, workspace::ScrollableWorkspaces,
 };
 use parking_lot::RwLock;
 use std::os::fd::AsFd;
@@ -44,9 +41,7 @@ use std::time::Duration;
 
 use wayland_client::{
     delegate_noop,
-    protocol::{
-        wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
-    },
+    protocol::{wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface},
     Connection, Dispatch, EventQueue, QueueHandle,
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -93,7 +88,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ClientState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, .. } = event {
+        if let wl_registry::Event::Global {
+            name, interface, ..
+        } = event
+        {
             match interface.as_str() {
                 "wl_compositor" => {
                     state.compositor =
@@ -275,9 +273,7 @@ fn test_pixel_render_shows_client_and_respects_titlebar() -> Result<()> {
             backend.run_one_cycle()?;
             if let Some((cw, ch, px)) = backend.capture_pixels() {
                 // Count red pixels inline to decide when we have a real frame.
-                if px.len() == (cw as usize) * (ch as usize) * 4
-                    && red_pixel_count(&px) > 2000
-                {
+                if px.len() == (cw as usize) * (ch as usize) * 4 && red_pixel_count(&px) > 2000 {
                     captured = Some((cw, ch, px));
                     break;
                 }

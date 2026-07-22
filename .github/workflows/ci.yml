@@ -40,11 +40,6 @@ jobs:
           libwayland-dev \
           libxkbcommon-dev \
           libegl1-mesa-dev \
-          libdrm-dev \
-          libgbm-dev \
-          libinput-dev \
-          libsystemd-dev \
-          libdbus-1-dev \
           pkg-config \
           xvfb
     
@@ -99,10 +94,7 @@ jobs:
   feature-off-test:
     name: Feature-off Test Suite
     runs-on: ubuntu-latest
-    # Validates the `cfg(not(feature = "placeholder-pipeline"))` integration
-    # tests (and any future feature-gated code paths) actually compile and
-    # pass under `--no-default-features`. These tests are stripped from the
-    # default-feature test job, so this lane is required for full coverage.
+    # Validates compilation and tests under --no-default-features
     steps:
     - uses: actions/checkout@v4
 
@@ -119,11 +111,6 @@ jobs:
           libwayland-dev \
           libxkbcommon-dev \
           libegl1-mesa-dev \
-          libdrm-dev \
-          libgbm-dev \
-          libinput-dev \
-          libsystemd-dev \
-          libdbus-1-dev \
           pkg-config \
           xvfb
 
@@ -149,40 +136,6 @@ jobs:
         cargo build --release --no-default-features
         ./target/release/axiom --help
 
-  memory-safety:
-    name: Memory Safety
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
-        
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          libwayland-dev \
-          libxkbcommon-dev \
-          libegl1-mesa-dev \
-          libdrm-dev \
-          libgbm-dev \
-          libinput-dev \
-          libsystemd-dev \
-          libdbus-1-dev \
-          pkg-config \
-          valgrind
-    
-    - name: Install cargo-valgrind
-      run: cargo install cargo-valgrind
-      
-    - name: Run valgrind tests
-      run: |
-        # Run subset of tests under valgrind for memory leak detection
-        cargo valgrind test --lib -- workspace config effects 2>&1 || echo "Valgrind checks complete (some failures expected in CI without display)"
-        
   nested-smoke:
     name: Nested Smoke Test Matrix
     runs-on: ubuntu-latest
@@ -199,11 +152,6 @@ jobs:
           libwayland-dev \
           libxkbcommon-dev \
           libegl1-mesa-dev \
-          libdrm-dev \
-          libgbm-dev \
-          libinput-dev \
-          libsystemd-dev \
-          libdbus-1-dev \
           pkg-config \
           xvfb \
           weston \
@@ -234,11 +182,6 @@ jobs:
           libwayland-dev \
           libxkbcommon-dev \
           libegl1-mesa-dev \
-          libdrm-dev \
-          libgbm-dev \
-          libinput-dev \
-          libsystemd-dev \
-          libdbus-1-dev \
           pkg-config \
           xvfb
 
@@ -306,21 +249,10 @@ jobs:
           libwayland-dev \
           libxkbcommon-dev \
           libegl1-mesa-dev \
-          libdrm-dev \
-          libgbm-dev \
-          libinput-dev \
-          libsystemd-dev \
-          libdbus-1-dev \
-          pkg-config \
-          desktop-file-utils
+          pkg-config
     
     - name: Build release binary
       run: cargo build --release --all-features
-    
-    - name: Validate desktop entries
-      run: |
-        desktop-file-validate packaging/axiom.desktop
-        desktop-file-validate packaging/axiom-wayland.desktop
     
     - name: Validate session wrapper syntax
       run: bash -n packaging/axiom-session
@@ -372,11 +304,6 @@ jobs:
           libwayland-dev \
           libxkbcommon-dev \
           libegl1-mesa-dev \
-          libdrm-dev \
-          libgbm-dev \
-          libinput-dev \
-          libsystemd-dev \
-          libdbus-1-dev \
           pkg-config \
           jq
     

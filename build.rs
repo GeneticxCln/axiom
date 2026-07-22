@@ -2,15 +2,14 @@ use std::process::Command;
 
 fn main() {
     // Set build date
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%d %H:%M:%S UTC")
-        .to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     println!("cargo:rustc-env=BUILD_DATE={now}");
 
-    // Set target triple - use CARGO_CFG_TARGET_TRIPLE if available, otherwise use TARGET
-    let target = std::env::var("CARGO_CFG_TARGET_TRIPLE")
-        .or_else(|_| std::env::var("TARGET"))
-        .unwrap_or_else(|_| "unknown".to_string());
+    // Set target triple
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:rustc-env=TARGET_TRIPLE={target}");
 
     // Set git commit hash if available
@@ -22,5 +21,7 @@ fn main() {
     }
 
     // Tell cargo to re-run if git HEAD changes
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    if std::path::Path::new(".git/HEAD").exists() {
+        println!("cargo:rerun-if-changed=.git/HEAD");
+    }
 }

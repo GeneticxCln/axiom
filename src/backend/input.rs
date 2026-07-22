@@ -7,8 +7,8 @@
 
 use log::{debug, info, warn};
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis, AxisSource, Event, InputEvent, KeyboardKeyEvent,
-    PointerAxisEvent, PointerButtonEvent, TouchEvent,
+    AbsolutePositionEvent, Axis, AxisSource, Event, InputEvent, KeyboardKeyEvent, PointerAxisEvent,
+    PointerButtonEvent, TouchEvent,
 };
 use smithay::backend::winit;
 use smithay::input::keyboard::FilterResult;
@@ -22,7 +22,14 @@ use super::{AxiomSmithayBackendReal, WindowInteraction};
 impl AxiomSmithayBackendReal {
     /// Resolve the topmost client surface under a logical coordinate, for
     /// touch focus. Mirrors the pointer focus lookup in `PointerMotionAbsolute`.
-    fn touch_focus_under(&self, x: f64, y: f64) -> Option<(wayland_server::protocol::wl_surface::WlSurface, Point<f64, Logical>)> {
+    pub(super) fn touch_focus_under(
+        &self,
+        x: f64,
+        y: f64,
+    ) -> Option<(
+        wayland_server::protocol::wl_surface::WlSurface,
+        Point<f64, Logical>,
+    )> {
         let floating = self.floating_rects();
         let under = self
             .state
@@ -114,57 +121,18 @@ impl AxiomSmithayBackendReal {
                 }
             }
 
+            InputEvent::PointerMotion { event: _event } => {
+                // ponytail: winit maps PointerMotionEvent to UnusedEvent and never emits
+                // this variant; the delta is always 0.0. Kept for future backends that
+                // send relative motion (e.g. libinput).
+                let new_x = (self.state.pointer_x + 0.0).clamp(0.0, self.state.window_width as f64);
+                let new_y =
+                    (self.state.pointer_y + 0.0).clamp(0.0, self.state.window_height as f64);
+                self.process_pointer_motion(new_x, new_y);
+            }
+
             InputEvent::PointerMotionAbsolute { event } => {
-                let (x, y) = (event.x(), event.y());
-                self.state.pointer_x = x;
-                self.state.pointer_y = y;
-
-                // Interactive move/resize consumes the motion event.
-                if let Some(ref interaction) = self.interaction.clone() {
-                    if self.handle_interaction(interaction, x, y) {
-                        return;
-                    }
-                }
-
-                let serial = SERIAL_COUNTER.next_serial();
-                let time = Event::time_msec(&event);
-
-                // Find the surface under the pointer and forward motion
-                // Skip dead surfaces (from disconnected clients)
-                let floating = self.floating_rects();
-                let under = self
-                    .state
-                    .workspace_manager
-                    .read()
-                    .element_under(x, y, &floating);
-                self.maybe_focus_window_under_pointer(under, serial);
-
-                if let Some(pointer) = self.state.seat.get_pointer() {
-                    let focus = under.and_then(|(window_id, (sx, sy))| {
-                        self.state
-                            .window_map
-                            .get(&window_id)
-                            .and_then(|surface_id| {
-                                self.state.surfaces.get(surface_id).and_then(|sd| {
-                                    sd.surface.as_ref().and_then(|s| {
-                                        if s.is_alive() {
-                                            Some(s.clone())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                })
-                            })
-                            .map(|surface| (surface, Point::from((sx, sy))))
-                    });
-
-                    let motion_event = MotionEvent {
-                        serial,
-                        time,
-                        location: Point::from((x, y)),
-                    };
-                    pointer.motion(&mut self.state, focus, &motion_event);
-                }
+                self.process_pointer_motion(event.x(), event.y());
             }
 
             InputEvent::PointerButton { event } => {
@@ -318,6 +286,8 @@ impl AxiomSmithayBackendReal {
                 let (x, y) = (event.x_transformed(width), event.y_transformed(height));
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = event.time_msec();
+                // Record for tap-to-click detection
+                self.touch_tap_state = Some((x, y, time));
 
                 // Check for decoration button hits before forwarding to client.
                 let floating = self.floating_rects();
@@ -353,24 +323,37 @@ impl AxiomSmithayBackendReal {
                                 return;
                             }
                             Some(crate::decoration::DecorationAction::Minimize) => {
-                                let is_minimized = self.state.window_manager.read().is_minimized(window_id);
+                                let is_minimized =
+                                    self.state.window_manager.read().is_minimized(window_id);
                                 if is_minimized {
-                                    self.state.workspace_manager.write().restore_window(window_id);
+                                    self.state
+                                        .workspace_manager
+                                        .write()
+                                        .restore_window(window_id);
                                     self.state.window_manager.write().restore_window(window_id);
                                 } else {
-                                    self.state.workspace_manager.write().minimize_window(window_id);
+                                    self.state
+                                        .workspace_manager
+                                        .write()
+                                        .minimize_window(window_id);
                                     self.state.window_manager.write().minimize_window(window_id);
                                 }
                                 self.state.needs_redraw = true;
                                 return;
                             }
                             Some(crate::decoration::DecorationAction::ToggleMaximize) => {
-                                self.state.window_manager.write().toggle_fullscreen(window_id);
+                                self.state
+                                    .window_manager
+                                    .write()
+                                    .toggle_fullscreen(window_id);
                                 self.state.needs_redraw = true;
                                 return;
                             }
                             Some(crate::decoration::DecorationAction::StartMove) => {
-                                self.state.workspace_manager.write().set_window_floating(window_id, true);
+                                self.state
+                                    .workspace_manager
+                                    .write()
+                                    .set_window_floating(window_id, true);
                                 let wm = self.state.window_manager.read();
                                 if let Some(w) = wm.get_window(window_id) {
                                     let offset_x = x - w.window.position.0 as f64;
@@ -385,7 +368,10 @@ impl AxiomSmithayBackendReal {
                                 return;
                             }
                             Some(crate::decoration::DecorationAction::StartResize(edge)) => {
-                                self.state.workspace_manager.write().set_window_floating(window_id, true);
+                                self.state
+                                    .workspace_manager
+                                    .write()
+                                    .set_window_floating(window_id, true);
                                 let wm = self.state.window_manager.read();
                                 if let Some(w) = wm.get_window(window_id) {
                                     self.touch_interaction = Some(WindowInteraction::Resize {
@@ -502,6 +488,49 @@ impl AxiomSmithayBackendReal {
                     return;
                 }
 
+                // Tap-to-click: if the touch was a quick tap (short duration,
+                // minimal movement) and no decoration consumed it, synthesize
+                // a pointer left-click at the recorded touch-down position.
+                let time = event.time_msec();
+                let is_tap = self
+                    .touch_tap_state
+                    .map(|(_, _, tt)| time.saturating_sub(tt) < 400)
+                    .unwrap_or(false);
+                if is_tap {
+                    let (tx, ty) = self
+                        .touch_tap_state
+                        .map(|(x, y, _)| (x, y))
+                        .unwrap_or((self.state.pointer_x, self.state.pointer_y));
+                    self.touch_tap_state = None;
+                    self.state.pointer_x = tx;
+                    self.state.pointer_y = ty;
+                    if let Some(pointer) = self.state.seat.get_pointer() {
+                        let serial = SERIAL_COUNTER.next_serial();
+                        let press = smithay::backend::input::ButtonState::Pressed;
+                        let release = smithay::backend::input::ButtonState::Released;
+                        pointer.button(
+                            &mut self.state,
+                            &ButtonEvent {
+                                serial,
+                                time,
+                                button: 0x110,
+                                state: press,
+                            },
+                        );
+                        let serial = SERIAL_COUNTER.next_serial();
+                        pointer.button(
+                            &mut self.state,
+                            &ButtonEvent {
+                                serial,
+                                time,
+                                button: 0x110,
+                                state: release,
+                            },
+                        );
+                    }
+                    return;
+                }
+
                 let up_event = UpEvent {
                     slot: event.slot(),
                     serial: SERIAL_COUNTER.next_serial(),
@@ -516,6 +545,7 @@ impl AxiomSmithayBackendReal {
 
             InputEvent::TouchCancel { event: _event } => {
                 self.touch_interaction = None;
+                self.touch_tap_state = None;
                 let Some(touch_handle) = self.state.seat.get_touch() else {
                     return;
                 };
@@ -529,7 +559,7 @@ impl AxiomSmithayBackendReal {
     /// If an interactive window manipulation is active (move or resize),
     /// apply the new pointer position and return `true` so the motion
     /// event is NOT forwarded to Smithay for pointer focus updates.
-    fn handle_interaction(
+    pub(super) fn handle_interaction(
         &mut self,
         interaction: &WindowInteraction,
         px: f64,
@@ -609,30 +639,64 @@ impl AxiomSmithayBackendReal {
         true
     }
 
+    /// Process pointer motion to a given (x, y) position.
+    /// Shared by PointerMotionAbsolute and PointerMotion handlers.
+    fn process_pointer_motion(&mut self, x: f64, y: f64) {
+        self.state.pointer_x = x;
+        self.state.pointer_y = y;
+
+        // Interactive move/resize consumes the motion event.
+        if let Some(ref interaction) = self.interaction.clone() {
+            if self.handle_interaction(interaction, x, y) {
+                return;
+            }
+        }
+
+        let serial = SERIAL_COUNTER.next_serial();
+        let time = 0; // time is not available in the relative motion path
+
+        // Find the surface under the pointer and forward motion
+        let floating = self.floating_rects();
+        let under = self
+            .state
+            .workspace_manager
+            .read()
+            .element_under(x, y, &floating);
+        self.maybe_focus_window_under_pointer(under, serial);
+
+        if let Some(pointer) = self.state.seat.get_pointer() {
+            let focus = under.and_then(|(window_id, (sx, sy))| {
+                self.state
+                    .window_map
+                    .get(&window_id)
+                    .and_then(|surface_id| {
+                        self.state.surfaces.get(surface_id).and_then(|sd| {
+                            sd.surface.as_ref().and_then(|s| {
+                                if s.is_alive() {
+                                    Some(s.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                    })
+                    .map(|surface| (surface, Point::from((sx, sy))))
+            });
+
+            let motion_event = MotionEvent {
+                serial,
+                time,
+                location: Point::from((x, y)),
+            };
+            pointer.motion(&mut self.state, focus, &motion_event);
+        }
+    }
+
     /// Build a list of floating window rects for pointer hit-testing.
     /// Each entry is `(window_id, x, y, width, height)`. Called on every
     /// motion and button event so `element_under` can find floating windows.
     fn floating_rects(&self) -> Vec<(u64, i32, i32, u32, u32)> {
-        let floating_ids = self.state.workspace_manager.read().floating_window_ids();
-        if floating_ids.is_empty() {
-            return Vec::new();
-        }
-        let wm = self.state.window_manager.read();
-        let mut rects = Vec::with_capacity(floating_ids.len());
-        for &id in &floating_ids {
-            if let Some(w) = wm.get_window(id) {
-                if !w.properties.minimized {
-                    rects.push((
-                        id,
-                        w.window.position.0,
-                        w.window.position.1,
-                        w.window.size.0,
-                        w.window.size.1,
-                    ));
-                }
-            }
-        }
-        rects
+        self.state.cached_floating_rects.clone()
     }
 
     /// If configured, move keyboard focus to the window under the pointer.
@@ -672,12 +736,7 @@ impl AxiomSmithayBackendReal {
     /// `PointerHandle::button`. On release the decoration pressed states are
     /// cleared regardless, but the `decoration_consumed_press` flag is also
     /// consulted to decide whether to forward the release to Smithay.
-    fn handle_decoration_button(
-        &mut self,
-        pointer_x: f64,
-        pointer_y: f64,
-        pressed: bool,
-    ) -> bool {
+    fn handle_decoration_button(&mut self, pointer_x: f64, pointer_y: f64, pressed: bool) -> bool {
         if pressed {
             // Find the window under the cursor.
             let floating = self.floating_rects();
@@ -797,7 +856,7 @@ impl AxiomSmithayBackendReal {
             // window's right or bottom edge starts a resize (bottom-right
             // corner is the most natural resize affordance).
             {
-                const RESIZE_HANDLE: i32 = 8;
+                let resize_handle = (8.0 * self.state.focused_output_scale()) as i32;
                 let (window_id, _) = match under {
                     Some(t) => t,
                     None => return false,
@@ -817,10 +876,10 @@ impl AxiomSmithayBackendReal {
                     return false;
                 };
                 use crate::decoration::ResizeEdge;
-                let in_right = rx >= ww - RESIZE_HANDLE;
-                let in_bottom = ry >= wh - RESIZE_HANDLE;
-                let in_left = rx <= RESIZE_HANDLE;
-                let in_top = ry <= RESIZE_HANDLE;
+                let in_right = rx >= ww - resize_handle;
+                let in_bottom = ry >= wh - resize_handle;
+                let in_left = rx <= resize_handle;
+                let in_top = ry <= resize_handle;
                 let edge = if in_left && in_top {
                     Some(ResizeEdge::TopLeft)
                 } else if in_right && in_top {
@@ -1023,11 +1082,6 @@ impl AxiomSmithayBackendReal {
                             .move_window_right(window_id);
                         self.state.needs_redraw = true;
                     }
-                }
-                CompositorAction::ToggleEffects => {
-                    // ponytail: effects engine removed; toggle is a no-op now
-                    debug!("✨ Toggle effects ignored (effects disabled)");
-                    self.state.needs_redraw = true;
                 }
                 CompositorAction::LaunchTerminal => {
                     let cmd = &self.state.config.general.default_terminal;

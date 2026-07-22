@@ -13,7 +13,6 @@ fn test_default_configuration_is_valid() {
     let config = AxiomConfig::default();
 
     // Test that all default values are reasonable
-    assert!(config.effects.enabled);
     assert!((config.workspace.gaps as i32) >= 0);
     assert!(config.workspace.scroll_speed > 0.0);
 
@@ -34,10 +33,6 @@ fn test_configuration_serialization_roundtrip() -> Result<()> {
 
     // Compare key values
     assert_eq!(
-        original_config.effects.enabled,
-        deserialized_config.effects.enabled
-    );
-    assert_eq!(
         original_config.workspace.workspace_width,
         deserialized_config.workspace.workspace_width
     );
@@ -55,10 +50,7 @@ fn test_configuration_from_file() -> Result<()> {
     let file_path = dir.path().join("test_config.toml");
 
     // Write test configuration
-    let test_config = r#"
-[effects]
-enabled = true
-
+    let test_config = r##"
 [workspace]
 scroll_speed = 1.5
 infinite_scroll = true
@@ -71,8 +63,8 @@ smooth_scrolling = true
 placement = "smart"
 focus_follows_mouse = false
 border_width = 2
-active_border_color = "7C3AED"
-inactive_border_color = "374151"
+active_border_color = "#7C3AED"
+inactive_border_color = "#374151"
 gap = 10
 default_layout = "horizontal"
 
@@ -86,22 +78,25 @@ natural_scrolling = true
 [bindings]
 scroll_left = 'Super+Left'
 scroll_right = 'Super+Right'
-move_window_left = 'Super+Shift+Left'
-move_window_right = 'Super+Shift+Right'
-close_window = 'Super+q'
-toggle_fullscreen = 'Super+f'
-launch_terminal = 'Super+Enter'
-launch_launcher = 'Super+Space'
-toggle_effects = 'Super+e'
-quit = 'Super+Shift+q'
-toggle_floating = 'Super+Shift+Space'
-toggle_minimize = 'Super+grave'
+close_window = 'Super+Q'
+toggle_fullscreen = 'Super+F'
+move_window_left = 'Super+H'
+move_window_right = 'Super+L'
+toggle_floating = 'Super+Space'
+launch_terminal = 'Super+Return'
+launch_launcher = 'Super+D'
+toggle_minimize = 'Super+M'
+quit = 'Super+Escape'
 
-[general]
-debug = false
-max_fps = 0
-vsync = true
-"#;
+[effects]
+scrolling_animation_duration = 300
+
+[workspace.padding]
+top = 10
+bottom = 10
+left = 10
+right = 10
+"##;
 
     fs::write(&file_path, test_config)?;
 
@@ -116,42 +111,12 @@ vsync = true
 }
 
 #[test]
-fn test_partial_configuration_merge() -> Result<()> {
-    let dir = tempdir()?;
-    let file_path = dir.path().join("partial_config.toml");
-
-    // Write partial configuration (only effects section)
-    let partial_config = r#"
-[effects]
-enabled = false
-"#;
-
-    fs::write(&file_path, partial_config)?;
-
-    // Load configuration - should merge with defaults
-    let config = AxiomConfig::load(&file_path)?;
-
-    // Verify overridden values
-    assert!(!config.effects.enabled);
-
-    // Verify default values are still present
-    assert!(config.workspace.workspace_width > 0);
-    assert!(config.input.keyboard_repeat_delay > 0);
-
-    Ok(())
-}
-
-#[test]
 fn test_malformed_toml_handling() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("malformed_config.toml");
 
     // Write malformed TOML
     let malformed_config = r#"
-[effects
-enabled = true
-missing_bracket
-
 [workspace]
 workspace_width = "not a number"
 "#;
@@ -204,6 +169,36 @@ fn is_valid_keybinding(binding: &str) -> bool {
             || binding
                 .chars()
                 .all(|c| c.is_alphanumeric() || "+-_".contains(c)))
+}
+
+#[test]
+fn test_save_and_reload() -> Result<()> {
+    let dir = tempdir()?;
+    let file_path = dir.path().join("test_save.toml");
+    let mut config = AxiomConfig::default();
+    config.workspace.scroll_speed = 2.5;
+    config.save(&file_path)?;
+    assert!(file_path.exists(), "save file should exist");
+    let loaded = AxiomConfig::load(&file_path)?;
+    assert!(
+        (loaded.workspace.scroll_speed - 2.5).abs() < f64::EPSILON,
+        "scroll_speed should persist"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_save_rejects_invalid_config() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("invalid_save.toml");
+    let mut config = AxiomConfig::default();
+    config.workspace.scroll_speed = 0.0;
+    let result = config.save(&file_path);
+    assert!(result.is_err(), "save should reject invalid config");
+    assert!(
+        !file_path.exists(),
+        "no file should be created on invalid save"
+    );
 }
 
 #[cfg(test)]

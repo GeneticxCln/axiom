@@ -3,7 +3,7 @@
 ## Build & Test
 ```sh
 cargo build              # expect clean (0 warnings)
-cargo test               # expect all passing (143 as of last check)
+cargo test               # expect all passing (165 as of last check; 2 ignored require xvfb-run)
 cargo test --all-targets # includes benches and integration tests
 ```
 CI runs under `xvfb-run`. `render()` presents real client pixels via the
@@ -41,10 +41,9 @@ Goal: Strip over-engineering — delete dead code, unused deps, unrequested abst
   client pixels are shown.
 
 ## Known Gaps (not blocking)
-- Full drag-and-drop data transfer is not yet implemented.
-- Touch input is not yet implemented.
-- `LazyUIMessage::EffectsControl` is accepted by IPC but effects are no-ops
-  (effects module removed); the config `effects` section is retained as data only.
+- Server-initiated drag-and-drop (compositor calling `start_dnd`) is not wired — no trigger mechanism exists. The `ServerDndGrabHandler` serves clipboard cache data when called.
+- Touch gesture support is limited to basic tap-to-click (synthesized pointer left-click on quick tap). Multi-finger gestures (swipe, pinch, pan) are not forwarded by the Smithay 0.7 winit backend.
+- `OutputDamageTracker` for per-element occlusion culling is not wired — bounding-box damage merge is sufficient for the winit alpha.
 
 ## Next / Contemplated
 - Ship- and usability-focused improvements (DnD, touch)

@@ -3,10 +3,7 @@
 //! These benchmarks test performance-critical operations to prevent regressions
 //! and guide optimization efforts.
 
-use axiom::{
-    config::WorkspaceConfig,
-    workspace::ScrollableWorkspaces,
-};
+use axiom::{config::WorkspaceConfig, workspace::ScrollableWorkspaces};
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 
 /// Benchmark workspace scrolling operations

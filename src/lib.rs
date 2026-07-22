@@ -27,13 +27,11 @@
 //!
 //! ## Usage
 //!
-//! ```rust,ignore
-//! use axiom::{AxiomCompositor, config::AxiomConfig};
+//! ```rust
+//! use axiom::config::AxiomConfig;
 //!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
+//! fn main() -> anyhow::Result<()> {
 //!     let config = AxiomConfig::default();
-//!     // Compositor wires subsystems internally
 //!     // See main.rs for full initialization
 //!     Ok(())
 //! }
@@ -71,8 +69,14 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const BUILD_INFO: BuildInfo = BuildInfo {
     version: VERSION,
     git_commit: option_env!("GIT_COMMIT"),
-    build_date: env!("BUILD_DATE"),
-    target_triple: env!("TARGET_TRIPLE"),
+    build_date: match option_env!("BUILD_DATE") {
+        Some(s) => s,
+        None => "unknown",
+    },
+    target_triple: match option_env!("TARGET_TRIPLE") {
+        Some(s) => s,
+        None => "unknown",
+    },
 };
 
 /// Build information structure

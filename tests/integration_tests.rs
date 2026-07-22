@@ -18,8 +18,8 @@ use axiom::{
 };
 
 /// Test IPC server startup and basic communication
-#[tokio::test]
-async fn test_ipc_server_startup() -> Result<()> {
+#[test]
+fn test_ipc_server_startup() -> Result<()> {
     let ipc_server = AxiomIPCServer::new();
 
     // Test that socket path is correctly configured
@@ -32,8 +32,8 @@ async fn test_ipc_server_startup() -> Result<()> {
 }
 
 /// Test IPC message serialization/deserialization
-#[tokio::test]
-async fn test_ipc_message_protocol() -> Result<()> {
+#[test]
+fn test_ipc_message_protocol() -> Result<()> {
     // Test AxiomMessage serialization
     let perf_message = AxiomMessage::PerformanceMetrics {
         timestamp: 1234567890,
@@ -57,16 +57,14 @@ async fn test_ipc_message_protocol() -> Result<()> {
 }
 
 /// Test compositor initialization with all subsystems
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_compositor_initialization() -> Result<()> {
+fn test_compositor_initialization() -> Result<()> {
     let config = AxiomConfig::default();
-    let (compositor, ..) = make_test_compositor(config).await?;
+    let (compositor, ..) = make_test_compositor(config)?;
 
     // Verify basic state
     assert!(!compositor.is_windowed());
-    let cfg = compositor.config();
-    assert!(cfg.effects.enabled);
 
     // Verify workspace info is accessible
     let (column, _pos, _count, _scrolling) = compositor.get_workspace_info();
@@ -76,11 +74,10 @@ async fn test_compositor_initialization() -> Result<()> {
 }
 
 /// Test configuration loading and validation
-#[tokio::test]
-async fn test_configuration_system() -> Result<()> {
+#[test]
+fn test_configuration_system() -> Result<()> {
     // Test default configuration
     let default_config = AxiomConfig::default();
-    assert!(default_config.effects.enabled);
     assert!(default_config.workspace.workspace_width > 0);
 
     // Test configuration serialization
@@ -91,8 +88,8 @@ async fn test_configuration_system() -> Result<()> {
 }
 
 /// Test workspace management without compositor
-#[tokio::test]
-async fn test_workspace_logic() -> Result<()> {
+#[test]
+fn test_workspace_logic() -> Result<()> {
     use axiom::config::WorkspaceConfig;
     use axiom::workspace::ScrollableWorkspaces;
 
@@ -122,8 +119,8 @@ async fn test_workspace_logic() -> Result<()> {
 }
 
 /// Test input event processing
-#[tokio::test]
-async fn test_input_processing() -> Result<()> {
+#[test]
+fn test_input_processing() -> Result<()> {
     use axiom::config::{BindingsConfig, InputConfig};
     use axiom::input::{CompositorAction, InputEvent, InputManager};
 
@@ -162,23 +159,22 @@ async fn test_input_processing() -> Result<()> {
 }
 
 /// Test concurrent operations
-#[tokio::test]
-async fn test_concurrent_operations() -> Result<()> {
+#[test]
+fn test_concurrent_operations() -> Result<()> {
     use axiom::config::WorkspaceConfig;
     use axiom::workspace::ScrollableWorkspaces;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
+    use std::sync::Mutex;
 
     let config = WorkspaceConfig::default();
     let workspaces = Arc::new(Mutex::new(ScrollableWorkspaces::new(&config)));
 
-    // Spawn multiple tasks that modify workspaces concurrently
+    // Spawn multiple threads that modify workspaces concurrently
     let mut handles = vec![];
 
     for task_id in 0..5 {
         let workspaces_clone = Arc::clone(&workspaces);
-        let handle = tokio::spawn(async move {
-            let mut ws = workspaces_clone.lock().await;
+        let handle = std::thread::spawn(move || {
+            let mut ws = workspaces_clone.lock().unwrap();
 
             // Each task adds some windows
             for i in 0..10 {
@@ -191,11 +187,11 @@ async fn test_concurrent_operations() -> Result<()> {
 
     // Wait for all tasks to complete
     for handle in handles {
-        handle.await?;
+        handle.join().unwrap();
     }
 
     // All 50 windows end up in 1 column (each task adds to focused column)
-    let ws = workspaces.lock().await;
+    let ws = workspaces.lock().unwrap();
     assert_eq!(ws.active_column_count(), 1);
 
     Ok(())
@@ -206,8 +202,8 @@ async fn test_concurrent_operations() -> Result<()> {
 // ============================================================================
 
 /// Test window lifecycle: create, track, remove
-#[tokio::test]
-async fn test_window_lifecycle() -> Result<()> {
+#[test]
+fn test_window_lifecycle() -> Result<()> {
     use axiom::config::WindowConfig;
     use axiom::window::WindowManager;
 
@@ -251,8 +247,8 @@ async fn test_window_lifecycle() -> Result<()> {
 }
 
 /// Test window lifecycle with workspace integration
-#[tokio::test]
-async fn test_window_layout_with_workspaces() -> Result<()> {
+#[test]
+fn test_window_layout_with_workspaces() -> Result<()> {
     use axiom::config::{WindowConfig, WorkspaceConfig};
     use axiom::window::WindowManager;
     use axiom::workspace::ScrollableWorkspaces;
@@ -311,15 +307,8 @@ async fn test_window_layout_with_workspaces() -> Result<()> {
 
 /// Helper: construct a fully-initialized test compositor with all subsystems.
 /// Returns the compositor and the subsystem Arcs for tests that need direct access.
-///
-/// `Arc<parking_lot::RwLock<ScrollableWorkspaces>>` is intentionally
-/// `!Sync` (the layout cache uses `RefCell` for the single-threaded hot
-/// path). These `Arc`s never cross thread boundaries — every caller is
-/// a `tokio::test` task — so the lint is harmless for tests but we
-/// allow it explicitly to avoid future contributors being puzzled by
-/// the warning.
 #[allow(clippy::type_complexity, clippy::arc_with_non_send_sync)]
-async fn make_test_compositor(
+fn make_test_compositor(
     config: AxiomConfig,
 ) -> Result<(
     AxiomCompositor,
@@ -347,28 +336,20 @@ async fn make_test_compositor(
         window_manager.clone(),
         input_manager.clone(),
         ipc_server,
-    )
-    .await?;
+    )?;
 
-    Ok((
-        compositor,
-        workspace_manager,
-        window_manager,
-        input_manager,
-    ))
+    Ok((compositor, workspace_manager, window_manager, input_manager))
 }
 
 /// Test compositor initialization with all subsystems (replaces old ignored test)
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_compositor_full_initialization() -> Result<()> {
+fn test_compositor_full_initialization() -> Result<()> {
     let config = AxiomConfig::default();
-    let (compositor, ..) = make_test_compositor(config).await?;
+    let (compositor, ..) = make_test_compositor(config)?;
 
     // Verify basic state
     assert!(!compositor.is_windowed());
-    let cfg = compositor.config();
-    assert!(cfg.effects.enabled);
 
     // Verify workspace info is accessible
     let (column, _pos, _count, _scrolling) = compositor.get_workspace_info();
@@ -386,8 +367,8 @@ async fn test_compositor_full_initialization() -> Result<()> {
 /// `DEFAULT_WINDOW_WIDTH` placeholder-free path works correctly:
 /// button positions are derived from the live `BackendWindow` width,
 /// title matches, and `set_window_width` updates positions on resize.
-#[tokio::test]
-async fn test_decoration_manager_with_real_window_geometry() -> Result<()> {
+#[test]
+fn test_decoration_manager_with_real_window_geometry() -> Result<()> {
     use axiom::config::WindowConfig;
     use axiom::decoration::{DecorationAction, DecorationManager, DecorationMode};
     use axiom::window::WindowManager;
@@ -544,8 +525,8 @@ async fn test_decoration_manager_with_real_window_geometry() -> Result<()> {
 // ============================================================================
 
 /// Test that IPC server can process WorkspaceCommand messages end-to-end
-#[tokio::test]
-async fn test_ipc_workspace_command_flow() -> Result<()> {
+#[test]
+fn test_ipc_workspace_command_flow() -> Result<()> {
     use axiom::config::AxiomConfig;
     use axiom::ipc::LazyUIMessage;
 
@@ -562,9 +543,7 @@ async fn test_ipc_workspace_command_flow() -> Result<()> {
         parameters: serde_json::json!({"title": "IPC Window"}),
     };
 
-    if let Some(sender) = ipc_server.command_sender_for_test() {
-        sender.send(cmd).await.unwrap();
-    }
+    ipc_server.command_sender_for_test().send(cmd).unwrap();
 
     // Process the message
     let (changed, actions) = ipc_server.process_messages(&mut config)?;
@@ -580,14 +559,14 @@ async fn test_ipc_workspace_command_flow() -> Result<()> {
         _ => panic!("Expected WorkspaceCommand"),
     }
 
-    ipc_server.shutdown().await?;
+    ipc_server.shutdown_sync();
 
     Ok(())
 }
 
 /// Test IPC OptimizeConfig message correctly mutates config
-#[tokio::test]
-async fn test_ipc_optimize_config_flow() -> Result<()> {
+#[test]
+fn test_ipc_optimize_config_flow() -> Result<()> {
     use axiom::config::AxiomConfig;
     use axiom::ipc::LazyUIMessage;
     use std::collections::HashMap;
@@ -606,9 +585,7 @@ async fn test_ipc_optimize_config_flow() -> Result<()> {
         reason: "test".into(),
     };
 
-    if let Some(sender) = ipc_server.command_sender_for_test() {
-        sender.send(cmd).await.unwrap();
-    }
+    ipc_server.command_sender_for_test().send(cmd).unwrap();
 
     let (changed, actions) = ipc_server.process_messages(&mut config)?;
 
@@ -620,14 +597,14 @@ async fn test_ipc_optimize_config_flow() -> Result<()> {
     );
     assert_ne!(config.workspace.scroll_speed, original_scroll);
 
-    ipc_server.shutdown().await?;
+    ipc_server.shutdown_sync();
 
     Ok(())
 }
 
 /// Test that SetClipboard IPC message is correctly forwarded
-#[tokio::test]
-async fn test_ipc_set_clipboard_flow() -> Result<()> {
+#[test]
+fn test_ipc_set_clipboard_flow() -> Result<()> {
     use axiom::config::AxiomConfig;
     use axiom::ipc::LazyUIMessage;
 
@@ -642,9 +619,7 @@ async fn test_ipc_set_clipboard_flow() -> Result<()> {
         text: "Hello from IPC test".into(),
     };
 
-    if let Some(sender) = ipc_server.command_sender_for_test() {
-        sender.send(cmd).await.unwrap();
-    }
+    ipc_server.command_sender_for_test().send(cmd).unwrap();
 
     // Process the message
     let (changed, actions) = ipc_server.process_messages(&mut config)?;
@@ -659,20 +634,20 @@ async fn test_ipc_set_clipboard_flow() -> Result<()> {
         _ => panic!("Expected SetClipboard"),
     }
 
-    ipc_server.shutdown().await?;
+    ipc_server.shutdown_sync();
 
     Ok(())
 }
 
 /// Test that SetClipboard IPC command is dispatched through the compositor
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_compositor_set_clipboard_dispatch() -> Result<()> {
+fn test_compositor_set_clipboard_dispatch() -> Result<()> {
     use axiom::config::AxiomConfig;
     use axiom::ipc::LazyUIMessage;
 
     let config = AxiomConfig::default();
-    let (mut compositor, _ws, _wm, _im) = make_test_compositor(config).await?;
+    let (mut compositor, _ws, _wm, _im) = make_test_compositor(config)?;
 
     // Get the IPC server's command sender from the compositor
     let sender = compositor.ipc_command_sender();
@@ -681,11 +656,11 @@ async fn test_compositor_set_clipboard_dispatch() -> Result<()> {
     let cmd = LazyUIMessage::SetClipboard {
         text: "compositor test clipboard".into(),
     };
-    sender.send(cmd).await.unwrap();
+    sender.send(cmd).unwrap();
 
     // Run a tick — this should process the IPC message
     // and call set_clipboard_data on the backend.
-    let result = compositor.tick_for_test().await;
+    let result = compositor.tick_for_test();
     assert!(result.is_ok(), "tick should succeed");
 
     // Verify the clipboard cache was populated
@@ -707,18 +682,18 @@ async fn test_compositor_set_clipboard_dispatch() -> Result<()> {
 /// Test that tick() with 5+ consecutive errors triggers emergency shutdown.
 /// Uses `force_next_tick_error` to simulate real errors in the event loop,
 /// verifying that the count accumulates and resets correctly.
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_tick_error_recovery() -> Result<()> {
+fn test_tick_error_recovery() -> Result<()> {
     // `consecutive_error_count` now DECREMENTS with each clean tick
     // instead of snapping to zero. `N` consecutive errors need at
     // least `N` clean ticks before the counter fully resets
     // (audit Bug 1 fix).
-    let (mut compositor, ..) = make_test_compositor(AxiomConfig::default()).await?;
+    let (mut compositor, ..) = make_test_compositor(AxiomConfig::default())?;
 
     // 1) Clean tick on a fresh compositor: count stays 0, running.
     assert!(
-        compositor.tick_for_test().await.is_ok(),
+        compositor.tick_for_test().is_ok(),
         "clean tick should return Ok",
     );
     assert!(
@@ -731,7 +706,7 @@ async fn test_tick_error_recovery() -> Result<()> {
     for _ in 0..3 {
         compositor.force_next_tick_error();
         assert!(
-            compositor.tick_for_test().await.is_ok(),
+            compositor.tick_for_test().is_ok(),
             "count 1..=3 should not yet trigger shutdown",
         );
     }
@@ -741,13 +716,9 @@ async fn test_tick_error_recovery() -> Result<()> {
     //    NOT snap to zero. This is the audit Bug 1 fix: a single
     //    clean tick must not mask prior consecutive failures.
     assert!(
-        compositor.tick_for_test().await.is_ok(),
+        compositor.tick_for_test().is_ok(),
         "clean tick should succeed after 3 errors",
     );
-    // No public getter for `consecutive_error_count`, so we drive it
-    // through `set_errors_for_test` and `force_next_tick_error`. The
-    // recovery is observable as: shutdown happens at the CUMULATIVE
-    // 5th error, not 3 more errors.
     assert!(
         compositor.is_running(),
         "1 clean tick: still running (count=2)"
@@ -756,21 +727,14 @@ async fn test_tick_error_recovery() -> Result<()> {
     // 4) Two more error ticks push count from 2 to 4 (still running).
     for _ in 0..2 {
         compositor.force_next_tick_error();
-        assert!(
-            compositor.tick_for_test().await.is_ok(),
-            "count <5 should be ok",
-        );
+        assert!(compositor.tick_for_test().is_ok(), "count <5 should be ok",);
         assert!(compositor.is_running(), "still running at count <5");
     }
 
     // 5) The 3rd additional error pushes count from 4 to 5, hitting
-    //    the threshold and triggering emergency shutdown. With
-    //    snap-to-zero (the old buggy behaviour), the clean tick
-    //    would have reset the counter, so this same sequence of
-    //    3 errors AFTER recovery would not have crossed the
-    //    threshold. The test now enforces the corrected semantics.
+    //    the threshold and triggering emergency shutdown.
     compositor.force_next_tick_error();
-    let result = compositor.tick_for_test().await;
+    let result = compositor.tick_for_test();
     assert!(
         result.is_err(),
         "cumulative (post-recovery) 3rd error must push count to 5 and shut down",
@@ -784,17 +748,17 @@ async fn test_tick_error_recovery() -> Result<()> {
 }
 
 /// Test frame pacing: tick() should complete quickly with unlimited FPS (max_fps=0)
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_frame_pacing() -> Result<()> {
+fn test_frame_pacing() -> Result<()> {
     use std::time::Instant;
 
     let mut config = AxiomConfig::default();
     config.general.max_fps = 0; // unlimited
-    let (mut compositor, ..) = make_test_compositor(config).await?;
+    let (mut compositor, ..) = make_test_compositor(config)?;
 
     let start = Instant::now();
-    compositor.tick_for_test().await?;
+    compositor.tick_for_test()?;
     let elapsed = start.elapsed();
     assert!(
         elapsed < std::time::Duration::from_millis(500),
@@ -806,17 +770,17 @@ async fn test_frame_pacing() -> Result<()> {
 }
 
 /// Test that a tick with a 60 FPS limit completes within a reasonable time.
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_frame_pacing_with_fps_limit() -> Result<()> {
+fn test_frame_pacing_with_fps_limit() -> Result<()> {
     use std::time::Instant;
 
     let mut config = AxiomConfig::default();
     config.general.max_fps = 60;
-    let (mut compositor, ..) = make_test_compositor(config).await?;
+    let (mut compositor, ..) = make_test_compositor(config)?;
 
     let start = Instant::now();
-    compositor.tick_for_test().await?;
+    compositor.tick_for_test()?;
     let elapsed = start.elapsed();
 
     assert!(
@@ -829,11 +793,10 @@ async fn test_frame_pacing_with_fps_limit() -> Result<()> {
 }
 
 /// Test that viewport resize doesn't panic and layouts remain valid.
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_viewport_resize_propagates_to_layouts() -> Result<()> {
-    let (mut compositor, workspace_manager, ..) =
-        make_test_compositor(AxiomConfig::default()).await?;
+fn test_viewport_resize_propagates_to_layouts() -> Result<()> {
+    let (mut compositor, workspace_manager, ..) = make_test_compositor(AxiomConfig::default())?;
 
     // Add a single window so layout produces one entry
     compositor.add_window("Resize Test".into());
@@ -874,9 +837,9 @@ async fn test_viewport_resize_propagates_to_layouts() -> Result<()> {
 }
 
 /// Test IPC HealthCheck and GetPerformanceReport don't mutate config
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_ipc_readonly_messages() -> Result<()> {
+fn test_ipc_readonly_messages() -> Result<()> {
     use axiom::config::AxiomConfig;
     use axiom::ipc::LazyUIMessage;
 
@@ -887,13 +850,14 @@ async fn test_ipc_readonly_messages() -> Result<()> {
     ipc_server.start()?;
 
     // HealthCheck
-    if let Some(sender) = ipc_server.command_sender_for_test() {
-        sender.send(LazyUIMessage::HealthCheck).await.unwrap();
-        sender
-            .send(LazyUIMessage::GetPerformanceReport)
-            .await
-            .unwrap();
-    }
+    ipc_server
+        .command_sender_for_test()
+        .send(LazyUIMessage::HealthCheck)
+        .unwrap();
+    ipc_server
+        .command_sender_for_test()
+        .send(LazyUIMessage::GetPerformanceReport)
+        .unwrap();
 
     let (changed, actions) = ipc_server.process_messages(&mut config)?;
 
@@ -901,9 +865,12 @@ async fn test_ipc_readonly_messages() -> Result<()> {
     assert!(actions.is_empty(), "HealthCheck produces no actions");
 
     // Config should be unchanged
-    assert_eq!(config.workspace.scroll_speed, config_clone.workspace.scroll_speed);
+    assert_eq!(
+        config.workspace.scroll_speed,
+        config_clone.workspace.scroll_speed
+    );
 
-    ipc_server.shutdown().await?;
+    ipc_server.shutdown_sync();
 
     Ok(())
 }

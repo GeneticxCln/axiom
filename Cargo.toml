@@ -29,9 +29,8 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 clap = { version = "4.4", features = ["derive"] }
 
-# Async runtime and utilities  
-tokio = { version = "1.0", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+# Event loop
+calloop = { version = "0.12", features = ["signals"] }
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.10"
@@ -103,11 +102,11 @@ serial_test = "3.0"  # Sequential test execution# Async testing utilities
 wayland-client = "0.31"
 # `client` feature adds the client-side xdg-shell bindings used by the test.
 wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # Poll-based non-blocking dispatch in the headless clipboard test client.
 libc = "0.2"
 
 [build-dependencies]
-chrono = { version = "0.4", features = ["serde"] }
 
 # Build optimizations
 [profile.release]
