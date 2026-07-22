@@ -1,0 +1,17 @@
+[Unit]
+Description=Axiom Wayland Compositor
+Documentation=https://github.com/GeneticxCln/axiom
+After=graphical-session-pre.target
+PartOf=graphical-session.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/axiom
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_RUNTIME_DIR=%t/IPC/axiom
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

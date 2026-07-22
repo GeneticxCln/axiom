@@ -1,0 +1,22 @@
+{
+  "app-id": "com.axiom.compositor",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "24.08",
+  "sdk": "org.freedesktop.Sdk",
+  "command": "axiom",
+  "modules": [
+    {
+      "name": "axiom",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cargo build --release && install -Dm755 target/release/axiom /app/bin/axiom"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "."
+        }
+      ]
+    }
+  ]
+}

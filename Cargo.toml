@@ -63,15 +63,9 @@ serde_json = "1.0"
 # rand (removed v0.7.6 audit: unused — Phase 3 input simulation was removed)
 parking_lot = "0.12"  # For RwLock synchronization
 # Compile-time invariant presence-check (Phase 1.A4 hardening).
-# Promoted to [dependencies] (was [dev-dependencies]) so the
-# `static_assertions::assert_fields!` call site at file scope in
-# `src/compositor.rs` is resolvable on every `cargo build` invocation,
-# not only on `cargo test`. The crate is no_std-friendly, no runtime
-# cost, and only emits a static assertion at compile time. TODO
-# before v0.2.0 publish: gate behind an optional
-# `compiletime-invariants = ["dep:static_assertions"]` feature so
-# downstream consumers can opt out.
-static_assertions = "1.1"
+# Gated behind the `compiletime-invariants` feature so downstream
+# consumers can opt out.
+static_assertions = { version = "1.1", optional = true }
 
 # TODO: Add features when compositor dependencies are ready
 # [features]
@@ -87,12 +81,18 @@ path = "src/lib.rs"
 [features]
 # `examples` gates the metrics_client example so it doesn't break default builds.
 examples = []
+# `compiletime-invariants` enables static_assertions checks on struct field names.
+compiletime-invariants = ["dep:static_assertions"]
+# `multi-output-experimental` enables virtual multi-output support for the
+# winit backend. Pure cfg flag — no additional deps needed.
+multi-output-experimental = []
 
 
 
 
 # Development dependencies for testing
 [dev-dependencies]
+static_assertions = "1.1"
 criterion = "0.5"
 lru = "0.12"
 proptest = "1.4"  # Property-based testing

@@ -1,0 +1,12 @@
+Source: axiom
+Section: x11
+Priority: optional
+Maintainer: Axiom Developers
+Build-Depends: debhelper-compat (= 13), cargo, rustc, libwayland-dev, libegl1-mesa-dev, libgles2-mesa-dev
+Standards-Version: 4.6.0
+
+Package: axiom
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: A minimal Wayland compositor
+ Axiom is a scrollable-workspace Wayland compositor written in Rust.

@@ -1,0 +1,1259 @@
+//! Compositor state, protocol handlers, and delegate macros.
+//!
+//! Contains `State` — the main compositor state struct — along with all its
+//! `impl` blocks (helpers, Smithay handler trait implementations, and the
+//! `delegate_*!` macro calls). Also defines `SurfaceData`, `PopupState`,
+//! `ClientState`, and `PendingCapture`.
+//!
+//! A submodule of `backend` can read the private fields of `State` (descendant
+//! modules see ancestor privates), so clipboard/render helpers in sibling
+//! modules can access `self.state.*` on the backend struct.
+
+use crate::config::AxiomConfig;
+use crate::decoration::DecorationManager;
+use crate::input::InputManager;
+use crate::window::WindowManager;
+use crate::workspace::ScrollableWorkspaces;
+use log::{debug, info, warn};
+
+use smithay::{
+    backend::renderer::{
+        element::texture::TextureBuffer,
+        gles::GlesTexture,
+        utils::on_commit_buffer_handler,
+    },
+    delegate_compositor, delegate_data_device, delegate_foreign_toplevel_list, delegate_seat,
+    delegate_session_lock, delegate_shm, delegate_xdg_shell,
+    input::{
+        pointer::{CursorIcon, CursorImageStatus},
+        Seat, SeatHandler, SeatState,
+    },
+    reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
+    reexports::wayland_server::{protocol::wl_seat, DisplayHandle},
+    output::Output,
+    utils::{Physical, Point, Rectangle, Serial, Size},
+    wayland::{
+        buffer::BufferHandler,
+        compositor::{with_states, CompositorClientState, CompositorHandler, CompositorState},
+        foreign_toplevel_list::{
+            ForeignToplevelHandle, ForeignToplevelListHandler, ForeignToplevelListState,
+        },
+        fractional_scale::{self, FractionalScaleHandler, FractionalScaleManagerState},
+        output::OutputHandler,
+        selection::{
+            data_device::{
+                request_data_device_client_selection, set_data_device_focus, ClientDndGrabHandler,
+                DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+            },
+            SelectionHandler, SelectionSource, SelectionTarget,
+        },
+        session_lock::{LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker},
+        shell::{
+            wlr_layer::{Layer, LayerSurface, WlrLayerShellHandler, WlrLayerShellState},
+            xdg::{
+                decoration::{XdgDecorationHandler, XdgDecorationState},
+                PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+                XdgToplevelSurfaceData,
+            },
+        },
+        shm::{ShmHandler, ShmState},
+    },
+};
+
+use std::collections::{HashMap, HashSet};
+use std::os::unix::io::OwnedFd;
+use std::sync::{mpsc, Arc};
+
+use wayland_server::{
+    backend::{ClientData, ClientId, DisconnectReason, ObjectId},
+    protocol::{
+        wl_buffer, wl_data_source::WlDataSource, wl_output::WlOutput, wl_surface::WlSurface,
+    },
+    Client, Resource,
+};
+
+use wayland_protocols::xdg::shell::server::xdg_toplevel;
+
+use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1;
+use smithay::utils::Buffer as BufferCoord;
+use zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1;
+
+pub(super) type ClipboardUpdate = Vec<u8>;
+
+/// Server-side decorations are rendered via the GLES solid-color pipeline
+/// (and text when system fonts are available). Title text rendering falls back gracefully
+/// when system fonts are unavailable (titlebars still render with solid colors
+/// and buttons).
+pub(super) fn backend_prefers_server_side_decorations() -> bool {
+    true
+}
+
+/// The compositor now renders visible SSD decoration quads (titlebar
+/// backgrounds and buttons) and title text (when system fonts are available).
+/// Negotiate server-side decorations with clients that request them.
+pub(super) fn negotiated_xdg_decoration_mode() -> Mode {
+    Mode::ServerSide
+}
+
+// ============================================================================
+// Surface Data
+// ============================================================================
+
+/// Surface data for tracking Wayland surfaces
+#[derive(Debug, Clone)]
+pub struct SurfaceData {
+    pub window_id: Option<u64>,
+    pub title: String,
+    pub app_id: Option<String>,
+    /// Actual buffer dimensions (updated when client commits a buffer).
+    pub size: (i32, i32),
+    pub committed: bool,
+    pub surface: Option<WlSurface>,
+}
+
+/// State for tracking an XDG popup surface (menu, tooltip, etc.).
+pub struct PopupState {
+    /// Protocol ID of the parent toplevel or popup surface.
+    pub parent_surface_id: u32,
+    /// Popup position relative to parent.
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    /// Whether the surface has been committed (mapped).
+    pub committed: bool,
+    /// The popup surface handle.
+    pub surface: PopupSurface,
+}
+
+// ============================================================================
+// Client State (per-client data)
+// ============================================================================
+
+pub(super) struct ClientState {
+    pub(super) compositor_state: CompositorClientState,
+}
+
+impl ClientData for ClientState {
+    fn initialized(&self, _client_id: ClientId) {}
+    fn disconnected(&self, client_id: ClientId, reason: DisconnectReason) {
+        debug!("Client {:?} disconnected: {:?}", client_id, reason);
+    }
+}
+
+// ============================================================================
+// Pending Capture
+// ============================================================================
+
+/// A pending screencopy capture request, stored during `copy` dispatch
+/// and processed during the next render cycle.
+pub struct PendingCapture {
+    /// The frame resource to send ready/failed on
+    pub frame: ZwlrScreencopyFrameV1,
+    /// The client's wl_buffer (SHM) to write pixel data into
+    pub buffer: wl_buffer::WlBuffer,
+    /// Output dimensions (must match the buffer)
+    pub size: Size<i32, BufferCoord>,
+}
+
+// ============================================================================
+// Compositor State
+// ============================================================================
+
+/// Main compositor state holding all subsystems
+pub struct State {
+    // Smithay protocol states
+    pub compositor_state: CompositorState,
+    pub xdg_shell_state: XdgShellState,
+
+    pub shm_state: ShmState,
+    pub seat_state: SeatState<Self>,
+    pub data_device_state: DataDeviceState,
+    /// Handle to the Wayland display, used to keep the data device
+    /// (clipboard + drag-and-drop offers) focused on the right client.
+    pub display_handle: Option<DisplayHandle>,
+    pub xdg_decoration_state: Option<XdgDecorationState>,
+    pub fractional_scale_manager_state: FractionalScaleManagerState,
+    pub layer_shell_state: WlrLayerShellState,
+    pub session_lock_state: SessionLockManagerState,
+
+    // Seat
+    pub seat: Seat<Self>,
+
+    // Axiom subsystems
+    pub config: AxiomConfig,
+    pub window_manager: Arc<parking_lot::RwLock<WindowManager>>,
+    pub workspace_manager: Arc<parking_lot::RwLock<ScrollableWorkspaces>>,
+    pub input_manager: Arc<parking_lot::RwLock<InputManager>>,
+
+    // Tracking
+    pub surfaces: HashMap<u32, SurfaceData>,
+    pub window_map: HashMap<u64, u32>,
+    pub next_window_id: u64,
+
+    // Outputs
+    pub outputs: Vec<Output>,
+
+    /// Per-output DPI scale factors keyed by output name (e.g. "eDP-1" → 2.0).
+    /// Empty in winit/noop mode where scale is implicitly 1.0.
+    pub output_scale_factors: HashMap<String, f64>,
+
+    /// Server-side decoration manager for titlebar/button rendering.
+    /// Shared with [`AxiomCompositor`](crate::compositor::AxiomCompositor).
+    pub decoration_manager: Arc<parking_lot::RwLock<DecorationManager>>,
+
+    // Keep ToplevelSurface handles alive (they get destroyed when dropped)
+    pub toplevels: HashMap<u32, ToplevelSurface>,
+    pub toplevel_handles: HashMap<u32, ForeignToplevelHandle>,
+    pub foreign_toplevel_list_state: ForeignToplevelListState,
+
+    // Running state
+    pub running: bool,
+    pub needs_redraw: bool,
+    /// Pending screencopy capture, processed after the next render.
+    pub pending_capture: Option<PendingCapture>,
+    /// Whether the session is currently locked (lock screen showing).
+    pub session_locked: bool,
+    /// Lock surfaces created during session lock.
+    /// ponytail: stored here because SessionLockManagerState doesn't expose an
+    /// iterator; upgrade to upstream tracking if Smithay adds one.
+    pub lock_surfaces: Vec<LockSurface>,
+
+    /// Accumulated output damage regions since last render, in physical coordinates.
+    /// Cleared after each frame submit. Only surfaces that changed or moved contribute.
+    pub output_damage: Vec<Rectangle<i32, Physical>>,
+
+    /// Per-surface previous frame geometry (screen position + size) so we can
+    /// damage the old location when a surface moves or resizes.
+    pub surface_previous_rects: HashMap<u32, Rectangle<i32, Physical>>,
+
+    /// Per-surface commit counters, keyed by surface protocol ID.
+    /// Tracks how many times each surface has committed a buffer so we can
+    /// detect which surfaces changed between frames for precise damage tracking.
+    pub surface_commit_counters: HashMap<u32, u64>,
+
+    // Current window/viewport size (updated via Resized events after dispatch)
+    pub window_width: u32,
+    pub window_height: u32,
+
+    // Pointer tracking for input routing
+    pub pointer_x: f64,
+    pub pointer_y: f64,
+
+    /// Imported client buffer textures, keyed by the WlBuffer's ObjectId so a
+    /// client's pool of buffers (e.g. double-buffering) is uploaded to the GPU
+    /// exactly once and reused across frames. Evicted on buffer_destroyed or
+    /// LRU order when the cache reaches capacity.
+    pub texture_cache: lru::LruCache<ObjectId, TextureBuffer<GlesTexture>>,
+
+    /// Tracks whether we've sent the initial configure for a surface.
+    /// Used to throttle redundant configure events when layout hasn't changed.
+    pub configured_sizes: HashMap<u32, (i32, i32)>,
+
+    /// Surfaces with an outstanding (unacknowledged) xdg_toplevel.configure.
+    /// New configures are deferred until the client acks the current one.
+    pub pending_configure: HashSet<u32>,
+
+    /// Active XDG popup surfaces (menus, tooltips, etc.).
+    pub popups: HashMap<u32, PopupState>,
+
+    /// If set, a popup grab is active — clicks outside this popup
+    /// surface ID will dismiss it via popup_done().
+    pub active_popup_grab: Option<u32>,
+
+    /// Cached clipboard payload served to both X11 and compositor-provided
+    /// Wayland selections. Populated from explicit compositor updates and from
+    /// the asynchronous Wayland-selection extraction worker.
+    pub clipboard_cache: Option<Vec<u8>>,
+
+    /// Sender used by async Wayland-selection extraction workers to publish
+    /// freshly-read clipboard bytes back onto the compositor thread.
+    pub(super) clipboard_update_tx: mpsc::Sender<ClipboardUpdate>,
+    /// Receiver drained in the main backend loop to refresh `clipboard_cache`
+    /// without blocking the compositor thread on pipe reads.
+    pub(super) clipboard_update_rx: mpsc::Receiver<ClipboardUpdate>,
+
+    /// Set when a client offers a new clipboard selection in `new_selection`.
+    /// The actual data is fetched on the next cycle (see `maybe_fetch_clipboard`)
+    /// because Smithay only registers the selection in `seat_data` *after*
+    /// `new_selection` returns — `request_data_device_client_selection` would
+    /// find nothing if called directly from `new_selection`.
+    pub(super) clipboard_fetch_pending: bool,
+
+    /// Active Wayland selection source (when a client owns the clipboard).
+    /// Stored so we can serve data to X11 and re-offer to other Wayland clients.
+    ///
+    /// ## Clipboard bridging (Wayland → X11)
+    ///
+    /// In Smithay 0.7, `SelectionSource` is created by the Wayland client
+    /// with a callback — there is no `send()` method to call from the
+    /// compositor side. Extracting text/plain data from a Wayland source
+    /// requires the compositor to **act as its own Wayland client** and
+    /// request the selection via `wl_data_device.data_offer.receive`.
+    /// This needs a protocol round-trip through the event loop and is
+    /// deferred to a follow-up PR (tracked in Phase 3 protocol work).
+    ///
+    /// The `clipboard_cache` can still be populated via the compositor's
+    /// own IPC path (`AxiomSmithayBackendReal::set_clipboard_data`) for
+    /// the user-facing direction (compositor → X11).
+    pub clipboard_source: Option<SelectionSource>,
+
+    /// Most recent cursor icon requested via `cursor_image()` callback.
+    /// Applied to the winit window at the start of `render()`.
+    pub cursor_icon: Option<CursorIcon>,
+
+    /// Active drag-and-drop icon surface (set when a client starts a DnD
+    /// operation with an icon). Rendered as an overlay at the pointer position.
+    pub(super) dnd_icon: Option<WlSurface>,
+    /// Whether a drag-and-drop session is currently active.
+    pub(super) dnd_active: bool,
+    /// Cached floating window rects for hit-testing, rebuilt whenever layout changes.
+    /// Avoids per-motion allocation in input.rs.
+    pub cached_floating_rects: Vec<(u64, i32, i32, u32, u32)>,
+}
+
+impl State {
+    pub(super) fn keyboard_repeat_settings(config: &AxiomConfig) -> (i32, i32) {
+        let delay = config.input.keyboard_repeat_delay.min(i32::MAX as u32) as i32;
+        let rate = config.input.keyboard_repeat_rate.min(i32::MAX as u32) as i32;
+        (delay, rate)
+    }
+
+    pub(super) fn preferred_text_mime_type(mime_types: &[String]) -> Option<String> {
+        [
+            "text/plain;charset=utf-8",
+            "text/plain;charset=UTF-8",
+            "text/plain",
+            "TEXT",
+            "STRING",
+        ]
+        .iter()
+        .find_map(|wanted| {
+            mime_types
+                .iter()
+                .find(|candidate| candidate.as_str() == *wanted)
+                .cloned()
+        })
+        .or_else(|| mime_types.first().cloned())
+    }
+
+    /// Fetch the offered selection payload into the clipboard cache. Called
+    /// after a `new_selection` flag (set during `dispatch_clients`, once
+    /// Smithay has registered the selection in `seat_data`). Spawns the pipe
+    /// reader that streams the client's data into `clipboard_cache`.
+    pub(super) fn maybe_fetch_clipboard(&mut self) {
+        if !self.clipboard_fetch_pending {
+            return;
+        }
+        self.clipboard_fetch_pending = false;
+
+        let mime_types = self
+            .clipboard_source
+            .as_ref()
+            .map(|s| s.mime_types())
+            .unwrap_or_default();
+        let Some(mime) = Self::preferred_text_mime_type(&mime_types) else {
+            return;
+        };
+
+        let seat = self.seat.clone();
+        match super::clipboard::create_clipboard_pipe() {
+            Ok((read_fd, write_fd)) => {
+                match request_data_device_client_selection(&seat, mime.clone(), write_fd) {
+                    Ok(()) => {
+                        debug!("📋 Requested Wayland clipboard payload via MIME {}", mime);
+                        super::clipboard::spawn_clipboard_read_worker(
+                            read_fd,
+                            self.clipboard_update_tx.clone(),
+                        );
+                    }
+                    Err(e) => warn!(
+                        "⚠️ Failed requesting Wayland clipboard payload for MIME {}: {:?}",
+                        mime, e
+                    ),
+                }
+            }
+            Err(e) => warn!("⚠️ Failed creating clipboard pipe: {}", e),
+        }
+    }
+
+    pub(super) fn display_title(title: Option<String>, app_id: Option<String>) -> String {
+        title
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| app_id.filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| String::from("Wayland Client"))
+    }
+
+    fn read_xdg_toplevel_metadata(surface: &WlSurface) -> (Option<String>, Option<String>) {
+        with_states(surface, |states| {
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .and_then(|data| {
+                    data.lock()
+                        .ok()
+                        .map(|role| (role.title.clone(), role.app_id.clone()))
+                })
+                .unwrap_or((None, None))
+        })
+    }
+
+    fn update_focus_state(&mut self, focused_window_id: Option<u64>) {
+        self.window_manager
+            .write()
+            .set_focused_window(focused_window_id);
+        let mut tracked_ids: Vec<u64> = self.window_map.keys().copied().collect();
+        tracked_ids.sort_unstable();
+        tracked_ids.dedup();
+        let mut decorations = self.decoration_manager.write();
+        for id in tracked_ids {
+            decorations.set_window_focus(id, Some(id) == focused_window_id);
+        }
+    }
+
+    pub(super) fn update_surface_fractional_scale(&self, surface: &WlSurface) {
+        let preferred_scale = self
+            .window_id_for_surface(surface)
+            .map(|window_id| {
+                self.workspace_manager
+                    .read()
+                    .scale_factor_for_window(window_id)
+            })
+            .unwrap_or_else(|| self.focused_output_scale())
+            .clamp(1.0, 4.0);
+
+        with_states(surface, |states| {
+            fractional_scale::with_fractional_scale(states, |fractional_scale| {
+                fractional_scale.set_preferred_scale(preferred_scale);
+            });
+        });
+    }
+
+    fn update_window_metadata(
+        &mut self,
+        surface_id: u32,
+        title: Option<String>,
+        app_id: Option<String>,
+    ) {
+        let effective_title = Self::display_title(title.clone(), app_id.clone());
+        let window_id = self
+            .surfaces
+            .get(&surface_id)
+            .and_then(|data| data.window_id);
+
+        if let Some(surface_data) = self.surfaces.get_mut(&surface_id) {
+            surface_data.title = effective_title.clone();
+            surface_data.app_id = app_id.clone();
+        }
+
+        if let Some(window_id) = window_id {
+            if let Some(window) = self.window_manager.write().get_window_mut(window_id) {
+                window.window.title = effective_title.clone();
+            }
+            self.decoration_manager
+                .write()
+                .set_window_title(window_id, effective_title.clone());
+        }
+    }
+
+    /// Create a new Axiom window from a surface
+    pub fn create_window_from_surface(
+        &mut self,
+        surface_id: u32,
+        title: String,
+        app_id: Option<String>,
+        surface: WlSurface,
+    ) -> u64 {
+        info!(
+            "🪟 Creating window from surface {} (title: \"{}\", app_id: {:?})",
+            surface_id, title, app_id
+        );
+
+        let visible_title = title.clone();
+        let window_id = self
+            .window_manager
+            .write()
+            .add_window(visible_title.clone());
+        self.workspace_manager.write().add_window(window_id);
+
+        let surface_data = SurfaceData {
+            window_id: Some(window_id),
+            title,
+            app_id,
+            size: (640, 480),
+            committed: false,
+            surface: Some(surface),
+        };
+        self.surfaces.insert(surface_id, surface_data);
+        self.window_map.insert(window_id, surface_id);
+
+        // Register decoration state — SSD rendering is now live via WGPU.
+        self.decoration_manager.write().add_window(
+            window_id,
+            visible_title,
+            backend_prefers_server_side_decorations(),
+            640,
+        );
+
+        window_id
+    }
+
+    pub fn destroy_window(&mut self, surface_id: u32) {
+        // Remove the ForeignToplevelHandle for external taskbars/docks
+        if let Some(handle) = self.toplevel_handles.remove(&surface_id) {
+            handle.send_closed();
+        }
+        // Release the toplevel handle to prevent memory leaks
+        self.toplevels.remove(&surface_id);
+
+        // Clean up configure tracking
+        self.configured_sizes.remove(&surface_id);
+        self.pending_configure.remove(&surface_id);
+
+        if let Some(data) = self.surfaces.remove(&surface_id) {
+            if let Some(window_id) = data.window_id {
+                info!("Destroying window {} (was: \"{}\")", window_id, data.title);
+                self.window_map.remove(&window_id);
+                self.window_manager.write().remove_window(window_id);
+                self.workspace_manager.write().remove_window(window_id);
+                self.decoration_manager.write().remove_window(window_id);
+            }
+        }
+    }
+
+    /// Check if a window (by Axiom window ID) has a committed surface
+    pub fn window_has_buffer(&self, window_id: u64) -> bool {
+        self.window_map
+            .get(&window_id)
+            .and_then(|surface_id| self.surfaces.get(surface_id))
+            .map(|s| s.committed)
+            .unwrap_or(false)
+    }
+
+    /// Find the window ID for a given WlSurface
+    pub fn window_id_for_surface(&self, surface: &WlSurface) -> Option<u64> {
+        let surface_id = surface.id().protocol_id();
+        self.surfaces.get(&surface_id).and_then(|s| s.window_id)
+    }
+
+    /// Return the DPI scale factor for the currently focused output.
+    /// Returns the scale factor of the focused output. The source of truth is
+    /// the Output's own scale (tracked in `output_scale_factors`), not the
+    /// workspace tape copy. Falls back to the first available output's scale,
+    /// or 1.0 when no output is registered.
+    pub fn focused_output_scale(&self) -> f64 {
+        let focused = self.workspace_manager.read().focused_output().to_string();
+        self.output_scale_factors
+            .get(&focused)
+            .copied()
+            .or_else(|| self.output_scale_factors.values().next().copied())
+            .unwrap_or(1.0)
+    }
+
+    /// Toggle fullscreen for a window and notify the client via protocol.
+    pub fn toggle_fullscreen_window(&mut self, window_id: u64) {
+        let is_fullscreen = {
+            let mut wm = self.window_manager.write();
+            wm.toggle_fullscreen(window_id);
+            wm.get_window(window_id)
+                .map(|w| w.properties.fullscreen)
+                .unwrap_or(false)
+        };
+
+        if let Some(&surface_id) = self.window_map.get(&window_id) {
+            if let Some(toplevel) = self.toplevels.get(&surface_id) {
+                let scale = self.focused_output_scale();
+                toplevel.with_pending_state(|state| {
+                    if is_fullscreen {
+                        state.states.set(xdg_toplevel::State::Fullscreen);
+                        let logical_w = ((self.window_width as f64 / scale).round() as i32).max(1);
+                        let logical_h =
+                            ((self.window_height as f64 / scale).round() as i32).max(1);
+                        state.size = Some((logical_w, logical_h).into());
+                    } else {
+                        state.states.unset(xdg_toplevel::State::Fullscreen);
+                        // Don't set size — the next prepare_render_scene cycle
+                        // will assign a tiled size and send another configure.
+                        state.size = None;
+                    }
+                });
+                toplevel.send_configure();
+                // Track configured size for exit case (unset)
+                if !is_fullscreen {
+                    self.configured_sizes.remove(&surface_id);
+                } else {
+                    let logical_w = ((self.window_width as f64 / scale).round() as i32).max(1);
+                    let logical_h =
+                        ((self.window_height as f64 / scale).round() as i32).max(1);
+                    self.configured_sizes
+                        .insert(surface_id, (logical_w, logical_h));
+                }
+                self.pending_configure.insert(surface_id);
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Prune surfaces and toplevels whose WlSurface is no longer alive
+    /// (e.g. the Wayland client disconnected). Returns count of cleaned entries.
+    pub fn prune_dead_surfaces(&mut self) -> usize {
+        let dead_surface_ids: Vec<u32> = self
+            .surfaces
+            .iter()
+            .filter(|(_, data)| data.surface.as_ref().is_none_or(|s| !s.is_alive()))
+            .map(|(id, _)| *id)
+            .collect();
+
+        let count = dead_surface_ids.len();
+        for surface_id in dead_surface_ids {
+            self.destroy_window(surface_id);
+        }
+
+        if count > 0 {
+            info!(
+                "🧹 Pruned {} dead surfaces from disconnected clients",
+                count
+            );
+        }
+        count
+    }
+}
+
+// Insert a texture into the cache, evicting oldest entries when the
+// cache exceeds 256 entries. Prevents unbounded growth from clients
+// that create many buffers without destroying them.
+// ponytail: simple eldest-first eviction via HashMap iteration, not
+// true LRU. Upgrade to clock-sweep or linked-hash-map if profiling
+// shows insertion-time eviction is a bottleneck.
+// ============================================================================
+// Handler Trait Implementations
+// ============================================================================
+
+impl BufferHandler for State {
+    fn buffer_destroyed(&mut self, buffer: &wl_buffer::WlBuffer) {
+        // Free the GPU texture we cached for this buffer (keyed by ObjectId).
+        // Without this the GlesTexture (Arc<GlesTextureInternal>) keeps the GL
+        // texture alive forever, leaking it when clients cycle through buffers.
+        self.texture_cache.pop_entry(&buffer.id());
+    }
+}
+
+impl CompositorHandler for State {
+    fn compositor_state(&mut self) -> &mut CompositorState {
+        &mut self.compositor_state
+    }
+
+    fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        match client.get_data::<ClientState>() {
+            Some(state) => &state.compositor_state,
+            None => {
+                // Smithay initializes ClientState for every connected client, so
+                // this branch is defensive only. Return a shared fallback rather
+                // than panicking inside a protocol handler (which would kill the
+                // whole compositor).
+                log::error!("client_compositor_state: client has no ClientState; using fallback");
+                static FALLBACK: std::sync::OnceLock<CompositorClientState> =
+                    std::sync::OnceLock::new();
+                FALLBACK.get_or_init(CompositorClientState::default)
+            }
+        }
+    }
+
+    fn commit(&mut self, surface: &WlSurface) {
+        on_commit_buffer_handler::<Self>(surface);
+        self.needs_redraw = true;
+
+        let surface_id = surface.id().protocol_id();
+
+        // Mark surface as committed (toplevels and popups)
+        if let Some(surface_data) = self.surfaces.get_mut(&surface_id) {
+            surface_data.committed = true;
+        }
+        if let Some(popup) = self.popups.get_mut(&surface_id) {
+            popup.committed = true;
+        }
+
+        // Size is now updated from imported textures in render_scene_into (fix #19).
+
+        // Increment commit counter for this surface
+        *self.surface_commit_counters.entry(surface_id).or_insert(0) += 1;
+
+        // Track damaged screen region for this surface
+        let rect = self
+            .surface_previous_rects
+            .get(&surface_id)
+            .copied()
+            .unwrap_or(Rectangle::new(
+                Point::from((0, 0)),
+                Size::from((self.window_width as i32, self.window_height as i32)),
+            ));
+        self.output_damage.push(rect);
+    }
+}
+
+impl ShmHandler for State {
+    fn shm_state(&self) -> &ShmState {
+        &self.shm_state
+    }
+}
+
+impl SeatHandler for State {
+    type KeyboardFocus = WlSurface;
+    type PointerFocus = WlSurface;
+    type TouchFocus = WlSurface;
+
+    fn seat_state(&mut self) -> &mut SeatState<Self> {
+        &mut self.seat_state
+    }
+
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        let focused_window_id = focused.and_then(|surface| self.window_id_for_surface(surface));
+        self.update_focus_state(focused_window_id);
+        // Keep the Wayland data device (clipboard + drag-and-drop offers)
+        // focused on the client under the keyboard focus, so a DnD drop target
+        // receives the source's data offer.
+        if let Some(dh) = &self.display_handle {
+            let client = focused.and_then(|s| s.client());
+            set_data_device_focus(dh, seat, client);
+        }
+        if let Some(window_id) = focused_window_id {
+            debug!("🎯 Wayland focus changed to window {}", window_id);
+        }
+    }
+
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        match image {
+            CursorImageStatus::Named(icon) => self.cursor_icon = Some(icon),
+            _ => self.cursor_icon = None,
+        }
+    }
+}
+
+impl ForeignToplevelListHandler for State {
+    fn foreign_toplevel_list_state(&mut self) -> &mut ForeignToplevelListState {
+        &mut self.foreign_toplevel_list_state
+    }
+}
+
+impl XdgShellHandler for State {
+    fn xdg_shell_state(&mut self) -> &mut XdgShellState {
+        &mut self.xdg_shell_state
+    }
+
+    fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        let wl_surface = surface.wl_surface().clone();
+        let surface_id = wl_surface.id().protocol_id();
+
+        // Activate the surface
+        surface.with_pending_state(|state| {
+            state.states.set(xdg_toplevel::State::Activated);
+        });
+
+        // Send initial configure scaled to logical pixels for the
+        // current output's DPI scale factor. HiDPI-aware clients
+        // multiply by buffer_scale to allocate their actual pixel buffers.
+        let scale = self.focused_output_scale();
+        let logical_w = ((1024.0 / scale).round() as i32).max(1);
+        let logical_h = ((720.0 / scale).round() as i32).max(1);
+        surface.with_pending_state(|state| {
+            state.size = Some((logical_w, logical_h).into());
+        });
+        surface.send_configure();
+
+        // Track the initial configure so render() doesn't immediately re-configure
+        self.configured_sizes
+            .insert(surface_id, (logical_w, logical_h));
+        self.pending_configure.insert(surface_id);
+
+        // Keep the ToplevelSurface alive — it is destroyed when dropped
+        self.toplevels.insert(surface_id, surface.clone());
+
+        let (title, app_id) = Self::read_xdg_toplevel_metadata(&wl_surface);
+        let display_title = Self::display_title(title, app_id.clone());
+
+        info!(
+            "🪟 New XDG toplevel: surface={} title={:?} app_id={:?}",
+            surface_id, display_title, app_id
+        );
+
+        // Create ForeignToplevelHandle for external taskbars/docks
+        let ftl_handle = self
+            .foreign_toplevel_list_state
+            .new_toplevel::<State>(display_title.clone(), app_id.clone().unwrap_or_default());
+        self.toplevel_handles.insert(surface_id, ftl_handle);
+        self.needs_redraw = true;
+
+        self.create_window_from_surface(surface_id, display_title, app_id, wl_surface.clone());
+        self.update_surface_fractional_scale(&wl_surface);
+        self.needs_redraw = true;
+    }
+
+    fn fullscreen_request(&mut self, toplevel: ToplevelSurface, _output: Option<WlOutput>) {
+        let surface_id = toplevel.wl_surface().id().protocol_id();
+        if let Some(window_id) = self
+            .surfaces
+            .get(&surface_id)
+            .and_then(|s| s.window_id)
+        {
+            self.toggle_fullscreen_window(window_id);
+        } else {
+            // Window not tracked yet — just acknowledge the request
+            toplevel.with_pending_state(|state| {
+                state.states.set(xdg_toplevel::State::Fullscreen);
+            });
+            toplevel.send_configure();
+        }
+    }
+
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        let surface_id = surface.wl_surface().id().protocol_id();
+        let parent_id = surface
+            .get_parent_surface()
+            .map(|s| s.id().protocol_id())
+            .unwrap_or(0);
+
+        // Compute popup geometry from the positioner relative to parent
+        let rect = positioner.get_geometry();
+
+        surface.with_pending_state(|state| {
+            state.geometry = rect;
+        });
+        if let Err(e) = surface.send_configure() {
+            warn!(
+                "⚠️ Popup configure failed for surface {}: {:?}",
+                surface_id, e
+            );
+        }
+
+        info!(
+            "💬 New XDG popup: surface={} parent={} pos=({},{}) size={}x{}",
+            surface_id, parent_id, rect.loc.x, rect.loc.y, rect.size.w, rect.size.h
+        );
+
+        self.popups.insert(
+            surface_id,
+            PopupState {
+                parent_surface_id: parent_id,
+                x: rect.loc.x,
+                y: rect.loc.y,
+                width: rect.size.w,
+                height: rect.size.h,
+                committed: false,
+                surface,
+            },
+        );
+    }
+
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        let wl_surface = surface.wl_surface().clone();
+        let surface_id = wl_surface.id().protocol_id();
+        let (title, app_id) = Self::read_xdg_toplevel_metadata(&wl_surface);
+        let display_title = Self::display_title(title.clone(), app_id.clone());
+        self.update_window_metadata(surface_id, title, app_id);
+        debug!(
+            "📝 Updated XDG toplevel metadata: surface={} title={:?}",
+            surface_id, display_title
+        );
+        self.needs_redraw = true;
+    }
+
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        let wl_surface = surface.wl_surface().clone();
+        let surface_id = wl_surface.id().protocol_id();
+        let (title, app_id) = Self::read_xdg_toplevel_metadata(&wl_surface);
+        let display_title = Self::display_title(title.clone(), app_id.clone());
+        self.update_window_metadata(surface_id, title, app_id.clone());
+        debug!(
+            "🪪 Updated XDG toplevel metadata: surface={} title={:?} app_id={:?}",
+            surface_id, display_title, app_id
+        );
+        self.needs_redraw = true;
+    }
+
+    fn ack_configure(
+        &mut self,
+        surface: WlSurface,
+        _configure: smithay::wayland::shell::xdg::Configure,
+    ) {
+        let surface_id = surface.id().protocol_id();
+        self.pending_configure.remove(&surface_id);
+        debug!("✅ Client ack'd configure for surface {}", surface_id);
+    }
+
+    fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
+        let surface_id = surface.wl_surface().id().protocol_id();
+        info!("🤚 Popup grab activated for surface {}", surface_id);
+        self.active_popup_grab = Some(surface_id);
+    }
+
+    fn reposition_request(
+        &mut self,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
+    ) {
+        let surface_id = surface.wl_surface().id().protocol_id();
+        let rect = positioner.get_geometry();
+
+        if let Some(popup) = self.popups.get_mut(&surface_id) {
+            popup.x = rect.loc.x;
+            popup.y = rect.loc.y;
+            popup.width = rect.size.w;
+            popup.height = rect.size.h;
+        }
+
+        surface.with_pending_state(|state| {
+            state.geometry = rect;
+        });
+        surface.send_repositioned(token);
+        if let Err(e) = surface.send_configure() {
+            warn!("⚠️ Popup reposition configure failed: {:?}", e);
+        }
+
+        debug!(
+            "🔄 Popup repositioned: surface={} pos=({},{}) size={}x{}",
+            surface_id, rect.loc.x, rect.loc.y, rect.size.w, rect.size.h
+        );
+    }
+}
+
+impl SelectionHandler for State {
+    type SelectionUserData = ();
+
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        match ty {
+            SelectionTarget::Clipboard => {
+                if let Some(ref src) = source {
+                    let mime_types = src.mime_types();
+                    debug!(
+                        "📋 Wayland clipboard updated with {} MIME types: {:?}",
+                        mime_types.len(),
+                        mime_types
+                    );
+                    self.clipboard_source = Some(src.clone());
+                    // Defer the actual data fetch: Smithay registers the
+                    // selection in `seat_data` only *after* `new_selection`
+                    // returns, so `request_data_device_client_selection` would
+                    // find nothing if invoked here. Flag it and fetch on the
+                    // next cycle, once the selection is registered.
+                    self.clipboard_fetch_pending = true;
+                } else {
+                    debug!("📋 Wayland clipboard cleared");
+                    self.clipboard_source = None;
+                    self.clipboard_cache = None;
+                    self.clipboard_fetch_pending = false;
+                }
+            }
+            SelectionTarget::Primary => {
+                debug!("📋 Wayland primary selection updated");
+            }
+        }
+    }
+
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &Self::SelectionUserData,
+    ) {
+        if !matches!(ty, SelectionTarget::Clipboard) {
+            return;
+        }
+        if let Some(data) = self.clipboard_cache.clone() {
+            debug!(
+                "📤 Serving compositor clipboard to Wayland client via MIME {} ({} bytes)",
+                mime_type,
+                data.len()
+            );
+            super::clipboard::write_selection_bytes_to_fd(fd, &data);
+        } else {
+            debug!(
+                "📤 Wayland client requested compositor clipboard via MIME {}, but cache is empty",
+                mime_type
+            );
+        }
+    }
+}
+
+impl DataDeviceHandler for State {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.data_device_state
+    }
+}
+
+impl ClientDndGrabHandler for State {
+    fn started(
+        &mut self,
+        _source: Option<WlDataSource>,
+        icon: Option<WlSurface>,
+        _seat: Seat<Self>,
+    ) {
+        debug!("🖐️ Client-initiated drag-and-drop started");
+        self.dnd_active = true;
+        self.dnd_icon = icon;
+        // If there's an icon surface, register it so commits are picked up
+        // for texture import during rendering.
+        if let Some(ref surf) = self.dnd_icon {
+            let id = surf.id().protocol_id();
+            self.surfaces.entry(id).or_insert(SurfaceData {
+                window_id: None,
+                title: String::new(),
+                app_id: None,
+                size: (0, 0),
+                committed: false,
+                surface: Some(surf.clone()),
+            });
+        }
+        self.needs_redraw = true;
+    }
+
+    fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {
+        debug!("🖐️ Client-initiated drag-and-drop finished");
+        self.dnd_active = false;
+        // Clean up the drag icon surface from our tracking
+        if let Some(ref icon) = self.dnd_icon {
+            let id = icon.id().protocol_id();
+            self.surfaces.remove(&id);
+        }
+        self.dnd_icon = None;
+        self.needs_redraw = true;
+    }
+}
+
+impl ServerDndGrabHandler for State {
+    fn send(&mut self, mime_type: String, fd: OwnedFd, _seat: Seat<Self>) {
+        // ponytail: This path is reachable only if a server-initiated DnD
+        // (start_dnd) is triggered — currently unreachable, but the handler
+        // serves clipboard cache data when called, matching the selection path.
+        if let Some(data) = self.clipboard_cache.clone() {
+            debug!(
+                "🖐️ Serving DnD data via MIME {} ({} bytes)",
+                mime_type,
+                data.len()
+            );
+            super::clipboard::write_selection_bytes_to_fd(fd, &data);
+        } else {
+            debug!(
+                "🖐️ DnD send called for MIME {} but clipboard cache is empty",
+                mime_type
+            );
+            drop(fd);
+        }
+    }
+}
+
+impl OutputHandler for State {
+    fn output_bound(&mut self, _output: Output, _wl_output: WlOutput) {
+        debug!("🖥️ Client bound a wl_output instance");
+    }
+}
+
+impl FractionalScaleHandler for State {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        self.update_surface_fractional_scale(&surface);
+    }
+}
+
+impl XdgDecorationHandler for State {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        let negotiated = negotiated_xdg_decoration_mode();
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(negotiated);
+        });
+        toplevel.send_configure();
+
+        if let Some(window_id) = self.window_id_for_surface(toplevel.wl_surface()) {
+            let mode = if negotiated == Mode::ServerSide {
+                crate::decoration::DecorationMode::ServerSide
+            } else {
+                crate::decoration::DecorationMode::ClientSide
+            };
+            self.decoration_manager
+                .write()
+                .set_decoration_mode(window_id, mode);
+        }
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: Mode) {
+        let negotiated = negotiated_xdg_decoration_mode();
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(negotiated);
+        });
+        toplevel.send_configure();
+
+        if let Some(window_id) = self.window_id_for_surface(toplevel.wl_surface()) {
+            let mode = if negotiated == Mode::ServerSide {
+                crate::decoration::DecorationMode::ServerSide
+            } else {
+                crate::decoration::DecorationMode::ClientSide
+            };
+            self.decoration_manager
+                .write()
+                .set_decoration_mode(window_id, mode);
+        }
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        let negotiated = negotiated_xdg_decoration_mode();
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(negotiated);
+        });
+        toplevel.send_configure();
+
+        if let Some(window_id) = self.window_id_for_surface(toplevel.wl_surface()) {
+            let mode = if negotiated == Mode::ServerSide {
+                crate::decoration::DecorationMode::ServerSide
+            } else {
+                crate::decoration::DecorationMode::ClientSide
+            };
+            self.decoration_manager
+                .write()
+                .set_decoration_mode(window_id, mode);
+        }
+    }
+}
+
+impl WlrLayerShellHandler for State {
+    fn shell_state(&mut self) -> &mut WlrLayerShellState {
+        &mut self.layer_shell_state
+    }
+
+    fn new_layer_surface(
+        &mut self,
+        surface: LayerSurface,
+        _output: Option<WlOutput>,
+        layer: Layer,
+        namespace: String,
+    ) {
+        debug!(
+            "📋 New layer surface: namespace={}, layer={:?}",
+            namespace, layer
+        );
+
+        // Suggest an initial size based on the anchor configuration.
+        // Clients that anchor to two opposite edges get the full output span;
+        // clients that anchor to one edge get a default size in that dimension;
+        // unanchored clients get a centered default.
+        let (w, h) = (self.window_width, self.window_height);
+        use smithay::utils::Size as SSize;
+        surface.with_pending_state(|state| {
+            let logical_w = w.max(1) as i32;
+            let logical_h = h.max(1) as i32;
+            state.size = Some(SSize::from((logical_w, logical_h)));
+        });
+        surface.send_configure();
+
+        self.needs_redraw = true;
+    }
+
+    fn layer_destroyed(&mut self, _surface: LayerSurface) {
+        debug!("📋 Layer surface destroyed");
+        self.needs_redraw = true;
+    }
+}
+
+// ============================================================================
+// Session Lock Handler
+// ============================================================================
+
+impl SessionLockHandler for State {
+    fn lock_state(&mut self) -> &mut SessionLockManagerState {
+        &mut self.session_lock_state
+    }
+
+    fn lock(&mut self, confirmation: SessionLocker) {
+        debug!("🔒 Session lock requested");
+        self.session_locked = true;
+        // ponytail: tell the client we've locked immediately without a custom
+        // lock screen. A real implementation would show a lock screen UI.
+        confirmation.lock();
+    }
+
+    fn unlock(&mut self) {
+        debug!("🔓 Session unlocked");
+        self.session_locked = false;
+        self.lock_surfaces.clear();
+    }
+
+    fn new_surface(&mut self, surface: LockSurface, _output: WlOutput) {
+        debug!("🔒 New lock surface for output");
+        self.lock_surfaces.push(surface.clone());
+        // Send initial configure with the current viewport size
+        // ponytail: uses compositor window size; a multi-output setup would
+        // match the WlOutput to the corresponding Output to get per-output size.
+        let size = Size::from((self.window_width, self.window_height));
+        surface.with_pending_state(|state| {
+            state.size = Some(size);
+        });
+        surface.send_configure();
+    }
+}
+
+// Delegate macros
+delegate_compositor!(State);
+delegate_shm!(State);
+delegate_seat!(State);
+delegate_xdg_shell!(State);
+delegate_data_device!(State);
+delegate_foreign_toplevel_list!(State);
+smithay::delegate_layer_shell!(State);
+smithay::delegate_fractional_scale!(State);
+smithay::delegate_xdg_decoration!(State);
+smithay::delegate_output!(State);
+delegate_session_lock!(State);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_keyboard_repeat_settings_follow_config_values() {
+        let mut cfg = AxiomConfig::default();
+        cfg.input.keyboard_repeat_delay = 600;
+        cfg.input.keyboard_repeat_rate = 25;
+        assert_eq!(State::keyboard_repeat_settings(&cfg), (600, 25));
+    }
+
+    #[test]
+    fn test_display_title_prefers_explicit_title() {
+        let title = State::display_title(Some("My App".into()), Some("org.example.App".into()));
+        assert_eq!(title, "My App");
+    }
+
+    #[test]
+    fn test_display_title_falls_back_to_app_id() {
+        let title = State::display_title(Some("   ".into()), Some("org.example.App".into()));
+        assert_eq!(title, "org.example.App");
+    }
+
+    #[test]
+    fn test_display_title_falls_back_to_default() {
+        let title = State::display_title(None, None);
+        assert_eq!(title, "Wayland Client");
+    }
+
+    #[test]
+    fn test_backend_prefers_server_side_decorations() {
+        assert!(backend_prefers_server_side_decorations());
+        assert_eq!(
+            negotiated_xdg_decoration_mode(),
+            smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode::ServerSide
+        );
+    }
+
+    #[test]
+    fn test_preferred_text_mime_type_prefers_utf8_plain_text() {
+        let mime = State::preferred_text_mime_type(&[
+            "application/json".to_string(),
+            "text/plain;charset=utf-8".to_string(),
+        ]);
+        assert_eq!(mime.as_deref(), Some("text/plain;charset=utf-8"));
+    }
+}

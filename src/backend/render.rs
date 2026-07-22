@@ -7,6 +7,7 @@
 
 use crate::decoration::{DecorationMode, WindowDecoration};
 use crate::window::Rectangle as WindowRectangle;
+use crate::workspace::scale_to_logical;
 use anyhow::Result;
 use log::{debug, warn};
 use smithay::backend::allocator::Fourcc;
@@ -90,8 +91,8 @@ impl State {
                         .workspace_manager
                         .read()
                         .scale_factor_for_window(*window_id);
-                    let new_w = ((rect.width as f64 / scale).round() as i32).max(1);
-                    let new_h = ((rect.height as f64 / scale).round() as i32).max(1);
+                    let new_w = (scale_to_logical(rect.width as i32, scale).round() as i32).max(1);
+                    let new_h = (scale_to_logical(rect.height as i32, scale).round() as i32).max(1);
 
                     let needs_configure = self
                         .configured_sizes
@@ -144,7 +145,22 @@ impl AxiomSmithayBackendReal {
             // Composite into the bound framebuffer; drop the framebuffer borrow
             // before presenting so `backend.submit` can re-borrow `winit_backend`.
             let (renderer, mut framebuffer) = backend.bind()?;
+
+            // When multi-output is enabled, prepare elements per-output.
+            // Each output renders its region within the shared framebuffer.
+            #[cfg(feature = "multi-output-experimental")]
+            {
+                let outputs = self.state.outputs.clone();
+                for output in &outputs {
+                    let _layouts = prepare_render_elements_for_output(&mut self.state, output);
+                    render_scene_into(&mut self.state, renderer, &mut framebuffer)?;
+                }
+            }
+
+            // Default single-output path — unchanged.
+            #[cfg(not(feature = "multi-output-experimental"))]
             render_scene_into(&mut self.state, renderer, &mut framebuffer)?;
+
             // Capture screencopy after rendering (if a client requested one).
             Self::capture_screencopy(&mut self.state, renderer, &mut framebuffer);
         }
@@ -184,8 +200,26 @@ impl AxiomSmithayBackendReal {
         backend.window().pre_present_notify();
         Ok(())
     }
+}
 
-    /// Read back the current composited frame as RGBA bytes (Winit backend only).
+/// Prepare render elements for a single output.
+///
+/// Returns the window layout for the given output. When multi-output is
+/// enabled, each output's layout is computed independently; when disabled,
+/// the function is a no-op wrapper that returns the single-output layout.
+/// ponytail: per-output layout computation is a forward-looking API hook.
+/// Currently delegates to `prepare_render_scene` which uses the global
+/// viewport. Upgrade to per-output viewport sizing when the workspace
+/// manager supports per-output tapes with distinct viewport sizes.
+#[cfg(feature = "multi-output-experimental")]
+fn prepare_render_elements_for_output(
+    state: &mut State,
+    _output: &smithay::output::Output,
+) -> HashMap<u64, WindowRectangle> {
+    state.prepare_render_scene()
+}
+
+impl AxiomSmithayBackendReal {
     ///
     /// Binds the winit GL context, re-composites the current scene into the
     /// (un-swapped) back buffer, and reads it with `glReadPixels`. Returns

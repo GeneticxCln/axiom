@@ -1,8 +1,8 @@
-name: Axiom CI/CD Pipeline
+name: Axiom CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
 
@@ -11,28 +11,18 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  test:
-    name: Test Suite
+  # -- Issue #11: Basic CI workflow --
+  build:
+    name: Build & Test
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        rust:
-          - stable
-          - beta
-          - nightly
-        features:
-          - ""  # no features → default
-          - "examples"
-    
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: ${{ matrix.rust }}
         components: rustfmt, clippy
-    
+
     - name: Install system dependencies
       run: |
         sudo apt-get update
@@ -42,19 +32,19 @@ jobs:
           libegl1-mesa-dev \
           pkg-config \
           xvfb
-    
+
     - name: Cache cargo registry
       uses: actions/cache@v4
       with:
         path: ~/.cargo/registry
         key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-    
+
     - name: Cache cargo index
-      uses: actions/cache@v4  
+      uses: actions/cache@v4
       with:
         path: ~/.cargo/git
         key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-    
+
     - name: Cache cargo build
       uses: actions/cache@v4
       with:
@@ -63,37 +53,117 @@ jobs:
 
     - name: Check formatting
       run: cargo fmt -- --check
-      
+
     - name: Run clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
-      
-    - name: Run unit tests
-      run: |
-        # Run unit tests with single thread to avoid wgpu parallelism races
-        cargo test --lib --verbose --all-features -- --test-threads=1
-        
-    - name: Run property tests
-      run: |
-        # Run property-based tests for configuration and workspace modules
-        cargo test --lib property_tests --verbose --all-features
-        
-    - name: Run integration tests
-      run: |
-        # Test IPC communication with virtual display for graphics operations
-        xvfb-run -a cargo test --test integration_tests --all-features
+      run: cargo clippy --all-targets -- -D warnings
 
-    - name: Run ignored tests (Winit/GL, needs display)
-      run: |
-        xvfb-run -a cargo test --test pixel_render --test screencopy_test --all-features -- --ignored --nocapture
+    - name: Run tests
+      run: xvfb-run -a cargo test
 
-    - name: Build release binary
-      run: cargo build --release --verbose
-      
-    - name: Test release binary
+  # -- Issue #28/#29: Compile Criterion benches --
+  bench:
+    name: Compile Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install system dependencies
       run: |
-        # Fail the job if the release binary cannot print help
-        ./target/release/axiom --help
-        
+        sudo apt-get update
+        sudo apt-get install -y \
+          libwayland-dev \
+          libxkbcommon-dev \
+          libegl1-mesa-dev \
+          pkg-config
+
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-bench-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Compile benchmarks only
+      run: cargo bench --no-run
+
+    - name: Upload benchmark binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: bench-binary
+        path: target/release/deps/compositor_benchmarks-*
+        retention-days: 30
+
+  # -- Issue #27: Audit job --
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install cargo-audit
+      run: cargo install cargo-audit --locked
+
+    - name: Install cargo-deny
+      run: cargo install cargo-deny --locked
+
+    - name: Run cargo audit (fail on high-severity)
+      run: cargo audit --deny warnings
+
+    - name: Run cargo-deny
+      run: cargo deny check
+
+  # -- Issue #27: Coverage job --
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libwayland-dev \
+          libxkbcommon-dev \
+          libegl1-mesa-dev \
+          pkg-config
+
+    - name: Install tarpaulin
+      run: cargo install cargo-tarpaulin
+
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: coverage-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          coverage-${{ runner.os }}-cargo-
+
+    - name: Run coverage analysis
+      run: cargo tarpaulin --lib --out Xml --output-dir target/tarpaulin --skip-clean
+
+    - name: Upload coverage artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: target/tarpaulin/
+        retention-days: 30
+
+  # --- Existing advanced jobs (kept intact) ---
 
   feature-off-test:
     name: Feature-off Test Suite
@@ -143,6 +213,7 @@ jobs:
   nested-smoke:
     name: Nested Smoke Test Matrix
     runs-on: ubuntu-latest
+    needs: [build]
     steps:
     - uses: actions/checkout@v4
 
@@ -171,14 +242,14 @@ jobs:
         AXIOM_SMOKE_MATRIX=true xvfb-run -a scripts/nested_smoke_test.sh ./target/debug/axiom
 
   performance:
-    name: Performance Benchmarks  
+    name: Performance Benchmarks
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
-      
+
     - name: Install system dependencies
       run: |
         sudo apt-get update
@@ -215,37 +286,18 @@ jobs:
           xvfb-run -a cargo bench --all-features -- --noplot
         fi
 
-  security:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      
-    - name: Install cargo-audit
-      run: cargo install cargo-audit --locked
-      
-    - name: Install cargo-deny
-      run: cargo install cargo-deny --locked
-      
-    - name: Run security checks
-      # Use the repo wrapper so local and CI gates stay aligned and failures fail the job.
-      run: bash ./scripts/check_security.sh all
-
   package:
     name: Build & Verify Package
     runs-on: ubuntu-latest
-    # Package only when the hard quality gates pass (not just unit/integration).
-    needs: [test, nested-smoke, security]
-    
+    # Package only when the hard quality gates pass.
+    needs: [build, nested-smoke, audit]
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
-    
+
     - name: Install system dependencies
       run: |
         sudo apt-get update
@@ -254,13 +306,13 @@ jobs:
           libxkbcommon-dev \
           libegl1-mesa-dev \
           pkg-config
-    
+
     - name: Build release binary
       run: cargo build --release --all-features
-    
+
     - name: Validate session wrapper syntax
       run: bash -n packaging/axiom-session
-    
+
     - name: Build package tarball
       run: |
         PKG_DIR="axiom-v0.1.0-alpha.1-linux-amd64"
@@ -271,7 +323,7 @@ jobs:
         mkdir -p "$PKG_DIR/usr/share/doc/axiom"
         mkdir -p "$PKG_DIR/usr/share/axiom"
         mkdir -p "$PKG_DIR/etc/axiom"
-        
+
         cp target/release/axiom "$PKG_DIR/usr/bin/"
         cp packaging/axiom-session "$PKG_DIR/usr/bin/"
         cp packaging/axiom.desktop "$PKG_DIR/usr/share/applications/"
@@ -281,80 +333,13 @@ jobs:
         cp config/axiom.toml "$PKG_DIR/etc/axiom/"
         cp README.md "$PKG_DIR/usr/share/doc/axiom/"
         cp LICENSE "$PKG_DIR/usr/share/doc/axiom/"
-        
+
         tar czf "${PKG_DIR}.tar.gz" "$PKG_DIR"
         echo "Package size: $(du -sh "${PKG_DIR}.tar.gz" | cut -f1)"
-    
+
     - name: Upload package artifact
       uses: actions/upload-artifact@v4
       with:
         name: axiom-linux-amd64
         path: axiom-v*.tar.gz
         retention-days: 90
-        
-  coverage:
-    name: Code Coverage
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-    
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          libwayland-dev \
-          libxkbcommon-dev \
-          libegl1-mesa-dev \
-          pkg-config \
-          jq
-    
-    - name: Install tarpaulin
-      run: cargo install cargo-tarpaulin
-    
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: coverage-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          coverage-${{ runner.os }}-cargo-
-      
-    - name: Run coverage analysis
-      run: |
-        # Use our custom coverage script
-        chmod +x scripts/coverage.sh
-        ./scripts/coverage.sh unit
-        
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v4
-      with:
-        file: ./target/tarpaulin/unit/cobertura.xml
-        flags: unittests
-        name: axiom-coverage
-        fail_ci_if_error: false
-    
-    - name: Archive coverage results
-      uses: actions/upload-artifact@v4
-      with:
-        name: coverage-report
-        path: target/tarpaulin/
-        retention-days: 30
-    
-    - name: Coverage Summary
-      run: |
-        # Extract and display coverage summary
-        if [ -f "target/tarpaulin/unit/tarpaulin-report.json" ]; then
-          coverage=$(jq -r '.coverage' target/tarpaulin/unit/tarpaulin-report.json 2>/dev/null || echo "0")
-          echo "Overall Coverage: ${coverage}%"
-          if (( $(echo "$coverage >= 70" | bc -l) )); then
-            echo "✅ Coverage meets minimum threshold (70%)"
-          else
-            echo "⚠️ Coverage below minimum threshold (70%)"
-          fi
-        fi

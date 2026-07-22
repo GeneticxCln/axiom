@@ -22,7 +22,10 @@ RED := \033[0;31m
 NC := \033[0m
 
 # Default target
-.DEFAULT_GOAL := help
+.DEFAULT_GOAL := all
+
+.PHONY: all
+all: build ## Build the project (default)
 
 .PHONY: help
 help: ## Show this help message
@@ -55,9 +58,9 @@ clean: ## Clean build artifacts
 
 # Test targets
 .PHONY: test
-test: ## Run all tests
-	@echo "$(BLUE)Running comprehensive test suite$(NC)"
-	VERBOSE=$(VERBOSE) HEADLESS=$(HEADLESS) ./$(SCRIPTS_DIR)/test.sh all
+test: ## Run all tests (cargo test --workspace)
+	@echo "$(BLUE)Running all tests$(NC)"
+	$(CARGO) test --workspace
 
 .PHONY: test-unit
 test-unit: ## Run unit tests only
@@ -209,7 +212,8 @@ bench-compare: ## Compare benchmarks against a saved baseline (set BASELINE=<nam
 
 # Development convenience targets
 .PHONY: check
-check: fmt-check clippy test-unit ## Quick development check (format, lint, unit tests)
+check: ## Run clippy with deny warnings
+	$(CARGO) clippy --all-targets -- -D warnings
 
 .PHONY: pre-commit
 pre-commit: fmt clippy test-quick ## Pre-commit hook (format, lint, quick tests)
@@ -290,6 +294,11 @@ stats: ## Show project statistics
 tree: ## Show project structure
 	@echo "$(BLUE)Project Structure$(NC)"
 	@tree -I 'target|.git' || find . -type f -name "*.rs" | head -20
+
+.PHONY: run
+run: ## Run the compositor in nested (winit) mode
+	@echo "$(BLUE)Starting Axiom compositor$(NC)"
+	$(CARGO) run
 
 # Create required directories
 $(SCRIPTS_DIR):

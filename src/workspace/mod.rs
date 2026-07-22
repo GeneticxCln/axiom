@@ -53,6 +53,33 @@ const IDLE_VELOCITY_DECAY: f64 = 0.9;
 /// Velocity threshold below which idle velocity is zeroed.
 const IDLE_VELOCITY_ZERO_THRESHOLD: f64 = 0.1;
 
+/// Convert a logical (unscaled) value to physical pixels at the given scale.
+/// Rounds to the nearest integer (ties round up).
+///
+/// # Example
+///
+/// ```
+/// use axiom::workspace::scale_to_physical;
+/// assert_eq!(scale_to_physical(100.0, 1.5), 150);
+/// assert_eq!(scale_to_physical(100.0, 1.25), 125);
+/// ```
+pub fn scale_to_physical(value: f64, scale: f64) -> i32 {
+    ((value * scale) + 0.5) as i32
+}
+
+/// Convert a physical pixel value to logical (unscaled) units at the given
+/// scale. The caller should round the result as appropriate.
+///
+/// # Example
+///
+/// ```
+/// use axiom::workspace::scale_to_logical;
+/// assert!((scale_to_logical(150, 1.5) - 100.0).abs() < f64::EPSILON);
+/// ```
+pub fn scale_to_logical(value: i32, scale: f64) -> f64 {
+    value as f64 / scale
+}
+
 /// Represents a workspace column in the scrollable view
 #[derive(Debug, Clone)]
 pub struct WorkspaceColumn {

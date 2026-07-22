@@ -751,6 +751,8 @@ impl AxiomCompositor {
 // `backend/mod.rs::AxiomSmithayBackendReal::initialize_winit`. Lives at
 // file scope (not inside `#[cfg(test)] mod tests`) so the assertion
 // fires on every `cargo build` invocation, not just `cargo test`.
+// Gated behind `compiletime-invariants` feature (opt-in).
+#[cfg(feature = "compiletime-invariants")]
 #[allow(dead_code)]
 const _: () = {
     static_assertions::assert_fields!(

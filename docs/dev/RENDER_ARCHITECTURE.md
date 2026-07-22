@@ -31,6 +31,39 @@ Each frame, `AxiomSmithayBackendReal::render()`:
 `WinitEvent::Resized` updates the workspace viewport and the output mode, so
 live resize works.
 
+### Multi-output render loop (experimental)
+
+When built with `--features multi-output-experimental`, the render loop
+iterates over all outputs in `state.outputs`, calling
+`prepare_render_elements_for_output()` per output to collect scene elements.
+Currently each output renders into the shared winit framebuffer; the
+infrastructure is in place for per-output viewport sizing when the workspace
+manager supports distinct per-output tapes.
+
+Key differences from the single-output path:
+
+- `render()` binds the winit backend once, then loops: for each output →
+  `prepare_render_elements_for_output()` → `render_scene_into()`.
+- `prepare_render_elements_for_output()` delegates to
+  `prepare_render_scene()` (single viewport for now; per-output viewport
+  sizing is the upgrade path).
+- The shared `texture_cache` on `State` is imported once and reused across
+  outputs — no duplicate GPU texture uploads.
+- Screencopy and damage submit are unchanged (single winit window).
+
+## Running with the multi-output feature
+
+```sh
+# Build with the feature
+cargo build --features multi-output-experimental
+
+# Run tests
+cargo test --features multi-output-experimental
+
+# Run only multi-output integration tests
+cargo test --features multi-output-experimental --test multi_output_render
+```
+
 ## Scope boundaries
 
 - **Backend layer** (`src/backend/`): input/events, Wayland protocol, output
