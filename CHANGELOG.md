@@ -1,50 +1,118 @@
 # Changelog
 
-## Unreleased
+## v0.1.0-alpha (2026-07-22)
 
-### Correction — winit-only, GLES rendering
+### Cleanup — over-engineering stripped
 
-The entries below that mention a **WGPU pipeline**, **DRM/KMS**, **XWayland**,
-**seccomp sandbox**, or the **clipboard/render bridges** describe a design that
-has since been **removed**. The compositor is now **winit-only** (Smithay 0.7
-`backend_winit`) with **GLES rendering** via `GlesRenderer` — there is no `wgpu`
-dependency and no DRM backend. The following were deleted:
-
-- `effects/`, `renderer/` (WGPU/WGSL pipeline), `xwayland/`, `xwm.rs`,
+- **Deleted:** `effects/`, `renderer/` (WGPU/WGSL pipeline), `xwayland/`, `xwm.rs`,
   `sandbox.rs`, `src/backend/drm.rs`, `clipboard_bridge.rs`, `render_bridge.rs`
-- `BackendKind::Drm` and all DRM match arms (`initialize_drm`, `run_one_cycle_drm`,
-  hotplug monitor, libseat session)
-- `XWaylandConfig` and the `no_effects` / `backend` CLI flags
-- deps: `libseat`, `drm`, `drm-fourcc`, `gbm`, `input`, `udev`
+- **Deleted:** `BackendKind::Drm` and all DRM match arms, `initialize_drm`,
+  `run_one_cycle_drm`, hotplug monitor, libseat session
+- **Deleted:** `XWaylandConfig`, `EffectsConfig`, `no_effects` / `backend` CLI flags
+- **Removed deps:** `libseat`, `drm`, `drm-fourcc`, `gbm`, `input`, `udev`, `calloop`
+- **Removed:** `placeholder-pipeline` feature and WGSL shader
+- **Fixed:** `decoration_consumed_press` flag inversion in titlebar click handling
+- **Fixed:** IPC-triggered workspace commands not setting `needs_redraw`
+- **Fixed:** `WinitEvent::Redraw` handler now sets `needs_redraw = true`
 
-The config `effects` section is retained as **data only** (IPC `EffectsControl`
-is accepted but is a no-op). The `placeholder-pipeline` Cargo feature and its
-WGSL shader are also gone; windows without a committed buffer simply are not
-drawn.
+### Rendering
 
-### Phase 2: Core feature completion — COMPLETE ✅
+- **GLES rendering through winit backend** — `render()` binds the winit GLES backend,
+  imports each client `wl_buffer` into a `GlesTexture`, draws it via
+  `SolidColorRenderElement` / `TextureRenderElement`, then submits. Real client
+  pixels are shown.
+- **Server-side decorations** rendered via GLES solid-color pipeline with title text
+  (ab_glyph font atlas) when system fonts are available.
+- **Occlusion culling** — front-to-back pre-pass skips surface trees of fully
+  covered windows.
+- **Surface commit counters** — per-surface increment on commit for damage tracking.
 
-#### Phase 2.4: Per-connector incremental modesetting ✅
+### IPC
 
-- **`DrmBackend::apply_hotplug_diff` — per-connector incremental modesetting.** *(Superseded — DRM backend removed; retained here only as historical record of the original design.)*
-- **`compute_output_diff` — pure helper behind the diff math.** Free function in `src/backend/drm.rs` taking `&[String]` existing + `&[String]` new and returning `(Vec<String> added, Vec<String> removed)`. Pure: no hardware, no allocation beyond the two return vectors. Unit-tested in `mod tests` for empty / identical / single-add / single-remove / mixed / replace / idempotent / duplicates / case-sensitive / both-empty cases (10 tests, all clippy-clean).
-- **`find_all_connected_connectors` — CRTC-aware connector scan.** Refactored to take an `in_use_crtcs: &HashSet<crtc::Handle>` argument and skip CRTCs that are already pinned by existing outputs. Picks the first compatible CRTC that is NOT in use, so newly-arrived connectors can never steal a CRTC from an already-displayed monitor. Called from both `KmsState::open` (with an empty set) and `KmsState::scan_new_connectors` (with `allocated_crtc_handles()`).
-- **`KmsState::allocate_one_output` / `destroy_one_output` / `allocated_crtc_handles` / `scan_new_connectors` / `build_kms_output`.** New per-connector modeset primitives. Single source of truth: `build_kms_output` is the helper that knows how to modeset one connector (CPU scanout / GBM / dumb fallback branches), and both `KmsState::open` (initial enumeration) and `allocate_one_output` (incremental hotplug add) call it.
+- **Unix socket JSON IPC** with `LazyUIMessage` protocol (workspace control,
+  clipboard, DnD, health check, performance report).
+- **Non-blocking dispatch** — command-type messages processed in event loop tick,
+  not in the socket handler.
+- **Secure socket permissions** — XDG_RUNTIME_DIR/axiom created with 0o700,
+  socket file 0o600, UID ownership verified on bind.
+- **Peer credential validation** — `validate_peer_credentials_for_test` hook
+  with unit tests.
+- **Oversized-line disconnect** — clients sending lines > 4096 bytes are
+  disconnected.
+- **IPC socket discovery example** (`examples/ipc_discover.rs`) — searches
+  `$XDG_RUNTIME_DIR/axiom/axiom.sock`, `/tmp/axiom-*/axiom-lazy-ui.sock`,
+  supports `AXIOM_SOCKET_PATH` env var.
 
-### Build / Feature gates
+### Drag-and-Drop
 
-- **`placeholder-pipeline` feature removed.** The WGSL placeholder pipeline and
-  its `placeholder.wgsl` shader no longer exist; untextured windows are simply
-  not drawn. The `default = ["placeholder-pipeline"]` feature set is gone.
-  *(See the Correction note at the top of this release.)*
+- **Server-initiated DnD** — `StartDnd { text, mime_type }` IPC message triggers
+  `start_server_dnd` on the backend, which populates clipboard cache and initiates
+  a real DnD grab via Smithay's pointer `start_dnd`.
 
-### CI
+### Backend Refactoring
 
-- **Feature-off integration tests now have a CI lane.** A new `feature-off-test` GitHub Actions job runs `cargo test --no-default-features --test integration_tests --lib` so the `cfg(not(feature = "placeholder-pipeline"))`-gated tests in `tests/integration_tests.rs` (`test_compose_full_frame_skips_untextured_windows`, `test_prepare_window_resources_skips_untextured_window`) actually execute under CI.
+- **`backend/mod.rs` split** into focused submodules:
+  - `state.rs` — `State` struct, all Smithay handler trait impls, delegate macros
+  - `winit.rs` — `AxiomSmithayBackendReal` lifecycle, winit event loop
+  - `render.rs` — GLES render loop, texture cache, occlusion
+  - `input.rs` — input routing
+  - `clipboard.rs` — clipboard helpers
+  - `screencopy.rs` — screencopy capture dispatch
+- **Fractional-scaling helpers** — `scale_to_physical` / `scale_to_logical`
+  centralized in `workspace/mod.rs`, replacing duplicated math in `render.rs`.
 
-### Hardening
+### Multi-Output (Experimental)
 
-- **Phase 1.A4 drop-order invariant** is now backstopped by a `static_assertions::assert_fields!` compile-time check in `compositor::tests::test_phase1_a4_drop_order_symbols_locked`. The macro enforces field *presence* (any rename of `state` / `winit_backend` / `winit_event_loop` triggers a compile error in CI); declaration *order* remains the responsibility of the SAFETY comment in `backend/mod.rs::AxiomSmithayBackendReal::initialize_winit`, documented inline.
+- **`multi-output-experimental` feature flag** — gates all multi-output code.
+- **Per-output render loop** — `render()` iterates outputs, prepares elements
+  per-output, submits per-output frame. Shared texture cache across outputs.
+- **Virtual multiple outputs** in winit test mode (2 outputs: 1920×1080 + 1280×720).
+- **Design doc** at `docs/dev/MULTI_OUTPUT.md`.
+- **4 integration tests** under `--features multi-output-experimental`.
+
+### CI & Quality
+
+- **CI workflow** (`.github/workflows/ci.yml`): `build` job with fmt, clippy
+  (`-D warnings`), `xvfb-run -a cargo test`. Cargo caching.
+- **Coverage job** — `cargo tarpaulin` with artifact upload.
+- **Audit job** — `cargo audit --deny warnings` + `cargo-deny`.
+- **Bench compile job** — `cargo bench --no-run` with artifact upload.
+- **Release workflow** (`.github/workflows/release.yml`) — `workflow_dispatch`,
+  full test suite, release build, audit, artifact upload.
+- **`compiletime-invariants` feature** — gates `static_assertions` dependency.
+
+### Testing
+
+- **149 lib tests** + 20 integration tests + 4 e2e tests + 11 viewport/scale tests
+  + 5 LRU cache tests + 4 multi-output tests — all passing.
+- **IPC hardening tests** — 7 new tests for socket permissions, peer credential
+  validation, full accept path.
+- **LRU cache eviction tests** — 5 tests for insert/retrieve/eviction/overwrite/LRU
+  promotion at 256-entry capacity.
+- **Viewport resize & fractional scaling tests** — 11 tests covering 1080p/1440p/4K,
+  scales 1.0/1.25/1.5/2.0, round-trip, layout cache invalidation.
+- **Wayland-client e2e tests** — 4 tests for toplevel, clipboard, fullscreen, minimize.
+- **Multi-output integration tests** — 4 tests under feature flag.
+
+### Packaging
+
+- **Systemd user unit** (`packaging/systemd/axiom.service`) — `Type=notify`,
+  `graphical-session.target`, restart on failure.
+- **Debian control file** skeleton (`packaging/debian/control`).
+- **Flatpak manifest** skeleton (`packaging/flatpak/manifest.json`).
+- **Desktop entries** — `axiom.desktop`, `axiom-wayland.desktop`, session wrapper.
+- **Arch Linux PKGBUILD** directory.
+- **Packaging README** with install instructions.
+
+### Documentation
+
+- **`ARCHITECTURE.md`** — system architecture overview.
+- **`RELEASE.md`** — release process and checklist.
+- **`CONTRIBUTING.md`** — build/test instructions, PR workflow, code style.
+- **`docs/dev/MULTI_OUTPUT.md`** — multi-output design doc.
+- **`docs/dev/PROFILE.md`** — render profiling with perf/flamegraph.
+- **`docs/dev/RENDER_ARCHITECTURE.md`** — updated with multi-output notes.
+- **`scripts/profile_render.sh`** — perf/flamegraph capture script.
 
 ## v0.1.0-alpha.2 (2026-07-19)
 
