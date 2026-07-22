@@ -183,33 +183,6 @@ fn bench_concurrency(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark input processing latency
-fn bench_input_processing(c: &mut Criterion) {
-    let mut group = c.benchmark_group("input_processing");
-
-    group.bench_function("scroll_event_processing", |b| {
-        use axiom::config::{BindingsConfig, InputConfig};
-        use axiom::input::{InputEvent, InputManager};
-
-        let input_config = InputConfig::default();
-        let bindings_config = BindingsConfig::default();
-        let mut input_manager = InputManager::new(&input_config, &bindings_config);
-
-        b.iter(|| {
-            let event = InputEvent::Scroll {
-                x: 100.0,
-                y: 100.0,
-                delta_x: 50.0,
-                delta_y: 0.0,
-            };
-
-            black_box(input_manager.process_input_event(event));
-        });
-    });
-
-    group.finish();
-}
-
 criterion_group!(
     benches,
     bench_workspace_scrolling,
@@ -217,7 +190,6 @@ criterion_group!(
     bench_configuration,
     bench_memory_operations,
     bench_concurrency,
-    bench_input_processing
 );
 
 criterion_main!(benches);

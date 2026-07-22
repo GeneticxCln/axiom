@@ -10,7 +10,6 @@ depends=(
     'wayland'
     'libxkbcommon'
     'mesa'
-    'systemd-libs'
 )
 makedepends=(
     'rust'

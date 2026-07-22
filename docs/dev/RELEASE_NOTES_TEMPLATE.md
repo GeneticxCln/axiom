@@ -36,10 +36,6 @@ xvfb-run -a bash ./scripts/nested_smoke_test.sh ./target/debug/axiom
 - TODO
 - TODO
 
-### XWayland / compatibility
-- TODO
-- TODO
-
 ### Packaging / release / CI
 - TODO
 - TODO
@@ -56,7 +52,6 @@ Mention the checks that were run for this release.
 - `xvfb-run -a bash ./scripts/nested_smoke_test.sh ./target/debug/axiom`
 - `bash ./scripts/benchmark.sh run`
 - `bash ./scripts/memory_profile.sh valgrind-tests`
-- `bash ./scripts/check_xwayland.sh all`
 - `bash ./scripts/check_security.sh all`
 - `bash ./scripts/build_arch_package.sh run`
 
@@ -66,10 +61,9 @@ Adjust the list honestly if some checks were skipped or not applicable.
 
 Call out the current limitations explicitly.
 
-- The standalone DRM/KMS path is still an early/in-progress target.
+- The compositor is winit-only (nested mode); standalone DRM/KMS is not available.
 - Visible server-side decorations are not fully integrated into the live output path; current live policy remains **CSD-first**.
-- XWayland support is improving, but broader application compatibility still needs more validation.
-- The nested render path still uses a transitional WGPU -> CPU -> GL presentation bridge.
+- Rendering uses direct GLES through the winit window. WGPU and presentation bridges have been removed.
 
 Reference:
 - `docs/user/LIMITATIONS.md`

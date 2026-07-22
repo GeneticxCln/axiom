@@ -28,10 +28,8 @@ Axiom is an **alpha-stage compositor prototype**. Please prefer small, reviewabl
 ## Project structure
 
 - `src/compositor.rs` — top-level orchestration and tick loop
-- `src/backend/` — Smithay backend orchestration, DRM/KMS, presentation-bridge helpers, XWayland glue
+- `src/backend/` — Smithay backend orchestration (winit + GLES), input/event handling, clipboard, and render path.
 - `src/workspace/` — scrollable workspace logic
-- `src/renderer/` — WGPU compositor and presentation helpers
-- `src/effects/` — animation and visual effect state
 - `src/window/` — window registry/state
 - `src/ipc/` — Unix-socket IPC protocol/server
 - `src/config/` — TOML config model and validation

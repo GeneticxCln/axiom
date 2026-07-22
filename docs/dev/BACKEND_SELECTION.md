@@ -1,8 +1,9 @@
 # Backend Selection
 
 Axiom has a **single runtime backend: winit** (nested/windowed). The
-standalone DRM/KMS backend, the Noop/test backend, and the libinput path were
-removed during the cleanup that stripped over-engineering. There is no
+standalone DRM/KMS backend and the libinput path were
+removed during the cleanup that stripped over-engineering. The Noop/test
+backend was retained for headless/CI testing. There is no
 `--backend` flag and no `BackendKind::Drm` — `backend.kind` in the config
 defaults to `"winit"` and is the only accepted value.
 
@@ -32,8 +33,7 @@ These were deleted and no longer exist in the codebase:
 - **DRM/KMS backend** (`--backend=drm`): device probing, KMS output
   enumeration, libinput setup, udev hotplug, and dumb-buffer scanout were all
   removed. There is no standalone/session compositor path.
-- **Noop backend** (`--backend=noop`): the headless/test mode was removed.
-  Integration tests now exercise the winit path under `xvfb-run`.
+- **Noop backend** (`--backend=noop`): retained for headless/CI testing.
 
 ## Feature flags and protocol notes
 

@@ -42,7 +42,7 @@ struct Cli {
     #[arg(short, long)]
     debug: bool,
 
-    /// Run in nested/windowed mode (recommended alpha target)
+    /// Present in a window (always true; retained for compatibility)
     #[arg(short, long)]
     windowed: bool,
 }

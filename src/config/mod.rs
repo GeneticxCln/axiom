@@ -261,6 +261,9 @@ pub struct BindingsConfig {
     /// Quit compositor
     pub quit: String,
 
+    /// Switch focus to next output
+    pub focus_next_output: String,
+
     /// ── Mouse button bindings ─────────────────────────────────────────
     /// Each field holds an action name (see `CompositorAction` variants):
     ///   "scroll_left", "scroll_right", "close_window",
@@ -374,6 +377,7 @@ impl Default for BindingsConfig {
             launch_terminal: "Super+Return".to_string(),
             launch_launcher: "Super+Space".to_string(),
             quit: "Super+Shift+q".to_string(),
+            focus_next_output: "Super+Tab".to_string(),
             mouse_back: Self::default_mouse_back(),
             mouse_forward: Self::default_mouse_forward(),
             mouse_middle: Self::default_mouse_middle(),

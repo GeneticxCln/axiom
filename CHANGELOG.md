@@ -15,7 +15,7 @@ dependency and no DRM backend. The following were deleted:
 - `BackendKind::Drm` and all DRM match arms (`initialize_drm`, `run_one_cycle_drm`,
   hotplug monitor, libseat session)
 - `XWaylandConfig` and the `no_effects` / `backend` CLI flags
-- deps: `libseat`, `calloop`, `drm`, `drm-fourcc`, `gbm`, `input`, `udev`
+- deps: `libseat`, `drm`, `drm-fourcc`, `gbm`, `input`, `udev`
 
 The config `effects` section is retained as **data only** (IPC `EffectsControl`
 is accepted but is a no-op). The `placeholder-pipeline` Cargo feature and its

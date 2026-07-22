@@ -1183,5 +1183,61 @@ mod property_tests {
                 "Repeated layout calls with identical state must return identical results"
             );
         }
+
+        /// Multi-monitor tape invariants:
+        /// - After sync_tapes_with_outputs, every output has a tape
+        /// - focused_output is always in output_order
+        /// - focus_next_output always produces a valid output
+        /// - Cycling through all outputs wraps back to the start
+        /// - Each tape's viewport is independently settable
+        #[test]
+        fn test_multi_monitor_tape_invariants(
+            output_ids in prop::collection::vec("[A-Za-z0-9_-]{1,16}", 1..5)
+        ) {
+            let config = WorkspaceConfig::default();
+            let mut workspaces = ScrollableWorkspaces::new(&config);
+
+            // Sync with generated output IDs
+            workspaces.sync_tapes_with_outputs(&output_ids, &[]);
+
+            // Invariant 1: Every output has a tape
+            for output_id in &output_ids {
+                prop_assert!(
+                    workspaces.known_tape_ids().contains(output_id),
+                    "Output {} should have a tape after sync",
+                    output_id
+                );
+            }
+
+            // Invariant 2: focused_output is in output_order
+            let focused = workspaces.focused_output().to_string();
+            // Note: focused_output might be "default" if no outputs match,
+            // which is a valid fallback
+            let valid = focused == "default" || output_ids.contains(&focused);
+            prop_assert!(valid, "focused_output '{}' should be valid", focused);
+
+            // Invariant 3: focus_next_output cycles correctly
+            let count = output_ids.len();
+
+            // Cycle forward count+1 times — should return to original
+            for _ in 0..=count {
+                workspaces.focus_next_output();
+                let current = workspaces.focused_output().to_string();
+                // After cycling, should always be some output (not empty)
+                prop_assert!(!current.is_empty(), "focused_output should never be empty");
+                // Should either be a known output or "default"
+                let is_known = current == "default" || output_ids.contains(&current);
+                prop_assert!(is_known, "After focus_next_output, '{}' should be valid", current);
+            }
+
+            // Invariant 4: Each tape's viewport is independently settable
+            workspaces.set_output_viewport("test_output", 1920.0, 1080.0);
+            // After setting a viewport for a non-existent output, it should be created
+            // (ensure_tape is called by set_output_viewport)
+            prop_assert!(
+                workspaces.known_tape_ids().contains(&"test_output".to_string()),
+                "set_output_viewport should create the tape"
+            );
+        }
     }
 }

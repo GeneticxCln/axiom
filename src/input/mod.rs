@@ -31,20 +31,6 @@ pub enum InputEvent {
         delta_x: f64,
         delta_y: f64,
     },
-    /// Scroll wheel/trackpad scrolling
-    Scroll {
-        x: f64,
-        y: f64,
-        delta_x: f64,
-        delta_y: f64,
-    },
-    /// Touch/gesture events
-    Gesture {
-        gesture_type: GestureType,
-        delta_x: f64,
-        delta_y: f64,
-        velocity: f64,
-    },
 }
 
 /// Mouse button identifiers
@@ -54,14 +40,6 @@ pub enum MouseButton {
     Right,
     Middle,
     Other(u8),
-}
-
-/// Touch gesture types
-#[derive(Debug, Clone, PartialEq)]
-pub enum GestureType {
-    Swipe,
-    Pinch,
-    Pan,
 }
 
 /// Represents compositor actions that can be triggered by input
@@ -90,6 +68,8 @@ pub enum CompositorAction {
     LaunchTerminal,
     LaunchLauncher,
     Quit,
+    /// Switch focus to the next output (multi-monitor)
+    FocusNextOutput,
 }
 
 /// Processes input events and maps them to compositor actions
@@ -158,6 +138,10 @@ impl InputManager {
             bindings_config.launch_launcher.clone(),
             CompositorAction::LaunchLauncher,
         );
+        key_bindings.insert(
+            bindings_config.focus_next_output.clone(),
+            CompositorAction::FocusNextOutput,
+        );
 
         // Mouse button bindings: driven by config (not hardcoded).
         // Button codes follow Linux input event codes (0x110 = BTN_LEFT, etc.)
@@ -221,18 +205,6 @@ impl InputManager {
                 self.mouse_position = (x, y);
                 Vec::new() // No actions for simple mouse movement
             }
-            InputEvent::Scroll {
-                x,
-                y,
-                delta_x,
-                delta_y,
-            } => self.process_scroll_event(x, y, delta_x, delta_y),
-            InputEvent::Gesture {
-                gesture_type,
-                delta_x,
-                delta_y,
-                velocity,
-            } => self.process_gesture_event(gesture_type, delta_x, delta_y, velocity),
         }
     }
 
@@ -301,75 +273,6 @@ impl InputManager {
             if let Some(action) = self.mouse_bindings.get(&button_code) {
                 info!("🚀 Mouse button triggered action: {:?}", action);
                 return vec![action.clone()];
-            }
-        }
-
-        Vec::new()
-    }
-
-    /// Process scroll events (trackpad/mouse wheel)
-    fn process_scroll_event(
-        &mut self,
-        _x: f64,
-        _y: f64,
-        delta_x: f64,
-        delta_y: f64,
-    ) -> Vec<CompositorAction> {
-        // Horizontal scrolling for workspace navigation
-        if delta_x.abs() > delta_y.abs() && delta_x.abs() > 5.0 {
-            debug!("📜 Horizontal scroll: {:.1}", delta_x);
-
-            if delta_x > 0.0 {
-                return vec![CompositorAction::ScrollWorkspaceRight];
-            }
-            return vec![CompositorAction::ScrollWorkspaceLeft];
-        }
-
-        Vec::new()
-    }
-
-    /// Process gesture events (touchpad gestures)
-    fn process_gesture_event(
-        &mut self,
-        gesture_type: GestureType,
-        delta_x: f64,
-        delta_y: f64,
-        velocity: f64,
-    ) -> Vec<CompositorAction> {
-        match gesture_type {
-            GestureType::Swipe => {
-                debug!(
-                    "👋 Swipe gesture: delta=({:.1}, {:.1}), velocity={:.1}",
-                    delta_x, delta_y, velocity
-                );
-
-                // Horizontal swipes for workspace navigation
-                if delta_x.abs() > 20.0 {
-                    if delta_x > 0.0 {
-                        return vec![CompositorAction::ScrollWorkspaceRight];
-                    }
-                    return vec![CompositorAction::ScrollWorkspaceLeft];
-                }
-            }
-            GestureType::Pan => {
-                // Smooth scrolling with pan gestures
-                debug!("🤏 Pan gesture: ({:.1}, {:.1})", delta_x, delta_y);
-
-                // Horizontal pan for workspace navigation
-                if delta_x.abs() > 10.0 {
-                    if delta_x > 0.0 {
-                        return vec![CompositorAction::ScrollWorkspaceRight];
-                    }
-                    return vec![CompositorAction::ScrollWorkspaceLeft];
-                }
-            }
-            GestureType::Pinch => {
-                // Workspace overview with pinch gesture
-                debug!("🤏 Pinch gesture: velocity={:.1}", velocity);
-
-                // Pinch-in (negative velocity) could trigger workspace overview
-                // Pinch-out (positive zoom) could reset view
-                // For now, log the gesture for future implementation
             }
         }
 
@@ -474,47 +377,6 @@ mod tests {
         let actions = manager.simulate_key_press(&bindings_cfg.toggle_minimize);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], CompositorAction::ToggleMinimize);
-    }
-
-    #[test]
-    fn test_scroll_navigation() {
-        let (input_cfg, bindings_cfg) = make_configs();
-        let mut manager = InputManager::new(&input_cfg, &bindings_cfg);
-
-        // Large scroll right should trigger workspace scroll right
-        let actions = manager.process_input_event(InputEvent::Scroll {
-            x: 100.0,
-            y: 100.0,
-            delta_x: 20.0,
-            delta_y: 0.0,
-        });
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0], CompositorAction::ScrollWorkspaceRight);
-
-        // Large scroll left should trigger workspace scroll left
-        let actions = manager.process_input_event(InputEvent::Scroll {
-            x: 100.0,
-            y: 100.0,
-            delta_x: -20.0,
-            delta_y: 0.0,
-        });
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0], CompositorAction::ScrollWorkspaceLeft);
-    }
-
-    #[test]
-    fn test_scroll_no_action_small() {
-        let (input_cfg, bindings_cfg) = make_configs();
-        let mut manager = InputManager::new(&input_cfg, &bindings_cfg);
-
-        // Small scroll should not trigger any action
-        let actions = manager.process_input_event(InputEvent::Scroll {
-            x: 100.0,
-            y: 100.0,
-            delta_x: 2.0,
-            delta_y: 0.0,
-        });
-        assert!(actions.is_empty());
     }
 
     #[test]

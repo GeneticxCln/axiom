@@ -81,7 +81,11 @@ jobs:
       run: |
         # Test IPC communication with virtual display for graphics operations
         xvfb-run -a cargo test --test integration_tests --all-features
-        
+
+    - name: Run ignored tests (Winit/GL, needs display)
+      run: |
+        xvfb-run -a cargo test --test pixel_render --test screencopy_test --all-features -- --ignored --nocapture
+
     - name: Build release binary
       run: cargo build --release --verbose
       

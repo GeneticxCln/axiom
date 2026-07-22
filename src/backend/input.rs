@@ -1023,11 +1023,7 @@ impl AxiomSmithayBackendReal {
                 CompositorAction::ToggleFullscreen => {
                     let focused_id = self.state.window_manager.read().focused_window_id();
                     if let Some(window_id) = focused_id {
-                        self.state
-                            .window_manager
-                            .write()
-                            .toggle_fullscreen(window_id);
-                        self.state.needs_redraw = true;
+                        self.state.toggle_fullscreen_window(window_id);
                     }
                 }
                 CompositorAction::MoveWindowLeft => {
@@ -1096,6 +1092,11 @@ impl AxiomSmithayBackendReal {
                         .spawn()
                         .map(|_| debug!("🚀 Launched launcher: {}", cmd))
                         .map_err(|e| warn!("Failed to launch launcher '{}': {}", cmd, e));
+                }
+                CompositorAction::FocusNextOutput => {
+                    self.state.workspace_manager.write().focus_next_output();
+                    self.state.needs_redraw = true;
+                    info!("📺 Input: Focus next output");
                 }
             }
         }

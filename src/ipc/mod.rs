@@ -57,6 +57,14 @@ const MAX_SCROLL_SPEED: f64 = 100.0;
 /// Maximum size of a single line from an IPC client (64 KiB).
 const MAX_IPC_LINE_BYTES: usize = 64 * 1024;
 
+/// Maximum IPC messages a single client can send per tick.
+/// Prevents a misbehaving client from flooding the compositor.
+const MAX_MESSAGES_PER_TICK: u32 = 64;
+
+/// Maximum accumulated write buffer size per client before disconnect.
+/// Prevents a slow-reading client from causing unbounded memory growth.
+const MAX_WRITE_BUF_BYTES: usize = 1_048_576; // 1 MiB
+
 /// Live compositor metrics surfaced through `GetPerformanceReport` and
 /// `HealthCheck`. Pushed from the compositor's tick loop into a shared
 /// handle that the per-client IPC handlers read on demand.
@@ -216,6 +224,9 @@ struct ClientData {
     write_buf: Vec<u8>,
     /// Time of last activity (for idle timeout)
     last_activity: Instant,
+    /// Messages read from this client during the current tick.
+    /// Reset each tick to enforce a per-tick rate limit.
+    messages_this_tick: u32,
 }
 
 /// IPC server for handling communication with Lazy UI
@@ -498,6 +509,7 @@ impl AxiomIPCServer {
                             read_buf: Vec::with_capacity(4096),
                             write_buf: Vec::new(),
                             last_activity: Instant::now(),
+                            messages_this_tick: 0,
                         },
                     );
                 }
@@ -513,10 +525,22 @@ impl AxiomIPCServer {
     }
 
     fn read_from_clients(&mut self) {
+        // Reset per-tick message counters for rate limiting
+        for client in self.clients.values_mut() {
+            client.messages_this_tick = 0;
+        }
+
         let client_fds: Vec<RawFd> = self.clients.keys().copied().collect();
         let mut disconnected: Vec<RawFd> = Vec::new();
 
         for &fd in &client_fds {
+            // Rate limit: skip this client if it's sent too many messages this tick
+            if let Some(client) = self.clients.get(&fd) {
+                if client.messages_this_tick >= MAX_MESSAGES_PER_TICK {
+                    continue;
+                }
+            }
+
             // Read available data into a local buffer; we re-borrow clients
             // each iteration so the borrow is never held across method calls.
             let mut buf = [0u8; 4096];
@@ -592,6 +616,11 @@ impl AxiomIPCServer {
 
         // Process extracted lines (borrow released, so we can call handle_message)
         for trimmed in lines {
+            // Count each line as a message for rate limiting
+            if let Some(client) = self.clients.get_mut(&fd) {
+                client.messages_this_tick += 1;
+            }
+
             debug!("📨 Received IPC message: {}", trimmed);
             match serde_json::from_str::<LazyUIMessage>(&trimmed) {
                 Ok(message) => {
@@ -852,6 +881,16 @@ impl AxiomIPCServer {
                             break;
                         }
                     }
+                }
+
+                // Backpressure: disconnect clients whose write buffer exceeds the limit
+                // (indicates the client is reading too slowly).
+                if client.write_buf.len() > MAX_WRITE_BUF_BYTES {
+                    warn!(
+                        "IPC client {} write buffer exceeded {} bytes — disconnecting",
+                        fd, MAX_WRITE_BUF_BYTES
+                    );
+                    flushed.push(fd);
                 }
             }
         }

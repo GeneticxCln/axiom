@@ -87,6 +87,7 @@ launch_terminal = 'Super+Return'
 launch_launcher = 'Super+D'
 toggle_minimize = 'Super+M'
 quit = 'Super+Escape'
+focus_next_output = 'Super+Tab'
 
 [effects]
 scrolling_animation_duration = 300

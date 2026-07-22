@@ -104,6 +104,7 @@ prop_compose! {
             toggle_minimize: "Super+grave".to_string(),
             launch_terminal: "Super+Enter".to_string(),
             launch_launcher: "Super+Space".to_string(),
+            focus_next_output: "Super+Tab".to_string(),
             quit,
             mouse_back: BindingsConfig::default_mouse_back(),
             mouse_forward: BindingsConfig::default_mouse_forward(),

@@ -607,8 +607,7 @@ impl AxiomCompositor {
 
     /// Toggle fullscreen on a window.
     pub fn toggle_fullscreen(&mut self, window_id: u64) {
-        self.window_manager.write().toggle_fullscreen(window_id);
-        self.smithay_backend.state.needs_redraw = true;
+        self.smithay_backend.state.toggle_fullscreen_window(window_id);
         info!("Toggled fullscreen for window {}", window_id);
         self.ipc_server.broadcast_state_change(
             "window",

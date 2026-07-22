@@ -287,12 +287,11 @@ pub struct State {
     pub pointer_x: f64,
     pub pointer_y: f64,
 
-    // Imported client buffer textures, keyed by the WlBuffer's ObjectId so a
-    // client's pool of buffers (e.g. double-buffering) is uploaded to the GPU
-    // exactly once and reused across frames. Evicted on buffer_destroyed.
-    // ponytail: keying by buffer identity means transient buffers can linger
-    // until destroy; fine for a compositor, add LRU eviction only if it grows.
-    pub texture_cache: HashMap<ObjectId, TextureBuffer<GlesTexture>>,
+    /// Imported client buffer textures, keyed by the WlBuffer's ObjectId so a
+    /// client's pool of buffers (e.g. double-buffering) is uploaded to the GPU
+    /// exactly once and reused across frames. Evicted on buffer_destroyed or
+    /// LRU order when the cache reaches capacity.
+    pub texture_cache: lru::LruCache<ObjectId, TextureBuffer<GlesTexture>>,
 
     /// Tracks whether we've sent the initial configure for a surface.
     /// Used to throttle redundant configure events when layout hasn't changed.
@@ -595,6 +594,47 @@ impl State {
             .unwrap_or(1.0)
     }
 
+    /// Toggle fullscreen for a window and notify the client via protocol.
+    pub fn toggle_fullscreen_window(&mut self, window_id: u64) {
+        let is_fullscreen = {
+            let mut wm = self.window_manager.write();
+            wm.toggle_fullscreen(window_id);
+            wm.get_window(window_id)
+                .map(|w| w.properties.fullscreen)
+                .unwrap_or(false)
+        };
+
+        if let Some(&surface_id) = self.window_map.get(&window_id) {
+            if let Some(toplevel) = self.toplevels.get(&surface_id) {
+                let scale = self.focused_output_scale();
+                toplevel.with_pending_state(|state| {
+                    if is_fullscreen {
+                        state.states.set(xdg_toplevel::State::Fullscreen);
+                        let logical_w = ((self.window_width as f64 / scale).round() as i32).max(1);
+                        let logical_h = ((self.window_height as f64 / scale).round() as i32).max(1);
+                        state.size = Some((logical_w, logical_h).into());
+                    } else {
+                        state.states.unset(xdg_toplevel::State::Fullscreen);
+                        // Don't set size — the next prepare_render_scene cycle
+                        // will assign a tiled size and send another configure.
+                        state.size = None;
+                    }
+                });
+                toplevel.send_configure();
+                // Track configured size for exit case (unset)
+                if !is_fullscreen {
+                    self.configured_sizes.remove(&surface_id);
+                } else {
+                    let logical_w = ((self.window_width as f64 / scale).round() as i32).max(1);
+                    let logical_h = ((self.window_height as f64 / scale).round() as i32).max(1);
+                    self.configured_sizes.insert(surface_id, (logical_w, logical_h));
+                }
+                self.pending_configure.insert(surface_id);
+            }
+        }
+        self.needs_redraw = true;
+    }
+
     /// Prune surfaces and toplevels whose WlSurface is no longer alive
     /// (e.g. the Wayland client disconnected). Returns count of cleaned entries.
     pub fn prune_dead_surfaces(&mut self) -> usize {
@@ -626,21 +666,6 @@ impl State {
 /// ponytail: simple eldest-first eviction via HashMap iteration, not
 /// true LRU. Upgrade to clock-sweep or linked-hash-map if profiling
 /// shows insertion-time eviction is a bottleneck.
-fn insert_texture_cache(
-    cache: &mut HashMap<ObjectId, TextureBuffer<GlesTexture>>,
-    key: ObjectId,
-    value: TextureBuffer<GlesTexture>,
-) {
-    const MAX_TEXTURE_CACHE: usize = 256;
-    if cache.len() >= MAX_TEXTURE_CACHE {
-        let evict: Vec<ObjectId> = cache.keys().take(32).cloned().collect();
-        for k in &evict {
-            cache.remove(k);
-        }
-    }
-    cache.insert(key, value);
-}
-
 // ============================================================================
 // Handler Trait Implementations
 // ============================================================================
@@ -650,7 +675,7 @@ impl BufferHandler for State {
         // Free the GPU texture we cached for this buffer (keyed by ObjectId).
         // Without this the GlesTexture (Arc<GlesTextureInternal>) keeps the GL
         // texture alive forever, leaking it when clients cycle through buffers.
-        self.texture_cache.remove(&buffer.id());
+        self.texture_cache.pop_entry(&buffer.id());
     }
 }
 
@@ -799,6 +824,23 @@ impl XdgShellHandler for State {
         self.create_window_from_surface(surface_id, display_title, app_id, wl_surface.clone());
         self.update_surface_fractional_scale(&wl_surface);
         self.needs_redraw = true;
+    }
+
+    fn fullscreen_request(&mut self, toplevel: ToplevelSurface, _output: Option<WlOutput>) {
+        let surface_id = toplevel.wl_surface().id().protocol_id();
+        if let Some(window_id) = self
+            .surfaces
+            .get(&surface_id)
+            .and_then(|s| s.window_id)
+        {
+            self.toggle_fullscreen_window(window_id);
+        } else {
+            // Window not tracked yet — just acknowledge the request
+            toplevel.with_pending_state(|state| {
+                state.states.set(xdg_toplevel::State::Fullscreen);
+            });
+            toplevel.send_configure();
+        }
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
@@ -1417,7 +1459,7 @@ impl AxiomSmithayBackendReal {
             window_height: 1080,
             pointer_x: 0.0,
             pointer_y: 0.0,
-            texture_cache: HashMap::new(),
+            texture_cache: lru::LruCache::new(std::num::NonZeroUsize::new(256).unwrap()),
             configured_sizes: HashMap::new(),
             pending_configure: HashSet::new(),
             popups: HashMap::new(),
@@ -1550,7 +1592,7 @@ impl AxiomSmithayBackendReal {
             window_height: 1080,
             pointer_x: 0.0,
             pointer_y: 0.0,
-            texture_cache: HashMap::new(),
+            texture_cache: lru::LruCache::new(std::num::NonZeroUsize::new(256).unwrap()),
             configured_sizes: HashMap::new(),
             pending_configure: HashSet::new(),
             popups: HashMap::new(),
@@ -1713,9 +1755,19 @@ impl AxiomSmithayBackendReal {
             let host_scale = host_scale.clamp(1.0, 4.0);
             {
                 let mut wm = self.state.workspace_manager.write();
-                let tape = wm.ensure_tape("default");
-                tape.set_scale_factor(host_scale);
-                tape.set_viewport_size(w as f64, h as f64);
+                // Update all existing tapes to the new output size
+                let tape_ids: Vec<String> = wm.known_tape_ids();
+                if tape_ids.is_empty() {
+                    let tape = wm.ensure_tape("default");
+                    tape.set_scale_factor(host_scale);
+                    tape.set_viewport_size(w as f64, h as f64);
+                } else {
+                    for tape_id in &tape_ids {
+                        let tape = wm.ensure_tape(tape_id);
+                        tape.set_scale_factor(host_scale);
+                        tape.set_viewport_size(w as f64, h as f64);
+                    }
+                }
             }
             if let Some(output) = self.state.outputs.first().cloned() {
                 output.change_current_state(
@@ -1728,10 +1780,13 @@ impl AxiomSmithayBackendReal {
                     None,
                 );
             }
-            // Track the output's scale for `focused_output_scale`.
-            self.state
-                .output_scale_factors
-                .insert("Axiom-Output-0".into(), host_scale);
+            // Track the output scale for all known outputs
+            let tape_ids: Vec<String> = self.state.workspace_manager.read().known_tape_ids();
+            for tape_id in &tape_ids {
+                self.state
+                    .output_scale_factors
+                    .insert(tape_id.clone(), host_scale);
+            }
             self.state.needs_redraw = true;
         }
 

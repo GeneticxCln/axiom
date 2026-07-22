@@ -118,46 +118,6 @@ fn test_workspace_logic() -> Result<()> {
     Ok(())
 }
 
-/// Test input event processing
-#[test]
-fn test_input_processing() -> Result<()> {
-    use axiom::config::{BindingsConfig, InputConfig};
-    use axiom::input::{CompositorAction, InputEvent, InputManager};
-
-    let input_config = InputConfig::default();
-    let bindings_config = BindingsConfig::default();
-
-    let mut input_manager = InputManager::new(&input_config, &bindings_config);
-
-    // Test scroll event processing
-    let scroll_event = InputEvent::Scroll {
-        x: 100.0,
-        y: 100.0,
-        delta_x: 50.0,
-        delta_y: 0.0,
-    };
-
-    let actions = input_manager.process_input_event(scroll_event);
-
-    // Should generate workspace scroll actions
-    assert!(!actions.is_empty());
-
-    // Verify we get expected action types
-    for action in &actions {
-        match action {
-            CompositorAction::ScrollWorkspaceLeft | CompositorAction::ScrollWorkspaceRight => {
-                // Expected actions
-            }
-            _ => {
-                // Other actions might be present too
-            }
-        }
-    }
-
-    input_manager.shutdown();
-    Ok(())
-}
-
 /// Test concurrent operations
 #[test]
 fn test_concurrent_operations() -> Result<()> {

@@ -39,14 +39,41 @@ impl State {
     /// Calculate workspace layouts, synchronize window geometry, and notify
     /// Wayland clients of size changes. Shared by nested and DRM render paths.
     fn prepare_render_scene(&mut self) -> HashMap<u64, WindowRectangle> {
-        let layouts = self.workspace_manager.read().calculate_workspace_layouts();
+        let mut layouts = self.workspace_manager.read().calculate_workspace_layouts();
+
+        // Fullscreen windows fill the entire output viewport
+        let fullscreen_ids: Vec<u64> = {
+            let wm = self.window_manager.read();
+            layouts
+                .keys()
+                .filter(|&id| {
+                    wm.get_window(*id)
+                        .map(|w| w.properties.fullscreen)
+                        .unwrap_or(false)
+                })
+                .copied()
+                .collect()
+        };
+        for &window_id in &fullscreen_ids {
+            layouts.insert(
+                window_id,
+                WindowRectangle {
+                    x: 0,
+                    y: 0,
+                    width: self.window_width,
+                    height: self.window_height,
+                },
+            );
+        }
 
         {
             let mut wm = self.window_manager.write();
             for (window_id, layout_rect) in &layouts {
                 if let Some(window) = wm.get_window_mut(*window_id) {
                     if !window.properties.floating {
-                        window.window.set_position(layout_rect.x, layout_rect.y);
+                        if !window.properties.fullscreen {
+                            window.window.set_position(layout_rect.x, layout_rect.y);
+                        }
                         window
                             .window
                             .set_size(layout_rect.width, layout_rect.height);
@@ -270,7 +297,7 @@ fn import_surface_tree(state: &mut State, renderer: &mut GlesRenderer, surface: 
             Some(BufferAssignment::NewBuffer(ref b)) => Some(b.clone()),
             Some(BufferAssignment::Removed) => {
                 let bid = surface.id();
-                state.texture_cache.remove(&bid);
+                state.texture_cache.pop_entry(&bid);
                 None
             }
             _ => None,
@@ -278,12 +305,12 @@ fn import_surface_tree(state: &mut State, renderer: &mut GlesRenderer, surface: 
     });
     if let Some(ref buf) = buf {
         let bid = buf.id();
-        if !state.texture_cache.contains_key(&bid) {
+        if !state.texture_cache.contains(&bid) {
             match renderer.import_buffer(buf, None, &[]) {
                 Some(Ok(tex)) => {
                     let tb =
                         TextureBuffer::from_texture(&*renderer, tex, 1, Transform::Normal, None);
-                    super::insert_texture_cache(&mut state.texture_cache, bid.clone(), tb);
+                    state.texture_cache.put(bid.clone(), tb);
                 }
                 Some(Err(e)) => warn!("⚠️ Subsurface buffer import error: {:?}", e),
                 None => {}
@@ -299,7 +326,7 @@ fn import_surface_tree(state: &mut State, renderer: &mut GlesRenderer, surface: 
 /// texture cache. `offset_x/offset_y` is the absolute screen position of
 /// this surface's top-left corner in logical pixels.
 fn draw_surface_tree(
-    state: &State,
+    state: &mut State,
     frame: &mut GlesFrame<'_, '_>,
     surface: &WlSurface,
     offset_x: f64,
@@ -396,14 +423,24 @@ fn render_scene_into(
 
     // Collect data BEFORE borrowing winit_backend mutably via bind().
     let mut items: Vec<(u64, WindowRectangle, Option<WindowDecoration>)> = Vec::new();
+    let wm = state.window_manager.read();
     for (window_id, rect) in &layouts {
         if let Some(&surface_id) = state.window_map.get(window_id) {
             if state.toplevels.contains_key(&surface_id) {
-                let dec = state
-                    .decoration_manager
-                    .read()
-                    .get_decoration(*window_id)
-                    .cloned();
+                // Skip decorations for fullscreen windows
+                let is_fullscreen = wm
+                    .get_window(*window_id)
+                    .map(|w| w.properties.fullscreen)
+                    .unwrap_or(false);
+                let dec = if is_fullscreen {
+                    None
+                } else {
+                    state
+                        .decoration_manager
+                        .read()
+                        .get_decoration(*window_id)
+                        .cloned()
+                };
                 items.push((*window_id, rect.clone(), dec));
             }
         }
@@ -413,8 +450,14 @@ fn render_scene_into(
         .read()
         .decorations()
         .iter()
+        .filter(|(id, _)| {
+            wm.get_window(**id)
+                .map(|w| !w.properties.fullscreen)
+                .unwrap_or(true)
+        })
         .map(|(id, d)| (*id, d.mode, d.focused))
         .collect();
+    drop(wm);
 
     let (w, h) = (state.window_width as i32, state.window_height as i32);
 
@@ -477,7 +520,7 @@ fn render_scene_into(
                 {
                     Some(BufferAssignment::NewBuffer(ref b)) => Some(b.clone()),
                     Some(BufferAssignment::Removed) => {
-                        state.texture_cache.remove(&icon_surface.id());
+                        state.texture_cache.pop_entry(&icon_surface.id());
                         None
                     }
                     _ => None,
@@ -485,7 +528,7 @@ fn render_scene_into(
             });
             icon_buf.map(|buf| {
                 let bid = buf.id();
-                if !state.texture_cache.contains_key(&bid) {
+                if !state.texture_cache.contains(&bid) {
                     match renderer.import_buffer(&buf, None, &[]) {
                         Some(Ok(tex)) => {
                             let tb = TextureBuffer::from_texture(
@@ -495,7 +538,7 @@ fn render_scene_into(
                                 Transform::Normal,
                                 None,
                             );
-                            super::insert_texture_cache(&mut state.texture_cache, bid.clone(), tb);
+                            state.texture_cache.put(bid.clone(), tb);
                         }
                         Some(Err(e)) => warn!("⚠️ Failed to import DnD icon buffer: {:?}", e),
                         None => {}
@@ -521,7 +564,7 @@ fn render_scene_into(
                     {
                         Some(BufferAssignment::NewBuffer(ref b)) => Some(b.clone()),
                         Some(BufferAssignment::Removed) => {
-                            state.texture_cache.remove(&lock_surface.wl_surface().id());
+                            state.texture_cache.pop_entry(&lock_surface.wl_surface().id());
                             None
                         }
                         _ => None,
@@ -529,7 +572,7 @@ fn render_scene_into(
                 });
             if let Some(buf) = buf {
                 let bid = buf.id();
-                if !state.texture_cache.contains_key(&bid) {
+                if !state.texture_cache.contains(&bid) {
                     match renderer.import_buffer(&buf, None, &[]) {
                         Some(Ok(tex)) => {
                             let tb = TextureBuffer::from_texture(
@@ -539,7 +582,7 @@ fn render_scene_into(
                                 Transform::Normal,
                                 None,
                             );
-                            super::insert_texture_cache(&mut state.texture_cache, bid.clone(), tb);
+                            state.texture_cache.put(bid.clone(), tb);
                         }
                         Some(Err(e)) => warn!("⚠️ Failed to import lock surface buffer: {:?}", e),
                         None => {}
@@ -560,14 +603,14 @@ fn render_scene_into(
         {
             Some(BufferAssignment::NewBuffer(ref b)) => Some(b.clone()),
             Some(BufferAssignment::Removed) => {
-                state.texture_cache.remove(&layer_surface.wl_surface().id());
+                state.texture_cache.pop_entry(&layer_surface.wl_surface().id());
                 None
             }
             _ => None,
         });
         if let Some(buf) = buf {
             let bid = buf.id();
-            if !state.texture_cache.contains_key(&bid) {
+            if !state.texture_cache.contains(&bid) {
                 match renderer.import_buffer(&buf, None, &[]) {
                     Some(Ok(tex)) => {
                         let tb = TextureBuffer::from_texture(
@@ -577,7 +620,7 @@ fn render_scene_into(
                             Transform::Normal,
                             None,
                         );
-                        super::insert_texture_cache(&mut state.texture_cache, bid.clone(), tb);
+                        state.texture_cache.put(bid.clone(), tb);
                     }
                     Some(Err(e)) => {
                         warn!("⚠️ Failed to import layer surface buffer: {:?}", e);
@@ -585,7 +628,7 @@ fn render_scene_into(
                     None => {}
                 }
             }
-            if state.texture_cache.contains_key(&bid) {
+            if state.texture_cache.contains(&bid) {
                 layer_textures.insert(bid, ());
             }
         }
@@ -633,10 +676,11 @@ fn render_scene_into(
         // Draw the full surface tree (including subsurfaces) from the texture cache
         if let Some(&surface_id) = state.window_map.get(window_id) {
             if let Some(t) = state.toplevels.get(&surface_id) {
+                let wl_surface = t.wl_surface().clone();
                 draw_surface_tree(
                     state,
                     &mut frame,
-                    t.wl_surface(),
+                    &wl_surface,
                     content.x as f64,
                     content.y as f64,
                     scale,

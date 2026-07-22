@@ -808,6 +808,22 @@ impl ScrollableWorkspaces {
         &self.focused_output
     }
 
+    /// Switch focus to the next output in the output order.
+    /// Cycles forward; wraps to the first output.
+    pub fn focus_next_output(&mut self) {
+        if self.output_order.len() <= 1 {
+            return;
+        }
+        let current = self.focused_output.clone();
+        let pos = self.output_order.iter().position(|id| *id == current);
+        let next_idx = match pos {
+            Some(i) if i + 1 < self.output_order.len() => i + 1,
+            _ => 0,
+        };
+        self.focused_output = self.output_order[next_idx].clone();
+        info!("Focus switched to output: {}", self.focused_output);
+    }
+
     /// Return the known tape IDs in sorted order.
     pub fn known_tape_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.tapes.keys().cloned().collect();

@@ -23,26 +23,9 @@ Axiom is still in alpha, so some fields exist ahead of full implementation.
 
 ## Effects
 
-| Field | Status | Notes |
-|---|---|---|
-| `effects.enabled` | Applied | Global runtime effects gate |
-| `effects.animations.enabled` | Applied | Controls animation engine enablement |
-| `effects.animations.duration` | Applied | Used as runtime default animation duration |
-| `effects.animations.curve` | Partially applied | Parsed into effect defaults; not every path fully differentiates curves yet |
-| `effects.animations.workspace_transition` | Accepted but not applied | Stored/validated only |
-| `effects.animations.window_animation` | Accepted but not applied | Stored/validated only |
-| `effects.blur.enabled` | Applied | Controls blur engine state |
-| `effects.blur.radius` | Applied | Used by runtime blur configuration and IPC mutation |
-| `effects.blur.intensity` | Applied | Used by effects initialization/config update |
-| `effects.blur.window_backgrounds` | Partially applied | Mapped into blur params, but live compositor output integration is incomplete |
-| `effects.rounded_corners.enabled` | Accepted but not applied | Stored/validated; live rendering still incomplete |
-| `effects.rounded_corners.radius` | Partially applied | Stored in effect/decor state, but not fully represented in live compositor output |
-| `effects.rounded_corners.antialiasing` | Accepted but not applied | Stored/validated only |
-| `effects.shadows.enabled` | Partially applied | Shadow queue/runtime exists, but full live output integration is still transitional |
-| `effects.shadows.size` | Partially applied | Used by default shadow params |
-| `effects.shadows.blur_radius` | Partially applied | Used by default shadow params |
-| `effects.shadows.opacity` | Partially applied | Used by default shadow params |
-| `effects.shadows.color` | Accepted but not applied | Validated strongly, but not meaningfully consumed in the live output path yet |
+All effects config fields are accepted and stored by the parser, but the
+`effects/` module has been removed. None of these fields have any runtime
+effect on compositor behavior.
 
 ## Window
 
@@ -80,24 +63,16 @@ Axiom is still in alpha, so some fields exist ahead of full implementation.
 | `bindings.toggle_minimize` | Applied | InputManager/backend action dispatch; semantics still alpha |
 | `bindings.launch_terminal` | Applied | Spawns configured default command path in backend logic |
 | `bindings.launch_launcher` | Applied | Spawns configured default command path in backend logic |
-| `bindings.toggle_effects` | Applied | Runtime effects toggle |
 | `bindings.quit` | Applied | Runtime quit action |
 | `bindings.mouse_back` | Applied | InputManager mouse binding parser |
 | `bindings.mouse_forward` | Applied | InputManager mouse binding parser |
 | `bindings.mouse_middle` | Applied | InputManager mouse binding parser |
 
-## XWayland
-
-| Field | Status | Notes |
-|---|---|---|
-| `xwayland.enabled` | Applied | Controls XWayland manager initialization |
-| `xwayland.display` | Applied | Used as preferred display when starting XWayland |
-
 ## Backend
 
 | Field | Status | Notes |
 |---|---|---|
-| `backend.kind` | Applied | Selects `winit` / `drm` / `noop` |
+| `backend.kind` | Applied | Selects `winit` / `noop` |
 
 ## Feature gates
 

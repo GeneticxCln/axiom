@@ -6,7 +6,7 @@ authors = ["Axiom Contributors"]
 description = "A winit-only Wayland compositor with niri-inspired scrollable workspaces (GLES rendering)"
 repository = "https://github.com/GeneticxCln/axiom"
 license = "GPL-3.0"
-keywords = ["wayland", "compositor", "window-manager", "tiling", "effects"]
+keywords = ["wayland", "compositor", "window-manager", "tiling"]
 categories = ["gui"]
 
 [[bin]]
@@ -33,6 +33,7 @@ clap = { version = "4.4", features = ["derive"] }
 calloop = { version = "0.12", features = ["signals"] }
 anyhow = "1.0"
 log = "0.4"
+lru = "0.12"
 env_logger = "0.10"
 
 # Core Wayland compositor dependencies
@@ -51,7 +52,7 @@ smithay = { version = "0.7.0", default-features = false, features = [
 # following first-party deps were removed because Smithay 0.7 re-exports
 # the equivalents and/or the DRM/KMS backend that needed them is gone:
 #   glium, drm, gbm, input, winit, dbus, ctrlc, tracing, cgmath,
-#   libseat, calloop, udev
+#   libseat, udev
 xkbcommon = "0.8"  # Smithay 0.7 backend uses xkbcommon for keyboard handling
 libc = "0.2"      # pipe2 (clipboard extraction) and getuid (IPC ownership check)
 
@@ -121,5 +122,5 @@ opt-level = 1  # Faster compilation during development
 [workspace]
 members = [
     ".",
-    # Future: separate crates for effects, workspace management, etc.
+    # Future: separate crates for workspace management, etc.
 ]
