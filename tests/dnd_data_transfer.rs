@@ -440,3 +440,382 @@ fn test_client_data_offer_reaches_compositor() -> Result<()> {
     );
     Ok(())
 }
+
+// ── Helper: headless compositor (noop backend) ──────────────────────────
+
+fn make_headless_compositor(
+    config: AxiomConfig,
+) -> Result<axiom::compositor::AxiomCompositor> {
+    use axiom::compositor::AxiomCompositor;
+    use axiom::ipc::AxiomIPCServer;
+
+    let workspace_manager = Arc::new(RwLock::new(ScrollableWorkspaces::new(&config.workspace)));
+    let window_manager = Arc::new(RwLock::new(WindowManager::new(&config.window)));
+    let input_manager = Arc::new(RwLock::new(InputManager::new(
+        &config.input,
+        &config.bindings,
+    )));
+    let ipc_server = AxiomIPCServer::new();
+
+    let mut cfg = config.clone();
+    cfg.backend.kind = "noop".to_string();
+
+    AxiomCompositor::new(
+        cfg,
+        false,
+        workspace_manager.clone(),
+        window_manager.clone(),
+        input_manager.clone(),
+        ipc_server,
+    )
+}
+
+// ── start_server_dnd unit tests ─────────────────────────────────────────
+
+/// start_server_dnd populates the clipboard cache with the given data.
+#[test]
+#[serial_test::serial]
+fn test_start_server_dnd_populates_cache() -> Result<()> {
+    let mut backend = make_headless_backend()?;
+    let payload = b"hello from server dnd".to_vec();
+    backend.start_server_dnd(payload.clone(), "text/plain".into());
+
+    assert_eq!(
+        backend.state.clipboard_cache,
+        Some(payload),
+        "clipboard_cache should contain the DnD payload"
+    );
+    Ok(())
+}
+
+/// start_server_dnd with text/plain — data is cached and serveable.
+#[test]
+#[serial_test::serial]
+fn test_start_server_dnd_text_plain() -> Result<()> {
+    let mut backend = make_headless_backend()?;
+    let payload = b"plain text payload".to_vec();
+    backend.start_server_dnd(payload.clone(), "text/plain".into());
+
+    assert_eq!(backend.state.clipboard_cache, Some(payload.clone()));
+
+    // Verify the data can be served via ServerDndGrabHandler::send
+    let mut fds = [0i32; 2];
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2");
+    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+    let seat = backend.state.seat.clone();
+    ServerDndGrabHandler::send(&mut backend.state, "text/plain".into(), write_fd, seat);
+
+    let mut buf = Vec::new();
+    let mut file = std::fs::File::from(read_fd);
+    file.read_to_end(&mut buf)?;
+    assert_eq!(buf, payload, "ServerDndGrabHandler::send serves cached data");
+    Ok(())
+}
+
+/// start_server_dnd with text/html MIME type.
+#[test]
+#[serial_test::serial]
+fn test_start_server_dnd_text_html() -> Result<()> {
+    let mut backend = make_headless_backend()?;
+    let payload = b"<html><body>Hello</body></html>".to_vec();
+    backend.start_server_dnd(payload.clone(), "text/html".into());
+
+    assert_eq!(backend.state.clipboard_cache, Some(payload.clone()));
+
+    let mut fds = [0i32; 2];
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2");
+    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+    let seat = backend.state.seat.clone();
+    ServerDndGrabHandler::send(&mut backend.state, "text/html".into(), write_fd, seat);
+
+    let mut buf = Vec::new();
+    let mut file = std::fs::File::from(read_fd);
+    file.read_to_end(&mut buf)?;
+    assert_eq!(buf, payload, "HTML payload served correctly");
+    Ok(())
+}
+
+/// start_server_dnd with application/octet-stream (binary MIME type).
+#[test]
+#[serial_test::serial]
+fn test_start_server_dnd_binary_mime() -> Result<()> {
+    let mut backend = make_headless_backend()?;
+    let payload = vec![0x00, 0x01, 0x02, 0xFF, 0xFE, 0x7F];
+    backend.start_server_dnd(payload.clone(), "application/octet-stream".into());
+
+    assert_eq!(backend.state.clipboard_cache, Some(payload.clone()));
+
+    let mut fds = [0i32; 2];
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2");
+    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+    let seat = backend.state.seat.clone();
+    ServerDndGrabHandler::send(
+        &mut backend.state,
+        "application/octet-stream".into(),
+        write_fd,
+        seat,
+    );
+
+    let mut buf = Vec::new();
+    let mut file = std::fs::File::from(read_fd);
+    file.read_to_end(&mut buf)?;
+    assert_eq!(buf, payload, "binary payload served correctly");
+    Ok(())
+}
+
+/// start_server_dnd with empty data payload.
+#[test]
+#[serial_test::serial]
+fn test_start_server_dnd_empty_payload() -> Result<()> {
+    let mut backend = make_headless_backend()?;
+    let payload: Vec<u8> = vec![];
+    backend.start_server_dnd(payload.clone(), "text/plain".into());
+
+    assert_eq!(
+        backend.state.clipboard_cache,
+        Some(payload),
+        "clipboard_cache should contain empty vec"
+    );
+
+    // Serving empty data should produce an empty read
+    let mut fds = [0i32; 2];
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2");
+    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+    let seat = backend.state.seat.clone();
+    ServerDndGrabHandler::send(&mut backend.state, "text/plain".into(), write_fd, seat);
+
+    let mut buf = Vec::new();
+    let mut file = std::fs::File::from(read_fd);
+    file.read_to_end(&mut buf)?;
+    assert!(buf.is_empty(), "empty payload produces empty read");
+    Ok(())
+}
+
+/// start_server_dnd with a large payload (> 64KB).
+///
+/// Reads from the pipe in a helper thread since the kernel pipe buffer
+/// (~64KB) is smaller than the payload — a synchronous write_all would
+/// block waiting for a reader.
+#[test]
+#[serial_test::serial]
+fn test_start_server_dnd_large_payload() -> Result<()> {
+    let mut backend = make_headless_backend()?;
+    // 128KB of repeating pattern
+    let payload = vec![0xABu8; 128 * 1024];
+    backend.start_server_dnd(payload.clone(), "application/octet-stream".into());
+
+    assert_eq!(
+        backend.state.clipboard_cache.as_ref().map(|v| v.len()),
+        Some(payload.len()),
+        "large payload should be fully cached"
+    );
+    assert_eq!(
+        backend.state.clipboard_cache,
+        Some(payload.clone()),
+        "large payload should match exactly"
+    );
+
+    // Verify the large payload can be served — read from pipe in a thread
+    // so the write_all inside ServerDndGrabHandler::send does not deadlock
+    // on a full pipe buffer.
+    let mut fds = [0i32; 2];
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2");
+    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+    let reader = thread::spawn(move || -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut file = std::fs::File::from(read_fd);
+        let _ = file.read_to_end(&mut buf);
+        buf
+    });
+
+    let seat = backend.state.seat.clone();
+    ServerDndGrabHandler::send(
+        &mut backend.state,
+        "application/octet-stream".into(),
+        write_fd,
+        seat,
+    );
+
+    let buf = reader.join().expect("pipe reader thread");
+    assert_eq!(buf.len(), payload.len(), "large payload full length served");
+    assert_eq!(buf, payload, "large payload content matches");
+    Ok(())
+}
+
+/// Full round-trip: start_server_dnd → ServerDndGrabHandler::send serves data.
+#[test]
+#[serial_test::serial]
+fn test_start_server_dnd_round_trip() -> Result<()> {
+    let mut backend = make_headless_backend()?;
+    let payload = b"round-trip-dnd-payload".to_vec();
+    backend.start_server_dnd(payload.clone(), "text/plain".into());
+
+    // Verify the cache is populated
+    assert_eq!(backend.state.clipboard_cache, Some(payload.clone()));
+
+    // Read the data back through the DnD handler
+    let mut fds = [0i32; 2];
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2");
+    let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+    let seat = backend.state.seat.clone();
+    ServerDndGrabHandler::send(&mut backend.state, "text/plain".into(), write_fd, seat);
+
+    let mut buf = Vec::new();
+    let mut file = std::fs::File::from(read_fd);
+    file.read_to_end(&mut buf)?;
+    assert_eq!(buf, payload, "round-trip: start_server_dnd → send");
+    Ok(())
+}
+
+// ── IPC integration test ─────────────────────────────────────────────────
+
+/// Full IPC integration: StartDnd message flows through the compositor and
+/// populates the clipboard cache.
+#[test]
+#[serial_test::serial]
+fn test_ipc_start_dnd_compositor_dispatch() -> Result<()> {
+    use axiom::ipc::LazyUIMessage;
+
+    let config = AxiomConfig::default();
+    let mut compositor = make_headless_compositor(config)?;
+
+    // Get the IPC command sender
+    let sender = compositor.ipc_command_sender();
+
+    // Send a StartDnd command via the IPC channel
+    let cmd = LazyUIMessage::StartDnd {
+        text: "ipc-dnd-text".into(),
+        mime_type: "text/plain".into(),
+    };
+    sender.send(cmd).unwrap();
+
+    // Run a tick — this should process the IPC message and call
+    // start_server_dnd on the backend, which populates the clipboard cache.
+    let result = compositor.tick_for_test();
+    assert!(result.is_ok(), "tick should succeed");
+
+    // Verify the clipboard cache was populated with the DnD text
+    let cached = compositor.debug_clipboard_cache();
+    assert!(cached.is_some(), "clipboard cache should be populated after StartDnd IPC");
+    assert_eq!(
+        cached.as_deref().unwrap(),
+        b"ipc-dnd-text",
+        "clipboard data should match the DnD text"
+    );
+
+    Ok(())
+}
+
+/// IPC integration: StartDnd with a different MIME type (text/html).
+#[test]
+#[serial_test::serial]
+fn test_ipc_start_dnd_html_mime() -> Result<()> {
+    use axiom::ipc::LazyUIMessage;
+
+    let config = AxiomConfig::default();
+    let mut compositor = make_headless_compositor(config)?;
+
+    let sender = compositor.ipc_command_sender();
+    let cmd = LazyUIMessage::StartDnd {
+        text: "<p>html content</p>".into(),
+        mime_type: "text/html".into(),
+    };
+    sender.send(cmd).unwrap();
+
+    let result = compositor.tick_for_test();
+    assert!(result.is_ok(), "tick should succeed");
+
+    let cached = compositor.debug_clipboard_cache();
+    assert!(cached.is_some(), "clipboard cache should be populated");
+    assert_eq!(
+        cached.as_deref().unwrap(),
+        b"<p>html content</p>",
+        "clipboard data should match HTML DnD text"
+    );
+
+    Ok(())
+}
+
+/// IPC integration: StartDnd with empty text.
+#[test]
+#[serial_test::serial]
+fn test_ipc_start_dnd_empty_text() -> Result<()> {
+    use axiom::ipc::LazyUIMessage;
+
+    let config = AxiomConfig::default();
+    let mut compositor = make_headless_compositor(config)?;
+
+    let sender = compositor.ipc_command_sender();
+    let cmd = LazyUIMessage::StartDnd {
+        text: String::new(),
+        mime_type: "text/plain".into(),
+    };
+    sender.send(cmd).unwrap();
+
+    let result = compositor.tick_for_test();
+    assert!(result.is_ok(), "tick should succeed");
+
+    let cached = compositor.debug_clipboard_cache();
+    assert!(cached.is_some(), "clipboard cache should be Some (empty vec)");
+    assert!(
+        cached.unwrap().is_empty(),
+        "clipboard data should be empty for empty DnD text"
+    );
+
+    Ok(())
+}
+
+/// IPC integration: StartDnd with large text (> 64KB).
+#[test]
+#[serial_test::serial]
+fn test_ipc_start_dnd_large_text() -> Result<()> {
+    use axiom::ipc::LazyUIMessage;
+
+    let config = AxiomConfig::default();
+    let mut compositor = make_headless_compositor(config)?;
+
+    let sender = compositor.ipc_command_sender();
+    // 128KB of repeating 'A'
+    let large_text = "A".repeat(128 * 1024);
+    let cmd = LazyUIMessage::StartDnd {
+        text: large_text.clone(),
+        mime_type: "text/plain".into(),
+    };
+    sender.send(cmd).unwrap();
+
+    let result = compositor.tick_for_test();
+    assert!(result.is_ok(), "tick should succeed");
+
+    let cached = compositor.debug_clipboard_cache();
+    assert!(cached.is_some(), "clipboard cache should be populated");
+    assert_eq!(
+        cached.as_deref().unwrap().len(),
+        large_text.len(),
+        "large text should be fully cached"
+    );
+    assert_eq!(
+        cached.as_deref().unwrap(),
+        large_text.as_bytes(),
+        "large text content should match"
+    );
+
+    Ok(())
+}

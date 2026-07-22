@@ -365,6 +365,169 @@ fn bench_texture_cache_lookup(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark the full render-path scene preparation.
+///
+/// Simulates the compositor's `prepare_render_scene()` + `render_scene_into()`
+/// element-collection pipeline with increasing numbers of windows. Measures
+/// layout calculation, fullscreen detection, decoration lookups, and the
+/// surface-tree import walk — all the CPU-side work that happens every frame
+/// before the GLES draw calls.
+fn bench_render_path_preparation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("render_path/preparation");
+
+    for window_count in [1usize, 10usize, 50usize, 100usize].iter() {
+        group.bench_with_input(
+            format!("prepare_{}_windows", window_count),
+            window_count,
+            |b, &window_count| {
+                b.iter_batched(
+                    || {
+                        let config = WorkspaceConfig::default();
+                        let mut workspaces = ScrollableWorkspaces::new(&config);
+                        // ponytail: uses WorkspaceTape size directly; the
+                        // real compositor gets size from the winit window.
+                        workspaces.set_viewport_size(1920.0, 1080.0);
+                        for i in 1..=window_count {
+                            workspaces.add_window(i as u64);
+                        }
+                        // Mark every 4th window as fullscreen to exercise
+                        // the fullscreen detection branch in prepare_render_scene.
+                        let mut wm = axiom::window::WindowManager::new(
+                            &axiom::config::WindowConfig::default(),
+                        );
+                        for i in 1..=window_count {
+                            let id = wm.add_window(format!("Win {}", i));
+                            assert_eq!(id, i as u64);
+                            if i % 4 == 0 {
+                                wm.toggle_fullscreen(id);
+                            }
+                        }
+                        (workspaces, wm)
+                    },
+                    |(workspaces, wm)| {
+                        // Step 1 — calculate layouts (the bulk of prepare_render_scene)
+                        let layouts = workspaces.calculate_workspace_layouts();
+
+                        // Step 2 — fullscreen detection (matching the logic in
+                        // prepare_render_scene: override layout for fullscreen windows)
+                        let mut items: Vec<(u64, Rectangle)> = Vec::new();
+                        for (window_id, rect) in &layouts {
+                            let is_fullscreen = wm
+                                .get_window(*window_id)
+                                .map(|w| w.properties.fullscreen)
+                                .unwrap_or(false);
+                            if is_fullscreen {
+                                items.push((
+                                    *window_id,
+                                    Rectangle {
+                                        x: 0,
+                                        y: 0,
+                                        width: 1920,
+                                        height: 1080,
+                                    },
+                                ));
+                            } else {
+                                items.push((*window_id, rect.clone()));
+                            }
+                        }
+
+                        // Step 3 — decoration lookups (matching render_scene_into)
+                        for (window_id, _rect) in &items {
+                            let is_fullscreen = wm
+                                .get_window(*window_id)
+                                .map(|w| w.properties.fullscreen)
+                                .unwrap_or(false);
+                            black_box(is_fullscreen);
+                        }
+
+                        black_box((layouts, items));
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Benchmark damage region merge with many windows.
+///
+/// Simulates the damage merge at the end of `render()`. Each window on screen
+/// contributes one damage rectangle (the window's bounding box). With N windows
+/// there are N damage rectangles; the benchmark measures the time to merge them
+/// into a single bounding rectangle clamped to the output size.
+fn bench_damage_merge_many_windows(c: &mut Criterion) {
+    let mut group = c.benchmark_group("render_path/damage_merge");
+
+    for window_count in [1usize, 10usize, 50usize, 100usize].iter() {
+        group.bench_with_input(
+            format!("merge_{}_windows", window_count),
+            window_count,
+            |b, &window_count| {
+                b.iter_batched(
+                    || {
+                        // Generate damage rectangles for each window, spread
+                        // across a 1920×1080 output in a grid-like pattern.
+                        let cols = (window_count as f64).sqrt().ceil() as u32;
+                        let rows = (window_count as f64 / cols as f64).ceil() as u32;
+                        let cell_w = 1920 / cols;
+                        let cell_h = 1080 / rows;
+                        let mut damage: Vec<Rectangle> = Vec::with_capacity(window_count);
+                        for i in 0..window_count {
+                            let col = i as u32 % cols;
+                            let row = i as u32 / cols;
+                            damage.push(Rectangle {
+                                x: (col * cell_w) as i32,
+                                y: (row * cell_h) as i32,
+                                width: cell_w.max(1),
+                                height: cell_h.max(1),
+                            });
+                        }
+                        damage
+                    },
+                    |damage_rects| {
+                        let mut min_x = i32::MAX;
+                        let mut min_y = i32::MAX;
+                        let mut max_x = i32::MIN;
+                        let mut max_y = i32::MIN;
+
+                        for r in &damage_rects {
+                            min_x = min_x.min(r.x);
+                            min_y = min_y.min(r.y);
+                            max_x = max_x.max(r.x + r.width as i32);
+                            max_y = max_y.max(r.y + r.height as i32);
+                        }
+
+                        // Clamp to 1920×1080 output
+                        let (out_w, out_h) = (1920i32, 1080i32);
+                        min_x = min_x.max(0);
+                        min_y = min_y.max(0);
+                        max_x = max_x.min(out_w);
+                        max_y = max_y.min(out_h);
+
+                        let merged = if min_x < max_x && min_y < max_y {
+                            Some(Rectangle {
+                                x: min_x,
+                                y: min_y,
+                                width: (max_x - min_x) as u32,
+                                height: (max_y - min_y) as u32,
+                            })
+                        } else {
+                            None
+                        };
+
+                        black_box(merged);
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_workspace_scrolling,
@@ -375,6 +538,8 @@ criterion_group!(
     bench_render_element_collection,
     bench_damage_tracking,
     bench_texture_cache_lookup,
+    bench_render_path_preparation,
+    bench_damage_merge_many_windows,
 );
 
 criterion_main!(benches);
