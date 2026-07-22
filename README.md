@@ -1,6 +1,6 @@
 # Axiom 🚀
 
-**A Wayland compositor with scrollable workspaces, built on Smithay 0.7.**
+**A winit-only Wayland compositor with scrollable workspaces, built on Smithay 0.7.**
 
 <div align="center">
 
@@ -8,9 +8,18 @@
 [![License](https://img.shields.io/badge/license-GPLv3-blue)](#)
 [![Status](https://img.shields.io/badge/status-alpha-yellow)](#)
 
-**Where productivity meets a calm, scrollable desktop.**
-
 </div>
+
+## Quick Start
+
+```bash
+git clone https://github.com/GeneticxCln/axiom.git
+cd axiom
+cargo build
+cargo run -- --debug
+```
+
+This starts Axiom nested inside your existing desktop session. See [Running](docs/user/RUNNING.md) for smoke-test instructions.
 
 ## Current Status
 
@@ -18,51 +27,25 @@ Axiom is an **alpha-stage Wayland compositor** with a single, fully working
 backend: **winit** (nested/windowed). It presents real client window content
 plus server-side decoration titlebars through a Smithay 0.7 GLES renderer.
 
-What is true today:
-- Real Smithay 0.7 compositor backend (winit-only; no DRM/KMS, no xwayland).
-- GLES rendering through the winit window — real client pixels are shown.
-- Scrollable workspace engine, configuration parsing, and JSON IPC are implemented.
-- `cargo build` and `cargo test` are green (0 warnings).
+- `cargo build` and `cargo test` are clean (0 warnings).
+- Scrollable workspace engine, TOML configuration, and JSON IPC are implemented.
+- Multi-monitor and standalone session support are not yet available.
 
-What is not true yet:
-- Axiom is **not** in "production polish".
-- Packaging and release assets are still incomplete.
-- Multi-monitor and fractional scaling still need work.
+## Features
 
-## Vision
-
-Axiom explores a compositor UX that combines:
-- **Scrollable workspaces** inspired by niri
-- **Structured IPC** for external tooling / optimization clients
-
-## What Works Today
-
-### Core logic
-- Scrollable workspace/tape model (`ScrollableWorkspaces` / `WorkspaceTape`)
-- Window registry and basic lifecycle management
-- TOML configuration loading/validation
-- JSON IPC over Unix sockets
-- Eased scroll/momentum with per-column tiling and gaps
-
-### Compositor path (winit)
-- Smithay-based Wayland socket
-- XDG toplevel/popup handling
-- Input routing and compositor shortcuts
-- GLES rendering via the winit backend: each client's committed `wl_buffer`
-  is imported into a `GlesTexture` and drawn (plus a solid backdrop and
-  server-side decoration titlebars/buttons) via `SolidColorRenderElement` /
-  `TextureRenderElement`, then submitted
-- Live resize via `WinitEvent::Resized` updates the workspace viewport + output mode
-- Drag-and-drop protocol: client-initiated DnD sessions tracked, icon surface rendered
-- Touch input handling: down/motion/up/cancel with touch-based window move/resize
-- SetClipboard IPC command: compositor→clipboard data push via Unix socket
+- **Scrollable workspaces** — niri-inspired horizontal tape model with per-column tiling, gaps, and eased scroll/momentum
+- **Server-side decorations** — titlebars with close/maximize buttons rendered via GLES
+- **JSON IPC** — Unix-socket control plane for external tooling (workspace commands, clipboard push)
+- **Client-initiated drag-and-drop** — DnD sessions tracked, icon surface rendered
+- **Touch input** — down/motion/up/cancel with touch-based window move/resize
+- **Configurable keybindings** — TOML-defined modifier+key bindings for all common actions
 
 ## What Is Still Incomplete
 
 - Single-output only (winit, no multi-monitor support)
 - Fractional scaling / HiDPI polish
-- Release-ready packaging and session assets — packaging structure exists, needs final validation
-- Full drag-and-drop data transfer (server-initiated DnD is a stub)
+- Release-ready packaging — structure exists, needs final validation
+- Server-initiated drag-and-drop is a stub
 - Touch gesture support (tap-to-click, multi-finger gestures)
 
 ## Repository Layout
@@ -80,73 +63,40 @@ axiom/
 │   └── ipc/
 ├── docs/
 ├── config/axiom.toml
-├── test_ipc.py
-└── MASTER_DEVELOPMENT_PLAN.md
+└── scripts/
 ```
 
-## Quick Start
-
-### Build
-```bash
-cargo build
-```
-
-### Run the recommended alpha target
-```bash
-cargo run -- --debug
-```
-
-The winit/nested path is the recommended way to evaluate Axiom right now.
-
-Automated nested smoke test (uses a real Wayland client such as `weston-terminal`):
+## Build & Test
 
 ```bash
-cargo build
-xvfb-run -a ./scripts/nested_smoke_test.sh ./target/debug/axiom
+cargo build                    # debug build
+cargo build --release          # optimized binary
+cargo test                     # unit + integration tests
+cargo test --all-targets       # includes benches
+xvfb-run -a cargo test         # run all tests (including xvfb-required)
 ```
+
+See [Build Notes](docs/dev/BUILD.md) for details.
 
 ## Configuration
 
-Axiom uses a single TOML config file at:
+Axiom uses a single TOML config file at `~/.config/axiom/axiom.toml`.
 
-```text
-~/.config/axiom/axiom.toml
-```
+A default example is shipped in `config/axiom.toml`.
 
-A default example is shipped in:
-
-```text
-config/axiom.toml
-```
-
-See [docs/user/CONFIGURATION.md](docs/user/CONFIGURATION.md) for details.
+See [Configuration](docs/user/CONFIGURATION.md) for details.
 
 ## IPC / Lazy UI Integration
 
 Axiom exposes a Unix socket for external clients.
 
-### Socket paths
+**Socket paths:**
 - Preferred: `$XDG_RUNTIME_DIR/axiom/axiom.sock`
-- Fallback (when `XDG_RUNTIME_DIR` is unavailable): `/tmp/axiom-<pid>/axiom-lazy-ui.sock`
+- Fallback: `/tmp/axiom-<pid>/axiom-lazy-ui.sock`
 
-Because the fallback path is process-specific, helper clients in this repo support manual override via `AXIOM_SOCKET_PATH` and also scan the fallback pattern automatically.
+All 10 `WorkspaceCommand` actions and `SetClipboard` are wired end-to-end.
 
-### Workspace commands
-
-All 10 `WorkspaceCommand` actions are wired end-to-end and enforced against a
-whitelist (`KNOWN_WORKSPACE_ACTIONS`) in production. Unknown actions are
-rejected with an `unknown_action` ACK.
-
-### Clipboard control
-
-`LazyUIMessage::SetClipboard { text }` pushes arbitrary text into the Wayland
-compositor clipboard, making it available for clients to paste. The command is
-wired end-to-end: IPC server → compositor → `set_clipboard_data()`.
-
-### Try the IPC client
 ```bash
-# Connect to the Axiom IPC socket and send commands
-# Socket at $XDG_RUNTIME_DIR/axiom/axiom.sock (or /tmp/axiom-<pid>/axiom-lazy-ui.sock)
 echo '{"type":"HealthCheck"}' | nc -U "$XDG_RUNTIME_DIR/axiom/axiom.sock"
 ```
 
@@ -159,21 +109,19 @@ echo '{"type":"HealthCheck"}' | nc -U "$XDG_RUNTIME_DIR/axiom/axiom.sock"
 - [Known Limitations](docs/user/LIMITATIONS.md)
 
 ### Developer docs
-- [Backend Selection](docs/dev/BACKEND_SELECTION.md)
-- [Render Architecture](docs/dev/RENDER_ARCHITECTURE.md)
-- [Config Support Matrix](docs/dev/CONFIG_SUPPORT.md)
+- [Architecture Overview](src/lib.rs) (module docs)
 - [Build Notes](docs/dev/BUILD.md)
-- [Release Checklist](docs/dev/RELEASE_CHECKLIST.md)
-- [Release Process](docs/dev/RELEASE_PROCESS.md)
-- [Release Notes Template](docs/dev/RELEASE_NOTES_TEMPLATE.md)
+- [Render Architecture](docs/dev/RENDER_ARCHITECTURE.md)
+- [Backend Selection](docs/dev/BACKEND_SELECTION.md)
+- [Config Support Matrix](docs/dev/CONFIG_SUPPORT.md)
 - [Contributing](docs/dev/CONTRIBUTING.md)
 - [Setup](docs/dev/SETUP.md)
+- [Security](docs/dev/SECURITY.md)
+- [Release Process](docs/dev/RELEASE_PROCESS.md)
 
 ## Contributing
 
-Contributions are welcome, but please treat the project as an active alpha.
-
-See [docs/dev/CONTRIBUTING.md](docs/dev/CONTRIBUTING.md).
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Inspiration
 

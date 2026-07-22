@@ -1,41 +1,66 @@
 //! Axiom Wayland Compositor Library
 //!
 //! A winit-only Wayland compositor with scrollable workspaces and server-side
-//! decorations rendered via GLES. This library exposes the core functionality for
-//! building Wayland compositors with:
-//!
-//! - **Scrollable Workspaces**: Unlimited horizontal workspace columns
-//! - **Window Management**: Column tiling, floating, focus, minimize, fullscreen
-//! - **Input Handling**: Keyboard + pointer bindings, decoration hit-testing
-//! - **IPC Communication**: JSON Unix-socket IPC for Lazy UI integration
-//! - **Smithay Integration**: Full Wayland compositor protocol support
+//! decorations rendered via GLES. Built on [Smithay 0.7](https://github.com/Smithay/smithay).
 //!
 //! ## Architecture
 //!
 //! ```text
-//! ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-//! │   Lazy UI       │◄──►│  Axiom Compositor│◄──►│  Wayland Apps   │
-//! │   (External)    │    │   (Main Process) │    │  (Clients)      │
-//! └─────────────────┘    └──────────────────┘    └─────────────────┘
+//! ┌─────────────────┐    ┌──────────────────────┐    ┌─────────────────┐
+//! │   Lazy UI       │◄──►│   Axiom Compositor   │◄──►│  Wayland Apps   │
+//! │   (IPC Client)  │    │    (Main Process)    │    │  (Clients)      │
+//! └─────────────────┘    └──────────────────────┘    └─────────────────┘
 //!                                 │
+//!                    ┌────────────┼────────────┐
+//!                    ▼            ▼            ▼
+//!              ┌──────────┐ ┌──────────┐ ┌──────────┐
+//!              │ Workspace│ │  Window  │ │  Input   │
+//!              │  Engine  │ │ Manager  │ │ Handler  │
+//!              └──────────┘ └──────────┘ └──────────┘
+//!                    │            │            │
+//!                    └────────────┼────────────┘
 //!                                 ▼
 //!                        ┌──────────────────┐
 //!                        │ Smithay 0.7      │
 //!                        │ (GLES + Wayland) │
 //!                        └──────────────────┘
+//!                                 │
+//!                                 ▼
+//!                        ┌──────────────────┐
+//!                        │   Winit Window   │
+//!                        │  (nested mode)   │
+//!                        └──────────────────┘
 //! ```
+//!
+//! ## Core modules
+//!
+//! | Module | Purpose |
+//! |--------|---------|
+//! | [`compositor`] | Top-level orchestration, event loop, tick scheduling |
+//! | [`backend`] | Smithay backend: winit surface, GLES rendering, input/event dispatch, clipboard |
+//! | [`workspace`] | Scrollable workspace tape model (niri-inspired) |
+//! | [`window`] | Window registry, lifecycle, tiling/floating layout |
+//! | [`input`] | Keybindings, action dispatch, compositor shortcuts |
+//! | [`ipc`] | Unix-socket JSON IPC protocol and server |
+//! | [`config`] | TOML configuration model, loading, and validation |
+//! | [`decoration`] | Server-side decoration geometry and hit-testing |
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use axiom::config::AxiomConfig;
+//! use axiom::AxiomCompositor;
 //!
 //! fn main() -> anyhow::Result<()> {
 //!     let config = AxiomConfig::default();
-//!     // See main.rs for full initialization
+//!     let compositor = AxiomCompositor::new(config, false)?;
+//!     compositor.run()?;
 //!     Ok(())
 //! }
 //! ```
+//!
+//! See [`main.rs`](https://github.com/GeneticxCln/axiom/blob/main/src/main.rs)
+//! for the full CLI initialization path.
 
 #![warn(rust_2018_idioms)]
 

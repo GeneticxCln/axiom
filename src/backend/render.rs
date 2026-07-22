@@ -70,6 +70,7 @@ impl State {
         {
             let mut wm = self.window_manager.write();
             for (window_id, layout_rect) in &layouts {
+                // Update window geometry (non-floating, non-fullscreen windows)
                 if let Some(window) = wm.get_window_mut(*window_id) {
                     if !window.properties.floating {
                         if !window.properties.fullscreen {
@@ -80,38 +81,38 @@ impl State {
                             .set_size(layout_rect.width, layout_rect.height);
                     }
                 }
-            }
-        }
 
-        for (window_id, rect) in &layouts {
-            if let Some(&surface_id) = self.window_map.get(window_id) {
-                if let Some(toplevel) = self.toplevels.get(&surface_id) {
-                    self.update_surface_fractional_scale(toplevel.wl_surface());
-                    let scale = self
-                        .workspace_manager
-                        .read()
-                        .scale_factor_for_window(*window_id);
-                    let new_w = (scale_to_logical(rect.width as i32, scale).round() as i32).max(1);
-                    let new_h = (scale_to_logical(rect.height as i32, scale).round() as i32).max(1);
+                // Send configure notifications to toplevels (same loop, avoids
+                // a second HashMap iteration).
+                if let Some(&surface_id) = self.window_map.get(window_id) {
+                    if let Some(toplevel) = self.toplevels.get(&surface_id) {
+                        self.update_surface_fractional_scale(toplevel.wl_surface());
+                        let scale = self
+                            .workspace_manager
+                            .read()
+                            .scale_factor_for_window(*window_id);
+                        let new_w = (scale_to_logical(layout_rect.width as i32, scale).round() as i32).max(1);
+                        let new_h = (scale_to_logical(layout_rect.height as i32, scale).round() as i32).max(1);
 
-                    let needs_configure = self
-                        .configured_sizes
-                        .get(&surface_id)
-                        .is_none_or(|&(cw, ch)| cw != new_w || ch != new_h);
-                    let pending = self.pending_configure.contains(&surface_id);
+                        let needs_configure = self
+                            .configured_sizes
+                            .get(&surface_id)
+                            .is_none_or(|&(cw, ch)| cw != new_w || ch != new_h);
+                        let pending = self.pending_configure.contains(&surface_id);
 
-                    if needs_configure && !pending {
-                        toplevel.with_pending_state(|state| {
-                            state.size = Some((new_w, new_h).into());
-                        });
-                        toplevel.send_configure();
-                        self.configured_sizes.insert(surface_id, (new_w, new_h));
-                        self.pending_configure.insert(surface_id);
+                        if needs_configure && !pending {
+                            toplevel.with_pending_state(|state| {
+                                state.size = Some((new_w, new_h).into());
+                            });
+                            toplevel.send_configure();
+                            self.configured_sizes.insert(surface_id, (new_w, new_h));
+                            self.pending_configure.insert(surface_id);
 
-                        debug!(
-                            "📐 Configured surface {} to {}x{}",
-                            surface_id, new_w, new_h
-                        );
+                            debug!(
+                                "📐 Configured surface {} to {}x{}",
+                                surface_id, new_w, new_h
+                            );
+                        }
                     }
                 }
             }
@@ -442,72 +443,69 @@ fn render_scene_into(
     let layouts = state.prepare_render_scene(); // HashMap<u64, crate::window::Rectangle>
     let scale = smithay::utils::Scale::from(state.focused_output_scale());
 
-    // Update surface previous rects for damage tracking
+    // Update surface previous rects for damage tracking and collect render items
+    // in a single pass over layouts (avoids iterating the HashMap twice).
+    let mut items: Vec<(u64, WindowRectangle, Option<WindowDecoration>)> =
+        Vec::with_capacity(layouts.len());
+    let wm = state.window_manager.read();
+    let dm = state.decoration_manager.read();
     for (window_id, rect) in &layouts {
-        if let Some(&surface_id) = state.window_map.get(window_id) {
-            state.surface_previous_rects.insert(
-                surface_id,
-                Rectangle::new(
-                    Point::from((rect.x, rect.y)),
-                    Size::from((rect.width as i32, rect.height as i32)),
-                ),
-            );
+        let &surface_id = match state.window_map.get(window_id) {
+            Some(sid) => sid,
+            None => continue,
+        };
+        state.surface_previous_rects.insert(
+            surface_id,
+            Rectangle::new(
+                Point::from((rect.x, rect.y)),
+                Size::from((rect.width as i32, rect.height as i32)),
+            ),
+        );
+        if state.toplevels.contains_key(&surface_id) {
+            // Skip decorations for fullscreen windows
+            let is_fullscreen = wm
+                .get_window(*window_id)
+                .map(|w| w.properties.fullscreen)
+                .unwrap_or(false);
+            let dec = if is_fullscreen {
+                None
+            } else {
+                dm.get_decoration(*window_id).cloned()
+            };
+            items.push((*window_id, rect.clone(), dec));
         }
     }
-
-    // Collect data BEFORE borrowing winit_backend mutably via bind().
-    let mut items: Vec<(u64, WindowRectangle, Option<WindowDecoration>)> = Vec::new();
-    let wm = state.window_manager.read();
-    for (window_id, rect) in &layouts {
-        if let Some(&surface_id) = state.window_map.get(window_id) {
-            if state.toplevels.contains_key(&surface_id) {
-                // Skip decorations for fullscreen windows
-                let is_fullscreen = wm
-                    .get_window(*window_id)
-                    .map(|w| w.properties.fullscreen)
-                    .unwrap_or(false);
-                let dec = if is_fullscreen {
-                    None
-                } else {
-                    state
-                        .decoration_manager
-                        .read()
-                        .get_decoration(*window_id)
-                        .cloned()
-                };
-                items.push((*window_id, rect.clone(), dec));
+    let decorations: Vec<(u64, DecorationMode, bool)> = {
+        let mut decs = Vec::with_capacity(dm.decorations().len());
+        for (id, d) in dm.decorations().iter() {
+            let is_fullscreen = wm
+                .get_window(*id)
+                .map(|w| w.properties.fullscreen)
+                .unwrap_or(true);
+            if !is_fullscreen {
+                decs.push((*id, d.mode, d.focused));
             }
         }
-    }
-    let decorations: Vec<(u64, DecorationMode, bool)> = state
-        .decoration_manager
-        .read()
-        .decorations()
-        .iter()
-        .filter(|(id, _)| {
-            wm.get_window(**id)
-                .map(|w| !w.properties.fullscreen)
-                .unwrap_or(true)
-        })
-        .map(|(id, d)| (*id, d.mode, d.focused))
-        .collect();
+        decs
+    };
     drop(wm);
+    drop(dm);
 
     let (w, h) = (state.window_width as i32, state.window_height as i32);
 
     // Import client buffers FIRST (before frame creation, to avoid double-borrowing renderer).
     // Walk the full subsurface tree for each visible window so child buffers are cached too.
-    let surfaces_to_import: Vec<WlSurface> = items
-        .iter()
-        .filter_map(|(window_id, _rect, _dec)| {
-            state.window_map.get(window_id).and_then(|surface_id| {
-                state
-                    .toplevels
-                    .get(surface_id)
-                    .map(|t| t.wl_surface().clone())
-            })
-        })
-        .collect();
+    let surfaces_to_import: Vec<WlSurface> = {
+        let mut surfaces = Vec::with_capacity(items.len());
+        for (window_id, _rect, _dec) in &items {
+            if let Some(&surface_id) = state.window_map.get(window_id) {
+                if let Some(t) = state.toplevels.get(&surface_id) {
+                    surfaces.push(t.wl_surface().clone());
+                }
+            }
+        }
+        surfaces
+    };
     for surface in &surfaces_to_import {
         import_surface_tree(state, renderer, surface);
     }
@@ -685,12 +683,10 @@ fn render_scene_into(
     // Items are in back-to-front order, so reversed iteration is front-to-back.
     let mut occluded_windows: HashSet<u64> = HashSet::new();
     {
-        let mut occluded_regions: Vec<Rectangle<i32, Physical>> = Vec::new();
+        let dm = state.decoration_manager.read();
+        let mut occluded_regions: Vec<Rectangle<i32, Physical>> = Vec::with_capacity(items.len());
         for (window_id, rect, _dec) in items.iter().rev() {
-            let content = state
-                .decoration_manager
-                .read()
-                .get_content_rect(*window_id, rect.clone());
+            let content = dm.get_content_rect(*window_id, rect.clone());
             let content_rect: Rectangle<i32, Physical> = Rectangle::new(
                 Point::from((content.x, content.y)),
                 Size::from((content.width as i32, content.height as i32)),
@@ -704,7 +700,7 @@ fn render_scene_into(
             }
             occluded_regions.push(content_rect);
         }
-    }
+    } // dm dropped here, unblocking &mut state in the drawing loop
 
     for (window_id, rect, dec) in &items {
         let content = state

@@ -6,35 +6,30 @@ workspaces and GLES rendering. It is an alpha-stage prototype.
 ## Build
 
 ```sh
-cargo build
-```
-
-For an optimized binary:
-
-```sh
-cargo build --release
+cargo build                    # debug build
+cargo build --release          # optimized binary
 ```
 
 ## Test
 
-Run the full test suite:
-
 ```sh
-cargo test              # unit + integration tests
-cargo test --all-targets  # includes benches and integration tests
+cargo test                     # unit + integration tests
+cargo test --all-targets       # includes benches and integration tests
+xvfb-run -a cargo test         # run all tests (including xvfb-required)
 ```
 
-Note: a few tests require an X server (`xvfb-run`). They are marked
-`#[ignore]` and are skipped by default.
+A few tests require an X server (`xvfb-run`). They are marked `#[ignore]`
+and are skipped by default.
 
 ## Code quality
 
 Ensure your changes are clean before submitting:
 
 ```sh
-cargo fmt --check       # formatting
+cargo fmt --check              # formatting
 cargo clippy --all-targets -- -D warnings  # lints
-cargo test --workspace  # all tests pass
+cargo test --workspace         # all tests pass
+cargo doc --no-deps            # documentation compiles without warnings
 ```
 
 ## Pull request workflow
@@ -67,3 +62,9 @@ cargo test --workspace  # all tests pass
 | `src/window/` | Window registry and state |
 | `src/ipc/` | Unix-socket IPC protocol and server |
 | `src/config/` | TOML configuration model and validation |
+
+## More details
+
+See [docs/dev/CONTRIBUTING.md](docs/dev/CONTRIBUTING.md) for a more detailed
+contributing guide, and [docs/dev/BUILD.md](docs/dev/BUILD.md) for build
+and test specifics.

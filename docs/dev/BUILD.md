@@ -1,51 +1,85 @@
 # Building Axiom
 
-## Build artifacts
+## Build dependencies
 
-- **Debug**: `cargo build` → `target/debug/axiom`
-- **Release**: `cargo build --release` → `target/release/axiom`
+See [docs/user/INSTALL.md](../user/INSTALL.md) for system-specific dependency
+installation (Ubuntu, Arch, Fedora).
 
-For current development, the debug build is usually the most useful because logging is valuable.
-
-## Runtime recommendation
-
-The recommended evaluation target is the nested compositor path:
+## Build commands
 
 ```bash
-cargo run -- --windowed --debug
+cargo build                    # debug build → target/debug/axiom
+cargo build --release          # optimized build → target/release/axiom
 ```
+
+For development, the debug build is usually preferred because logging is
+valuable and compile times are shorter.
 
 ## Cargo features
 
-Axiom currently defines only a small feature surface:
+Axiom defines a minimal feature surface:
 
 - `default`: empty
 - `examples`: builds the `metrics_client` example
+- `multi-output-experimental`: enables multi-output render infrastructure (experimental)
+
+## Running the compositor
+
+```bash
+cargo run -- --debug
+```
+
+The `--windowed` flag is accepted but redundant — the compositor always uses
+the winit backend. See [Running](../user/RUNNING.md) for details.
 
 ## Tests
 
 ```bash
-# library/unit-style tests
+# Library/unit tests
 cargo test --lib
 
-# integration tests
+# Integration tests
 cargo test --test integration_tests
 
-# all tests
+# All tests (unit + integration)
 cargo test
+
+# All targets (includes benches)
+cargo test --all-targets
+
+# Run tests requiring an X server (e.g., screencopy)
+xvfb-run -a cargo test
+
+# Run with specific features
+cargo test --features multi-output-experimental
 ```
 
-Some graphics-related tests may require a GPU or a virtual display. Integration tests run headless via the `Noop` backend.
+Some graphics-related tests require a GPU or virtual display (`xvfb-run`).
+Tests that need an X server are marked `#[ignore]` and skipped by default.
+
+## Automated smoke test
+
+```bash
+cargo build
+xvfb-run -a ./scripts/nested_smoke_test.sh ./target/debug/axiom
+```
+
+This launches Axiom under `xvfb`, probes its Wayland socket, starts
+`weston-terminal`, waits for a mapped XDG toplevel, then verifies clean
+teardown.
 
 ## Benchmarks
 
-Axiom's benchmark suite is implemented with Criterion in:
+```bash
+cargo bench
+```
 
-- `benches/compositor_benchmarks.rs`
+Benchmarks use Criterion and live in `benches/compositor_benchmarks.rs`.
+
+## Documentation
 
 ```bash
-# run the benchmark suite once
-cargo bench
+cargo doc --no-deps --open
 ```
 
 ## Security checks
@@ -53,3 +87,5 @@ cargo bench
 ```bash
 bash ./scripts/check_security.sh all
 ```
+
+Runs `cargo audit` and `cargo deny` against the dependency tree.
