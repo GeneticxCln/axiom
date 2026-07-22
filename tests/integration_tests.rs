@@ -635,6 +635,45 @@ fn test_compositor_set_clipboard_dispatch() -> Result<()> {
     Ok(())
 }
 
+/// Test that StartDnd IPC command is forwarded through the pipeline
+#[test]
+#[serial_test::serial]
+fn test_ipc_start_dnd_flow() -> Result<()> {
+    use axiom::config::AxiomConfig;
+    use axiom::ipc::LazyUIMessage;
+
+    let mut config = AxiomConfig::default();
+    let mut ipc_server = AxiomIPCServer::new();
+
+    ipc_server.start()?;
+
+    // Simulate sending a StartDnd command through the command channel
+    let cmd = LazyUIMessage::StartDnd {
+        text: "hello from dnd".into(),
+        mime_type: "text/plain".into(),
+    };
+
+    ipc_server.command_sender_for_test().send(cmd).unwrap();
+
+    // Process the message
+    let (changed, actions) = ipc_server.process_messages(&mut config)?;
+
+    // StartDnd is a command-type message — forwarded to pending_actions
+    assert!(!changed, "StartDnd should not change config");
+    assert_eq!(actions.len(), 1, "one pending action");
+    match &actions[0] {
+        LazyUIMessage::StartDnd { text, mime_type } => {
+            assert_eq!(text, "hello from dnd");
+            assert_eq!(mime_type, "text/plain");
+        }
+        _ => panic!("Expected StartDnd"),
+    }
+
+    ipc_server.shutdown_sync();
+
+    Ok(())
+}
+
 // ============================================================================
 // Compositor Event Loop Integration Tests
 // ============================================================================

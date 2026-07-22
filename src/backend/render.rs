@@ -27,7 +27,7 @@ use smithay::wayland::compositor::{
 use smithay::wayland::session_lock::LockSurface;
 use smithay::wayland::shell::wlr_layer::LayerSurfaceCachedState;
 use smithay::wayland::shm::with_buffer_contents_mut;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use wayland_server::backend::ObjectId;
 use wayland_server::protocol::wl_buffer::WlBuffer;
 use wayland_server::protocol::wl_surface::WlSurface;
@@ -646,6 +646,32 @@ fn render_scene_into(
         return Ok(());
     }
 
+    // Occlusion culling: process front-to-back to identify fully covered windows,
+    // then draw back-to-front skipping occluded surface trees.
+    // Items are in back-to-front order, so reversed iteration is front-to-back.
+    let mut occluded_windows: HashSet<u64> = HashSet::new();
+    {
+        let mut occluded_regions: Vec<Rectangle<i32, Physical>> = Vec::new();
+        for (window_id, rect, _dec) in items.iter().rev() {
+            let content = state
+                .decoration_manager
+                .read()
+                .get_content_rect(*window_id, rect.clone());
+            let content_rect: Rectangle<i32, Physical> = Rectangle::new(
+                Point::from((content.x, content.y)),
+                Size::from((content.width as i32, content.height as i32)),
+            );
+            // Check if this window is fully covered by any already-rendered region
+            let covered = occluded_regions
+                .iter()
+                .any(|r| r.contains_rect(content_rect));
+            if covered {
+                occluded_windows.insert(*window_id);
+            }
+            occluded_regions.push(content_rect);
+        }
+    }
+
     for (window_id, rect, dec) in &items {
         let content = state
             .decoration_manager
@@ -673,18 +699,21 @@ fn render_scene_into(
             &[g],
             &[],
         )?;
-        // Draw the full surface tree (including subsurfaces) from the texture cache
-        if let Some(&surface_id) = state.window_map.get(window_id) {
-            if let Some(t) = state.toplevels.get(&surface_id) {
-                let wl_surface = t.wl_surface().clone();
-                draw_surface_tree(
-                    state,
-                    &mut frame,
-                    &wl_surface,
-                    content.x as f64,
-                    content.y as f64,
-                    scale,
-                )?;
+        // Draw the full surface tree (including subsurfaces) from the texture cache,
+        // unless this window is fully occluded (behind another opaque window).
+        if !occluded_windows.contains(window_id) {
+            if let Some(&surface_id) = state.window_map.get(window_id) {
+                if let Some(t) = state.toplevels.get(&surface_id) {
+                    let wl_surface = t.wl_surface().clone();
+                    draw_surface_tree(
+                        state,
+                        &mut frame,
+                        &wl_surface,
+                        content.x as f64,
+                        content.y as f64,
+                        scale,
+                    )?;
+                }
             }
         }
     }

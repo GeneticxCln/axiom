@@ -214,6 +214,10 @@ impl AxiomCompositor {
                             debug!("Set blur radius {} for window {}", radius, window_id);
                             self.smithay_backend.state.needs_redraw = true;
                         }
+                        LazyUIMessage::StartDnd { text, mime_type } => {
+                            info!("📱 Starting server DnD with {} bytes via {}", text.len(), mime_type);
+                            self.smithay_backend.start_server_dnd(text.into_bytes(), mime_type);
+                        }
                         _ => {
                             warn!("Unexpected pending action variant from IPC queue");
                         }

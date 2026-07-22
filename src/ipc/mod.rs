@@ -213,6 +213,14 @@ pub enum LazyUIMessage {
 
     /// Set compositor clipboard content
     SetClipboard { text: String },
+
+    /// Start a server-initiated drag-and-drop session with text data.
+    /// The compositor sets clipboard cache data and triggers a DnD grab
+    /// via the current pointer state (if a pointer is available).
+    StartDnd {
+        text: String,
+        mime_type: String,
+    },
 }
 
 /// Per-client IPC connection state
@@ -585,6 +593,7 @@ impl AxiomIPCServer {
     fn process_client_lines(&mut self, fd: RawFd) {
         // Extract complete lines from the client's read buffer, releasing the
         // borrow before calling handle_message (which needs &mut self).
+        let mut oversized = false;
         let lines: Vec<String> = {
             let client = match self.clients.get_mut(&fd) {
                 Some(c) => c,
@@ -604,6 +613,7 @@ impl AxiomIPCServer {
                         fd
                     );
                     client.read_buf.clear();
+                    oversized = true;
                     break;
                 }
                 if line.is_empty() {
@@ -613,6 +623,11 @@ impl AxiomIPCServer {
             }
             extracted
         };
+
+        if oversized {
+            self.remove_client(fd);
+            return;
+        }
 
         // Process extracted lines (borrow released, so we can call handle_message)
         for trimmed in lines {
@@ -626,8 +641,8 @@ impl AxiomIPCServer {
                 Ok(message) => {
                     self.handle_message(fd, message);
                 }
-                Err(e) => {
-                    warn!("⚠️ Invalid JSON from IPC client: {}", e);
+                Err(_) => {
+                    warn!("⚠️ Invalid JSON message received");
                 }
             }
         }
@@ -639,6 +654,7 @@ impl AxiomIPCServer {
             LazyUIMessage::WorkspaceCommand { .. }
                 | LazyUIMessage::SetWindowBlur { .. }
                 | LazyUIMessage::SetClipboard { .. }
+                | LazyUIMessage::StartDnd { .. }
         );
 
         if is_command_type {
@@ -683,6 +699,16 @@ impl AxiomIPCServer {
                         "dispatched_via_mpsc": true,
                     }),
                 ),
+                LazyUIMessage::StartDnd { text, mime_type } => (
+                    "StartDndAck",
+                    serde_json::json!({
+                        "status": "queued_for_compositor_dispatch",
+                        "text_length": text.len(),
+                        "mime_type": mime_type,
+                        "accepted": true,
+                        "dispatched_via_mpsc": true,
+                    }),
+                ),
                 _ => unreachable!("is_command_type gated above"),
             };
 
@@ -696,6 +722,7 @@ impl AxiomIPCServer {
                         "WorkspaceCommandAck" => "WorkspaceCommandAckFailed",
                         "SetWindowBlurAck" => "SetWindowBlurAckFailed",
                         "SetClipboardAck" => "SetClipboardAckFailed",
+                        "StartDndAck" => "StartDndAckFailed",
                         _ => "CommandAckFailed",
                     };
                     (
@@ -984,7 +1011,8 @@ impl AxiomIPCServer {
                     // by the compositor in `AxiomCompositor::process_events`.
                     LazyUIMessage::WorkspaceCommand { .. }
                     | LazyUIMessage::SetWindowBlur { .. }
-                    | LazyUIMessage::SetClipboard { .. } => {
+                    | LazyUIMessage::SetClipboard { .. }
+                    | LazyUIMessage::StartDnd { .. } => {
                         pending_actions.push(message);
                     }
                     _ => {
@@ -1577,5 +1605,180 @@ mod tests {
         );
         let result = serde_json::from_str::<crate::ipc::LazyUIMessage>(&huge);
         let _ = result;
+    }
+
+    /// Issue #3 hardening: the full handler path must reject an unknown
+    /// workspace action without panicking and return an ACK with
+    /// status "unknown_action". Uses a Unix socket pair so the message
+    /// flows through read_from_clients → process_client_lines → handle_message
+    /// → queue_message_to_client → write_to_clients, exercising the same
+    /// production code paths a real TCP-style client would hit.
+    #[test]
+    fn test_reject_unknown_workspace_action_in_handler() {
+        let mut server = AxiomIPCServer::new();
+        let (mut client, server_stream) = UnixStream::pair().unwrap();
+        server_stream.set_nonblocking(true).unwrap();
+        let fd = server_stream.as_raw_fd();
+
+        server.clients.insert(
+            fd,
+            ClientData {
+                stream: server_stream,
+                read_buf: Vec::new(),
+                write_buf: Vec::new(),
+                last_activity: Instant::now(),
+                messages_this_tick: 0,
+            },
+        );
+        server.num_connections.fetch_add(1, Ordering::Relaxed);
+
+        // Send a WorkspaceCommand with an action NOT in KNOWN_WORKSPACE_ACTIONS
+        let msg =
+            b"{\"type\":\"WorkspaceCommand\",\"action\":\"nuke_all_windows\",\"parameters\":{}}\n";
+        client.write_all(msg).unwrap();
+
+        // Let the full poll cycle process it
+        server.poll();
+
+        // Read the response — should contain "unknown_action"
+        let mut buf = [0u8; 4096];
+        let n = client.read(&mut buf).unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            response.contains("unknown_action"),
+            "Response should contain unknown_action, got: {}",
+            response
+        );
+    }
+
+    /// Issue #3 hardening: sending a line larger than MAX_IPC_LINE_BYTES
+    /// must disconnect the client (clear read_buf, remove from map).
+    /// Sends the oversized data through a real socket pair so
+    /// read_from_clients + process_client_lines exercise the same
+    /// code path as a live connection.
+    #[test]
+    fn test_oversized_line_disconnects_client() {
+        let mut server = AxiomIPCServer::new();
+        let (mut client, server_stream) = UnixStream::pair().unwrap();
+        server_stream.set_nonblocking(true).unwrap();
+        let fd = server_stream.as_raw_fd();
+
+        server.clients.insert(
+            fd,
+            ClientData {
+                stream: server_stream,
+                read_buf: Vec::new(),
+                write_buf: Vec::new(),
+                last_activity: Instant::now(),
+                messages_this_tick: 0,
+            },
+        );
+        server.num_connections.fetch_add(1, Ordering::Relaxed);
+
+        // Write a line one byte over the limit
+        let oversized = format!("{}\n", "x".repeat(MAX_IPC_LINE_BYTES + 1));
+        client.write_all(oversized.as_bytes()).unwrap();
+
+        // poll() → read_from_clients → process_client_lines → remove_client
+        server.poll();
+
+        // Client must be disconnected
+        assert!(
+            !server.clients.contains_key(&fd),
+            "Oversized-line client should be disconnected"
+        );
+    }
+
+    /// Issue #3 hardening: a client whose write buffer exceeds
+    /// MAX_WRITE_BUF_BYTES must be disconnected by write_to_clients.
+    /// Sets a write buffer far enough over the limit that even after the
+    /// kernel drains whatever it can on the first non-blocking write
+    /// attempt, the remaining buffer still exceeds the limit.
+    #[test]
+    fn test_backpressure_disconnects_slow_consumer() {
+        let mut server = AxiomIPCServer::new();
+        let (_client, server_stream) = UnixStream::pair().unwrap();
+        server_stream.set_nonblocking(true).unwrap();
+        let fd = server_stream.as_raw_fd();
+
+        server.clients.insert(
+            fd,
+            ClientData {
+                stream: server_stream,
+                read_buf: Vec::new(),
+                // Start with a write buffer 100x over the limit — the
+                // kernel will drain at most a few hundred KB before
+                // returning WouldBlock, leaving ample excess to trigger
+                // the backpressure check.
+                write_buf: vec![0u8; MAX_WRITE_BUF_BYTES * 100],
+                last_activity: Instant::now(),
+                messages_this_tick: 0,
+            },
+        );
+        server.num_connections.fetch_add(1, Ordering::Relaxed);
+
+        // poll() → write_to_clients → backpressure check → remove_client
+        server.poll();
+
+        assert!(
+            !server.clients.contains_key(&fd),
+            "Slow consumer should be disconnected due to backpressure"
+        );
+    }
+
+    /// Issue #3 hardening: OptimizeConfig handler must reject scroll_speed
+    /// values outside the valid range [0.0, MAX_SCROLL_SPEED] and report
+    /// the rejection in the ACK (status "invalid_or_out_of_range_value").
+    /// Exercises the full handler path via a real socket pair.
+    #[test]
+    fn test_reject_out_of_range_scroll_speed() {
+        let mut server = AxiomIPCServer::new();
+        let (mut client, server_stream) = UnixStream::pair().unwrap();
+        server_stream.set_nonblocking(true).unwrap();
+        let fd = server_stream.as_raw_fd();
+
+        server.clients.insert(
+            fd,
+            ClientData {
+                stream: server_stream,
+                read_buf: Vec::new(),
+                write_buf: Vec::new(),
+                last_activity: Instant::now(),
+                messages_this_tick: 0,
+            },
+        );
+        server.num_connections.fetch_add(1, Ordering::Relaxed);
+
+        // Send OptimizeConfig with a negative scroll_speed
+        let msg = b"{\"type\":\"OptimizeConfig\",\"changes\":{\"workspace.scroll_speed\":-1.0},\"reason\":\"test\"}\n";
+        client.write_all(msg).unwrap();
+        server.poll();
+
+        let mut buf = [0u8; 4096];
+        let n = client.read(&mut buf).unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            response.contains("invalid_or_out_of_range_value"),
+            "Negative scroll_speed should be rejected: {}",
+            response
+        );
+
+        // Send OptimizeConfig with a scroll_speed over MAX_SCROLL_SPEED
+        let over_max = MAX_SCROLL_SPEED + 1.0;
+        let msg = format!(
+            "{{\"type\":\"OptimizeConfig\",\"changes\":{{\"workspace.scroll_speed\":{}}},\"reason\":\"test\"}}\n",
+            over_max
+        );
+        client.write_all(msg.as_bytes()).unwrap();
+        server.poll();
+
+        let mut buf = [0u8; 4096];
+        let n = client.read(&mut buf).unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            response.contains("invalid_or_out_of_range_value"),
+            "scroll_speed > MAX_SCROLL_SPEED should be rejected: {}",
+            response
+        );
     }
 }

@@ -11,8 +11,13 @@
 //! macros / trait impls must remain co-located there; it calls the workers
 //! defined here.
 
-use log::{debug, warn};
-use smithay::wayland::selection::data_device::set_data_device_selection;
+use log::{debug, info, warn};
+use smithay::input::pointer::GrabStartData;
+use smithay::reexports::wayland_server::protocol::wl_data_device_manager::DndAction;
+use smithay::utils::{Point, Serial};
+use smithay::wayland::selection::data_device::{
+    set_data_device_selection, start_dnd, SourceMetadata,
+};
 use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::sync::mpsc;
@@ -96,5 +101,53 @@ impl AxiomSmithayBackendReal {
             ],
             (),
         );
+    }
+
+    /// Start a server-initiated drag-and-drop session with the given payload.
+    ///
+    /// Populates the clipboard cache (so `ServerDndGrabHandler::send` serves the
+    /// data) and initiates a real DnD grab on the seat's pointer if one exists.
+    /// In headless/test environments without a pointer, the data is still cached
+    /// and can be served via `ServerDndGrabHandler::send` directly.
+    pub fn start_server_dnd(&mut self, data: Vec<u8>, mime_type: String) {
+        info!(
+            "📱 Server-initiated DnD: {} bytes via {}",
+            data.len(),
+            mime_type
+        );
+        self.state.clipboard_cache = Some(data.clone());
+
+        // Try to start a real DnD grab if a pointer is available.
+        // Extract what we need before the mutable borrow.
+        let seat = self.state.seat.clone();
+        let dh = self.display.handle();
+
+        let metadata = SourceMetadata {
+            mime_types: vec![mime_type.clone()],
+            dnd_action: DndAction::Copy,
+        };
+
+        if let Some(pointer) = seat.get_pointer() {
+            let grab_start_data = pointer
+                .grab_start_data()
+                .unwrap_or(GrabStartData {
+                    focus: None,
+                    button: 0,
+                    location: Point::from((0.0, 0.0)),
+                });
+            let serial = Serial::from(0);
+            start_dnd(
+                &dh,
+                &seat,
+                &mut self.state,
+                serial,
+                Some(grab_start_data),
+                None,
+                metadata,
+            );
+            info!("📱 DnD grab started on pointer");
+        } else {
+            info!("📱 No pointer available — DnD data cached, grab deferred");
+        }
     }
 }

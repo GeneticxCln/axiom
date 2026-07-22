@@ -94,6 +94,7 @@ examples = []
 # Development dependencies for testing
 [dev-dependencies]
 criterion = "0.5"
+lru = "0.12"
 proptest = "1.4"  # Property-based testing
 # Integration testing utilities
 tempfile = "3.0"  # Temporary files and directories for tests
